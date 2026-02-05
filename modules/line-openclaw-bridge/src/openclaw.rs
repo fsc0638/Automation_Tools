@@ -12,21 +12,37 @@ pub struct OpenClawClient {
     gateway_token: Option<String>,
 }
 
-/// 發送給 OpenClaw 的訊息
-#[derive(Debug, Serialize)]
-pub struct ChatRequest {
-    pub message: String,
-    pub user_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
+/// Chat message for OpenAI-compatible API
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
 }
 
-/// OpenClaw 的回應
+/// 發送給 OpenClaw Chat Completions 的請求
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+}
+
+/// Chat Completions API 的回應
 #[derive(Debug, Deserialize)]
-pub struct ChatResponse {
-    pub response: Option<String>,
-    pub error: Option<String>,
-    pub status: Option<String>,
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    pub model: String,
+    pub choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChatChoice {
+    pub index: i32,
+    pub message: ChatMessage,
+    pub finish_reason: String,
 }
 
 /// OpenClaw 健康檢查回應
@@ -39,7 +55,10 @@ impl OpenClawClient {
     /// 建立新的 OpenClaw 客戶端
     pub fn new(base_url: String, gateway_token: Option<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url,
             gateway_token,
         }
@@ -58,68 +77,61 @@ impl OpenClawClient {
     }
 
     /// 發送訊息給 OpenClaw 並取得回應
-    /// 
-    /// OpenClaw 主要透過 WebSocket 或 CLI 互動，
-    /// 這裡我們嘗試透過 HTTP API 發送訊息
+    /// 使用 OpenAI-compatible Chat Completions API
     pub async fn send_message(&self, user_id: &str, message: &str) -> Result<String, String> {
         info!("Sending message to OpenClaw: user={}, message={}", user_id, message);
         
-        // 嘗試多種可能的 API 端點
-        let endpoints = [
-            "/api/chat",
-            "/api/message",
-            "/chat",
-            "/message",
-        ];
+        let url = format!("{}/v1/chat/completions", self.base_url);
         
-        for endpoint in endpoints {
-            let url = format!("{}{}", self.base_url, endpoint);
-            
-            let request = ChatRequest {
-                message: message.to_string(),
-                user_id: user_id.to_string(),
-                context: None,
-            };
-            
-            let mut req_builder = self.client
-                .post(&url)
-                .header("Content-Type", "application/json");
-            
-            // 如果有 gateway token，加入認證
-            if let Some(ref token) = self.gateway_token {
-                req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
-            }
-            
-            match req_builder.json(&request).send().await {
-                Ok(response) if response.status().is_success() => {
-                    match response.json::<ChatResponse>().await {
-                        Ok(chat_response) => {
-                            if let Some(resp) = chat_response.response {
-                                return Ok(resp);
-                            }
-                            if let Some(err) = chat_response.error {
-                                return Err(err);
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to parse OpenClaw response: {}", e);
-                            continue;
-                        }
-                    }
+        // 構建 Chat Completions 請求
+        let request = ChatCompletionRequest {
+            model: "google-antigravity/claude-opus-4-5-thinking".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: message.to_string(),
                 }
-                Ok(response) => {
-                    info!("Endpoint {} returned status: {}", endpoint, response.status());
-                    continue;
-                }
-                Err(e) => {
-                    error!("Failed to connect to {}: {}", endpoint, e);
-                    continue;
-                }
-            }
+            ],
+            stream: Some(false),
+        };
+        
+        // 建立請求
+        let mut req_builder = self.client
+            .post(&url)
+            .header("Content-Type", "application/json");
+        
+        // 加入認證 token
+        if let Some(ref token) = self.gateway_token {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
         }
         
-        // 如果所有端點都失敗，返回提示訊息
-        Err("無法連接到 OpenClaw。請確認 OpenClaw 正在運行。".to_string())
+        // 發送請求
+        match req_builder.json(&request).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<ChatCompletionResponse>().await {
+                    Ok(chat_response) => {
+                        if let Some(choice) = chat_response.choices.first() {
+                            info!("Got response from OpenClaw: {}", choice.message.content);
+                            return Ok(choice.message.content.clone());
+                        }
+                        Err("OpenClaw 回應格式錯誤：沒有選擇項".to_string())
+                    }
+                    Err(e) => {
+                        error!("Failed to parse OpenClaw response: {}", e);
+                        Err(format!("解析 OpenClaw 回應失敗: {}", e))
+                    }
+                }
+            }
+            Ok(response) => {
+                let status = response.status();
+                error!("OpenClaw returned error status: {}", status);
+                Err(format!("OpenClaw 返回錯誤狀態: {}", status))
+            }
+            Err(e) => {
+                error!("Failed to connect to OpenClaw: {}", e);
+                Err(format!("無法連接到 OpenClaw: {}", e))
+            }
+        }
     }
 
     /// 透過 WebSocket 連接 OpenClaw（進階功能）
