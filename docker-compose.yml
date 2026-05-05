@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kway_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/kway_dev
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
+      OPENCLAW_API_URL: ${OPENCLAW_API_URL:-https://api.openai.com/v1}
+      OPENCLAW_API_KEY: ${OPENCLAW_API_KEY}
+      OPENCLAW_MODEL: ${OPENCLAW_MODEL:-gpt-4o}
+      HERMES_API_URL: ${HERMES_API_URL:-https://api.openai.com/v1}
+      HERMES_API_KEY: ${HERMES_API_KEY}
+      HERMES_MODEL: ${HERMES_MODEL:-gpt-4o}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    volumes:
+      - project_data:/app/data
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080/api
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+  project_data:

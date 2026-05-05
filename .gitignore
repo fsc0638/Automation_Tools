@@ -1,0 +1,24 @@
+# Rust
+backend/target/
+backend/.env
+
+# Node
+web/node_modules/
+web/.next/
+web/.env.local
+web/.env
+
+# iOS
+ios/KwayDev.xcodeproj/xcuserdata/
+ios/DerivedData/
+ios/.build/
+
+# Docker
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+backend/data/

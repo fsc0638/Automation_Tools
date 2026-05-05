@@ -1,0 +1,135 @@
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080/api";
+
+function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("kway_token");
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error ?? "Request failed");
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
+// Auth
+export const auth = {
+  register: (data: { email: string; password: string; display_name: string }) =>
+    request<{ access_token: string; user: UserInfo }>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  login: (data: { email: string; password: string }) =>
+    request<{ access_token: string; user: UserInfo }>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// Projects
+export const projects = {
+  list: () => request<Project[]>("/projects"),
+  create: (data: { name: string; description?: string; source_type: string; source_path: string }) =>
+    request<Project>("/projects", { method: "POST", body: JSON.stringify(data) }),
+  get: (id: string) => request<Project>(`/projects/${id}`),
+  delete: (id: string) => request<void>(`/projects/${id}`, { method: "DELETE" }),
+  fileTree: (id: string) => request<FileNode[]>(`/projects/${id}/files`),
+  fileContent: (id: string, path: string) =>
+    request<{ path: string; content: string }>(`/projects/${id}/files/content?path=${encodeURIComponent(path)}`),
+  gitStatus: (id: string) => request<GitStatus>(`/projects/${id}/git/status`),
+};
+
+// Conversations
+export const conversations = {
+  list: (projectId: string) => request<Conversation[]>(`/projects/${projectId}/conversations`),
+  create: (projectId: string, title?: string) =>
+    request<Conversation>(`/projects/${projectId}/conversations`, {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    }),
+  get: (projectId: string, convId: string) =>
+    request<ConversationWithMessages>(`/projects/${projectId}/conversations/${convId}`),
+  sendMessage: (projectId: string, convId: string, data: { content: string; file_path?: string; mode?: string }) =>
+    request<{ messages: Message[] }>(`/projects/${projectId}/conversations/${convId}/messages`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+export function createWsConnection(conversationId: string, projectId: string): WebSocket {
+  const token = getToken();
+  const wsBase = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080")
+    .replace("http", "ws")
+    .replace("/api", "");
+  return new WebSocket(
+    `${wsBase}/api/ws/chat?token=${token}&conversation_id=${conversationId}&project_id=${projectId}`
+  );
+}
+
+// Types
+export interface UserInfo {
+  id: string;
+  email: string;
+  display_name: string;
+}
+
+export interface Project {
+  id: string;
+  user_id: string;
+  name: string;
+  description?: string;
+  source_type: string;
+  source_path: string;
+  local_path?: string;
+  default_branch?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children?: FileNode[];
+}
+
+export interface GitStatus {
+  branch: string;
+  changed: string[];
+  staged: string[];
+  untracked: string[];
+}
+
+export interface Conversation {
+  id: string;
+  project_id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Message {
+  id: string;
+  conversation_id: string;
+  role: "user" | "hermes" | "openclaw" | "system";
+  content: string;
+  agent_name?: string;
+  file_path?: string;
+  created_at: string;
+}
+
+export interface ConversationWithMessages extends Conversation {
+  messages: Message[];
+}
