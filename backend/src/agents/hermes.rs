@@ -15,37 +15,49 @@ pub struct HermesClient {
     model: String,
 }
 
+// Anthropic /v1/messages request
 #[derive(Debug, Serialize)]
-struct ChatRequest {
+struct AnthropicRequest {
     model: String,
-    messages: Vec<ChatMessage>,
+    max_tokens: u32,
+    system: String,
+    messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
-    temperature: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicMessage {
+    role: String, // "user" | "assistant"
+    content: String,
+}
+
+// Non-streaming response
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    content: Vec<ContentBlock>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
+struct ContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: Option<String>,
 }
 
+// Streaming SSE events
 #[derive(Debug, Deserialize)]
-struct Choice {
-    message: ChatMessage,
+struct StreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    delta: Option<StreamDelta>,
 }
 
 #[derive(Debug, Deserialize)]
 struct StreamDelta {
-    content: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChunk {
-    choices: Vec<StreamChoice>,
+    #[serde(rename = "type")]
+    delta_type: Option<String>,
+    text: Option<String>,
 }
 
 impl HermesClient {
@@ -67,46 +79,103 @@ impl HermesClient {
         Format code blocks with proper markdown."
     }
 
+    fn to_anthropic_messages(messages: Vec<ChatMessage>) -> Vec<AnthropicMessage> {
+        messages
+            .into_iter()
+            .filter(|m| m.role != "system")
+            .map(|m| AnthropicMessage {
+                role: if m.role == "user" { "user".into() } else { "assistant".into() },
+                content: m.content,
+            })
+            .collect()
+    }
+
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
-        let mut full = vec![ChatMessage { role: "system".into(), content: Self::system_prompt().into() }];
-        full.extend(messages);
+        let req = AnthropicRequest {
+            model: self.model.clone(),
+            max_tokens: 8192,
+            system: Self::system_prompt().into(),
+            messages: Self::to_anthropic_messages(messages),
+            stream: false,
+        };
 
-        let res = self.client
-            .post(format!("{}/chat/completions", self.api_url))
-            .bearer_auth(&self.api_key)
-            .json(&ChatRequest { model: self.model.clone(), messages: full, stream: false, temperature: 0.6 })
-            .send().await?.error_for_status()?.json::<ChatResponse>().await?;
+        let res: AnthropicResponse = self.client
+            .post(format!("{}/v1/messages", self.api_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&req)
+            .send().await?
+            .error_for_status()?
+            .json().await?;
 
-        Ok(res.choices.into_iter().next().map(|c| c.message.content).unwrap_or_default())
+        Ok(res.content.into_iter()
+            .filter(|b| b.block_type == "text")
+            .filter_map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join(""))
     }
 
     pub fn chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = String> + Send>> {
         let client = self.client.clone();
-        let url = format!("{}/chat/completions", self.api_url);
+        let url = format!("{}/v1/messages", self.api_url);
         let api_key = self.api_key.clone();
         let model = self.model.clone();
-        let mut full = vec![ChatMessage { role: "system".into(), content: Self::system_prompt().into() }];
-        full.extend(messages);
+        let anthropic_messages = Self::to_anthropic_messages(messages);
 
         Box::pin(async_stream::stream! {
-            let req = ChatRequest { model, messages: full, stream: true, temperature: 0.6 };
-            let response = match client.post(&url).bearer_auth(&api_key).json(&req).send().await {
+            let req = AnthropicRequest {
+                model,
+                max_tokens: 8192,
+                system: Self::system_prompt().into(),
+                messages: anthropic_messages,
+                stream: true,
+            };
+
+            let response = match client
+                .post(&url)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&req)
+                .send().await
+            {
                 Ok(r) => r,
                 Err(e) => { yield format!("[Hermes error: {}]", e); return; }
             };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                yield format!("[Hermes error: {} — {}]", status, body);
+                return;
+            }
+
             let mut stream = response.bytes_stream();
+            let mut buf = String::new();
+
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk { Ok(c) => c, Err(_) => break };
-                let text = String::from_utf8_lossy(&chunk).to_string();
-                for line in text.lines() {
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete lines from buffer
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].trim().to_string();
+                    buf = buf[pos + 1..].to_string();
+
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" { return; }
-                        if let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) {
-                            for choice in parsed.choices {
-                                if let Some(content) = choice.delta.content {
-                                    yield content;
+                        if let Ok(event) = serde_json::from_str::<StreamEvent>(data) {
+                            if event.event_type == "content_block_delta" {
+                                if let Some(delta) = event.delta {
+                                    if delta.delta_type.as_deref() == Some("text_delta") {
+                                        if let Some(text) = delta.text {
+                                            yield text;
+                                        }
+                                    }
                                 }
                             }
+                            if event.event_type == "message_stop" { return; }
                         }
                     }
                 }
