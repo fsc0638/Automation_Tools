@@ -104,7 +104,20 @@ struct ProjectDetailView: View {
             } else {
                 List(convsList) { conv in
                     NavigationLink(destination: ConversationView(project: project, conversation: conv)) {
-                        Label(conv.title, systemImage: "bubble.left.fill")
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Label(conv.title, systemImage: iconName(for: conv.mode))
+                                    .font(.body.weight(.medium))
+                                Spacer(minLength: 8)
+                                Text(conv.modeDisplayName)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(modeColor(for: conv.mode).opacity(0.12))
+                                    .foregroundColor(modeColor(for: conv.mode))
+                                    .clipShape(Capsule())
+                            }
+                        }
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -116,6 +129,22 @@ struct ProjectDetailView: View {
                 convsList = try await APIService.shared.listConversations(projectId: project.id)
             } catch {}
             isLoading = false
+        }
+    }
+
+    private func iconName(for mode: String) -> String {
+        switch mode {
+        case "hermes": return "brain"
+        case "debate": return "person.2.fill"
+        default: return "bubble.left.fill"
+        }
+    }
+
+    private func modeColor(for mode: String) -> Color {
+        switch mode {
+        case "hermes": return Color(red: 0.486, green: 0.227, blue: 0.929)
+        case "debate": return Color(red: 0.792, green: 0.353, blue: 0.0)
+        default: return Color(red: 0.0, green: 0.314, blue: 0.627)
         }
     }
 }

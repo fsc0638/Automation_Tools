@@ -40,7 +40,7 @@ export const auth = {
 // Projects
 export const projects = {
   list: () => request<Project[]>("/projects"),
-  create: (data: { name: string; description?: string; source_type: string; source_path: string }) =>
+  create: (data: CreateProjectInput) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(data) }),
   get: (id: string) => request<Project>(`/projects/${id}`),
   delete: (id: string) => request<void>(`/projects/${id}`, { method: "DELETE" }),
@@ -48,15 +48,31 @@ export const projects = {
   fileContent: (id: string, path: string) =>
     request<{ path: string; content: string }>(`/projects/${id}/files/content?path=${encodeURIComponent(path)}`),
   gitStatus: (id: string) => request<GitStatus>(`/projects/${id}/git/status`),
+  gitBranches: (id: string) => request<{ branches: string[] }>(`/projects/${id}/git/branches`),
+  checkoutBranch: (id: string, branch: string) =>
+    request<Project>(`/projects/${id}/git/checkout`, { method: "POST", body: JSON.stringify({ branch }) }),
+  remoteBranches: (url: string, git_identity_id?: string) =>
+    request<{ branches: string[] }>("/git/remote-branches", {
+      method: "POST",
+      body: JSON.stringify({ url, git_identity_id: git_identity_id ?? null }),
+    }),
+};
+
+export const gitIdentities = {
+  list: () => request<GitIdentity[]>("/git/identities"),
+  create: (data: { name: string; provider?: string; username: string; access_token: string }) =>
+    request<GitIdentity>("/git/identities", { method: "POST", body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/git/identities/${id}`, { method: "DELETE" }),
 };
 
 // Conversations
 export const conversations = {
-  list: (projectId: string) => request<Conversation[]>(`/projects/${projectId}/conversations`),
-  create: (projectId: string, title?: string) =>
+  list: (projectId: string, mode?: AgentMode) =>
+    request<Conversation[]>(`/projects/${projectId}/conversations${mode ? `?mode=${mode}` : ""}`),
+  create: (projectId: string, title?: string, mode?: AgentMode) =>
     request<Conversation>(`/projects/${projectId}/conversations`, {
       method: "POST",
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, mode }),
     }),
   get: (projectId: string, convId: string) =>
     request<ConversationWithMessages>(`/projects/${projectId}/conversations/${convId}`),
@@ -84,6 +100,15 @@ export interface UserInfo {
   display_name: string;
 }
 
+export interface CreateProjectInput {
+  name: string;
+  description?: string;
+  source_type: string;
+  source_path: string;
+  git_identity_id?: string;
+  default_branch?: string;
+}
+
 export interface Project {
   id: string;
   user_id: string;
@@ -93,6 +118,17 @@ export interface Project {
   source_path: string;
   local_path?: string;
   default_branch?: string;
+  git_identity_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitIdentity {
+  id: string;
+  user_id: string;
+  name: string;
+  provider: string;
+  username: string;
   created_at: string;
   updated_at: string;
 }
@@ -111,11 +147,14 @@ export interface GitStatus {
   untracked: string[];
 }
 
+export type AgentMode = "openclaw" | "hermes" | "debate";
+
 export interface Conversation {
   id: string;
   project_id: string;
   user_id: string;
   title: string;
+  mode: AgentMode;
   created_at: string;
   updated_at: string;
 }

@@ -39,12 +39,22 @@ struct Conversation: Codable, Identifiable {
     let projectId: String
     let userId: String
     let title: String
+    let mode: String
     let createdAt: String
     let updatedAt: String
+
     enum CodingKeys: String, CodingKey {
-        case id, title
+        case id, title, mode
         case projectId = "project_id", userId = "user_id"
         case createdAt = "created_at", updatedAt = "updated_at"
+    }
+
+    var modeDisplayName: String {
+        switch mode {
+        case "hermes": return "Hermes"
+        case "debate": return "Debate"
+        default: return "OpenClaw"
+        }
     }
 }
 
