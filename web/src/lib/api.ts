@@ -81,6 +81,8 @@ export const conversations = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  delete: (projectId: string, convId: string) =>
+    request<void>(`/projects/${projectId}/conversations/${convId}`, { method: "DELETE" }),
 };
 
 export function createWsConnection(conversationId: string, projectId: string): WebSocket {

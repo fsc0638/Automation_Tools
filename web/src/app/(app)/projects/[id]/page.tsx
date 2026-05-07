@@ -5,7 +5,8 @@ import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
   MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
-  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, AlertCircle, ArrowDown
+  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, AlertCircle, ArrowDown,
+  RefreshCw, Trash2
 } from "lucide-react";
 import {
   projects as projectsApi, conversations as convsApi,
@@ -43,6 +44,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [streaming, setStreaming] = useState(false);
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const streamBuffersRef = useRef<Record<string, string>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const [wsReconnectKey, setWsReconnectKey] = useState(0);
@@ -213,6 +215,43 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setActiveConv(conv);
   }
 
+  async function refreshProject() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const p = await projectsApi.get(id);
+      const [files, branchData] = await Promise.all([
+        projectsApi.fileTree(id).catch(() => []),
+        p.source_type === "git"
+          ? projectsApi.gitBranches(id).catch(() => ({ branches: [] }))
+          : Promise.resolve({ branches: [] }),
+      ]);
+      setProject(p);
+      setFileTree(files);
+      setBranches(branchData.branches);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function deleteConv(conv: Conversation, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!confirm(`Delete conversation "${conv.title}"? All messages will be lost.`)) return;
+    await convsApi.delete(id, conv.id);
+    setConvs((cs) => cs.filter((c) => c.id !== conv.id));
+    if (activeConv?.id === conv.id) {
+      const remaining = convs.filter((c) => c.id !== conv.id);
+      if (remaining.length > 0) {
+        setActiveConv(remaining[0]);
+        const data = await convsApi.get(id, remaining[0].id);
+        setMessages(data.messages);
+      } else {
+        setActiveConv(null);
+        setMessages([]);
+      }
+    }
+  }
+
   function sendViaWs(content: string) {
     if (!activeConv) return;
     const ws = wsRef.current;
@@ -305,8 +344,17 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
         {/* File Tree */}
         <div className="flex-1 overflow-auto">
-          <div className="px-4 py-2 border-b border-[#F1F5F9]">
+          <div className="px-4 py-2 border-b border-[#F1F5F9] flex items-center justify-between">
             <p className="text-xs font-semibold text-[#94A3B8] uppercase tracking-wider">Files</p>
+            <button
+              type="button"
+              onClick={refreshProject}
+              disabled={refreshing}
+              title={project?.source_type === "git" ? "Refresh files & Git status" : "Refresh files"}
+              className="text-[#94A3B8] hover:text-[#0050A0] disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
+            </button>
           </div>
           <div className="py-1">
             {fileTree.map((node) => <FileNodeItem key={node.path} node={node} depth={0} />)}
@@ -319,19 +367,38 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </button>
           </div>
           {convs.map((c) => (
-            <button key={c.id}
-              onClick={() => selectConv(c)}
+            <div
+              key={c.id}
               className={cn(
-                "w-full text-left px-4 py-2 text-sm transition-colors",
+                "group flex items-center gap-1 pr-2 transition-colors",
                 activeConv?.id === c.id
-                  ? "bg-blue-50 text-[#0050A0] font-medium"
-                  : "text-[#64748B] hover:bg-[#F8F9FA]"
-              )}>
-              <div className="flex items-center gap-2">
-                <MessageSquarePlus size={13} />
-                <span className="truncate">{c.title}</span>
-              </div>
-            </button>
+                  ? "bg-blue-50"
+                  : "hover:bg-[#F8F9FA]"
+              )}
+            >
+              <button
+                onClick={() => selectConv(c)}
+                className={cn(
+                  "flex-1 min-w-0 text-left px-4 py-2 text-sm transition-colors",
+                  activeConv?.id === c.id
+                    ? "text-[#0050A0] font-medium"
+                    : "text-[#64748B]"
+                )}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <MessageSquarePlus size={13} className="flex-shrink-0" />
+                  <span className="truncate">{c.title}</span>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => deleteConv(c, e)}
+                title="Delete conversation"
+                className="opacity-0 group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E] flex-shrink-0 p-1"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
           ))}
         </div>
       </div>

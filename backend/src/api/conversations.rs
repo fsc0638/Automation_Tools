@@ -52,7 +52,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/projects/:project_id/conversations/:conv_id",
-            get(get_conversation),
+            get(get_conversation).delete(delete_conversation),
         )
         .route(
             "/projects/:project_id/conversations/:conv_id/messages",
@@ -141,6 +141,29 @@ async fn get_conversation(
     .await?;
 
     Ok(Json(ConversationWithMessages { conversation: conv, messages }))
+}
+
+async fn delete_conversation(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, conv_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    verify_project_access(&state, project_id, auth_user.id).await?;
+
+    let result = sqlx::query(
+        "DELETE FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3",
+    )
+    .bind(conv_id)
+    .bind(project_id)
+    .bind(auth_user.id)
+    .execute(&state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Conversation not found".into()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn send_message(
