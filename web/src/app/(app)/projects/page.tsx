@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, GitBranch, FolderOpen, Trash2, Clock, KeyRound } from "lucide-react";
 import { gitIdentities, projects as projectsApi, type GitIdentity, type Project } from "@/lib/api";
@@ -56,23 +56,26 @@ export default function ProjectsPage() {
     }
   }
 
-  async function fetchRemoteBranches() {
-    if (!form.source_path) return;
+  const fetchRemoteBranches = useCallback(async () => {
+    if (form.source_type !== "git" || !form.source_path.trim()) return;
     setLoadingBranches(true);
     setBranchFetchError("");
     try {
       const result = await projectsApi.remoteBranches(
-        form.source_path,
+        form.source_path.trim(),
         form.git_identity_id || undefined,
       );
       setRemoteBranches(result.branches);
       if (result.branches.length === 0) {
         setBranchFetchError("No branches found. The repo may be private or the URL/token may be incorrect.");
-      } else if (!result.branches.includes(form.default_branch)) {
-        const best = result.branches.includes("main") ? "main"
-          : result.branches.includes("master") ? "master"
-          : result.branches[0];
-        setForm((f) => ({ ...f, default_branch: best }));
+      } else {
+        setForm((f) => {
+          if (result.branches.includes(f.default_branch)) return f;
+          const best = result.branches.includes("main") ? "main"
+            : result.branches.includes("master") ? "master"
+            : result.branches[0];
+          return { ...f, default_branch: best };
+        });
       }
     } catch (err) {
       setRemoteBranches([]);
@@ -80,7 +83,15 @@ export default function ProjectsPage() {
     } finally {
       setLoadingBranches(false);
     }
-  }
+  }, [form.source_type, form.source_path, form.git_identity_id]);
+
+  useEffect(() => {
+    if (form.source_type !== "git" || !form.source_path.trim()) return;
+    const timer = window.setTimeout(() => {
+      void fetchRemoteBranches();
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [form.source_type, form.source_path, form.git_identity_id, fetchRemoteBranches]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -110,7 +121,12 @@ export default function ProjectsPage() {
     setIdentityError("");
     setIdentityCreating(true);
     try {
-      const identity = await gitIdentities.create(identityForm);
+      const identity = await gitIdentities.create({
+        ...identityForm,
+        repository_url: form.source_type === "git" && form.source_path.trim()
+          ? form.source_path.trim()
+          : undefined,
+      });
       setIdentityList((items) => [identity, ...items]);
       setIdentityForm(emptyIdentityForm);
       setShowIdentityCreate(false);

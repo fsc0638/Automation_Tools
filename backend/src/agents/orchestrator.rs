@@ -7,7 +7,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    agents::{hermes::HermesClient, openclaw::{ChatMessage, OpenClawClient}},
+    agents::{
+        hermes::HermesClient,
+        openclaw::{ChatMessage, OpenClawClient},
+    },
     config::Config,
     db::models::{Message, Project},
 };
@@ -83,7 +86,10 @@ impl DebateAgent {
 
 pub fn build_project_scope(project: &Project) -> ProjectScope {
     let root = if project.source_type == "git" {
-        project.local_path.clone().unwrap_or_else(|| project.source_path.clone())
+        project
+            .local_path
+            .clone()
+            .unwrap_or_else(|| project.source_path.clone())
     } else {
         project.source_path.clone()
     };
@@ -106,7 +112,10 @@ fn absolutize_path(path: &str) -> Option<String> {
     } else {
         std::env::current_dir().ok()?.join(path)
     };
-    candidate.canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+    candidate
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
 }
 
 fn build_file_snapshot(root: &str) -> Option<String> {
@@ -121,7 +130,11 @@ fn build_file_snapshot(root: &str) -> Option<String> {
     let mut important = String::new();
     for file in important_files(root_path) {
         if let Ok(content) = std::fs::read_to_string(&file) {
-            let rel = file.strip_prefix(root_path).unwrap_or(&file).to_string_lossy().replace('\\', "/");
+            let rel = file
+                .strip_prefix(root_path)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/");
             let snippet: String = content.chars().take(8_000).collect();
             important.push_str(&format!("\n\n--- FILE: {rel} ---\n{snippet}"));
         }
@@ -141,18 +154,33 @@ fn collect_tree(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
     if depth > 4 || out.len() >= 180 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries = entries.filter_map(|e| e.ok()).collect::<Vec<_>>();
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
-        if out.len() >= 180 { break; }
+        if out.len() >= 180 {
+            break;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
-        if should_ignore(&name) { continue; }
+        if should_ignore(&name) {
+            continue;
+        }
         let path = entry.path();
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        out.push(format!("{}{}{}", "  ".repeat(depth), rel, if is_dir { "/" } else { "" }));
+        out.push(format!(
+            "{}{}{}",
+            "  ".repeat(depth),
+            rel,
+            if is_dir { "/" } else { "" }
+        ));
         if is_dir {
             collect_tree(root, &path, depth + 1, out);
         }
@@ -173,12 +201,31 @@ fn should_ignore(name: &str) -> bool {
 
 fn important_files(root: &Path) -> Vec<PathBuf> {
     let candidates = [
-        "README.md", "readme.md", "package.json", "Cargo.toml", "pyproject.toml",
-        "requirements.txt", "go.mod", "pom.xml", "build.gradle", "docker-compose.yml",
-        "Dockerfile", "src/main.rs", "src/main.ts", "src/main.tsx", "src/index.ts",
-        "src/index.tsx", "src/App.tsx", "main.py", "app.py",
+        "README.md",
+        "readme.md",
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "requirements.txt",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "docker-compose.yml",
+        "Dockerfile",
+        "src/main.rs",
+        "src/main.ts",
+        "src/main.tsx",
+        "src/index.ts",
+        "src/index.tsx",
+        "src/App.tsx",
+        "main.py",
+        "app.py",
     ];
-    candidates.iter().map(|p| root.join(p)).filter(|p| p.is_file()).collect()
+    candidates
+        .iter()
+        .map(|p| root.join(p))
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 fn project_scope_message(project: &ProjectScope) -> ChatMessage {
@@ -211,13 +258,21 @@ fn project_summary_message(summary: &str) -> ChatMessage {
     }
 }
 
-fn messages_to_chat(project: &ProjectScope, history: &[Message], project_summary: Option<&str>) -> Vec<ChatMessage> {
+fn messages_to_chat(
+    project: &ProjectScope,
+    history: &[Message],
+    project_summary: Option<&str>,
+) -> Vec<ChatMessage> {
     let mut messages = vec![project_scope_message(project)];
     if let Some(summary) = project_summary.filter(|s| !s.trim().is_empty()) {
         messages.push(project_summary_message(summary));
     }
     messages.extend(history.iter().map(|m| {
-        let role = if m.role == "user" { "user" } else { "assistant" };
+        let role = if m.role == "user" {
+            "user"
+        } else {
+            "assistant"
+        };
         let content = match m.role.as_str() {
             "openclaw" => format!("[OpenClaw]: {}", m.content),
             "hermes" => format!("[Hermes]: {}", m.content),
@@ -236,23 +291,79 @@ fn messages_to_chat(project: &ProjectScope, history: &[Message], project_summary
 fn choose_debate_lead(history: &[Message], user_message: &str) -> DebateAgent {
     let text = format!(
         "{}\n{}",
-        history.iter().rev().take(8).map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n"),
+        history
+            .iter()
+            .rev()
+            .take(8)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
         user_message
-    ).to_lowercase();
+    )
+    .to_lowercase();
 
     let openclaw_keywords = [
-        "架構", "設計", "規劃", "計畫", "技術選型", "大型", "複雜", "系統", "重構",
-        "race", "deadlock", "concurrency", "async", "間歇", "難題", "根因", "root cause",
-        "security", "安全", "migration", "資料模型", "跨", "影響範圍", "邊界", "scal",
-        "performance", "效能", "memory", "debug 難", "難 bug",
+        "架構",
+        "設計",
+        "規劃",
+        "計畫",
+        "技術選型",
+        "大型",
+        "複雜",
+        "系統",
+        "重構",
+        "race",
+        "deadlock",
+        "concurrency",
+        "async",
+        "間歇",
+        "難題",
+        "根因",
+        "root cause",
+        "security",
+        "安全",
+        "migration",
+        "資料模型",
+        "跨",
+        "影響範圍",
+        "邊界",
+        "scal",
+        "performance",
+        "效能",
+        "memory",
+        "debug 難",
+        "難 bug",
     ];
     let hermes_keywords = [
-        "寫", "新增", "修改", "調整", "修正", "一般", "簡單", "快速", "日常", "樣式",
-        "ui", "copy", "文字", "按鈕", "表單", "lint", "format", "小改", "直接修",
+        "寫",
+        "新增",
+        "修改",
+        "調整",
+        "修正",
+        "一般",
+        "簡單",
+        "快速",
+        "日常",
+        "樣式",
+        "ui",
+        "copy",
+        "文字",
+        "按鈕",
+        "表單",
+        "lint",
+        "format",
+        "小改",
+        "直接修",
     ];
 
-    let openclaw_score = openclaw_keywords.iter().filter(|kw| text.contains(**kw)).count();
-    let hermes_score = hermes_keywords.iter().filter(|kw| text.contains(**kw)).count();
+    let openclaw_score = openclaw_keywords
+        .iter()
+        .filter(|kw| text.contains(**kw))
+        .count();
+    let hermes_score = hermes_keywords
+        .iter()
+        .filter(|kw| text.contains(**kw))
+        .count();
 
     if openclaw_score > hermes_score || text.len() > 700 {
         DebateAgent::OpenClaw
@@ -262,7 +373,9 @@ fn choose_debate_lead(history: &[Message], user_message: &str) -> DebateAgent {
 }
 
 fn debate_round_limit_label(max_rounds: usize) -> String {
-    format!("up to {max_rounds} agent turns, then stop and return unresolved disagreements to the user")
+    format!(
+        "up to {max_rounds} agent turns, then stop and return unresolved disagreements to the user"
+    )
 }
 
 fn debate_round_limit(config: &Config) -> usize {
@@ -275,7 +388,13 @@ fn debate_round_limit(config: &Config) -> usize {
     }
 }
 
-fn debate_instruction(lead: DebateAgent, round_limit: usize, auto_consensus: bool, code_change_requested: bool, user_message: &str) -> ChatMessage {
+fn debate_instruction(
+    lead: DebateAgent,
+    round_limit: usize,
+    auto_consensus: bool,
+    code_change_requested: bool,
+    user_message: &str,
+) -> ChatMessage {
     let lead_reason = match lead {
         DebateAgent::OpenClaw => "OpenClaw/GPT-5.5 leads first because the task appears complex, strategic, architectural, or high-risk.",
         DebateAgent::Hermes => "Hermes/GPT-5.4 leads first because the task appears implementation-oriented, routine, or suited to quick iteration.",
@@ -301,11 +420,14 @@ fn debate_instruction(lead: DebateAgent, round_limit: usize, auto_consensus: boo
              Current user question/topic is: '{user_message}'. Stay anchored to this exact topic. \
              Do not drift into prior conversation topics, agent behavior rules, or project memories unless the current user question explicitly asks for them. \
              {final_rule} \
-             Each round should feel like critical collaboration, not forced opposition: direct, sharp, and independent, but always evidence-based. \
+             Style must be conversational, plain-language, and key-point focused: conclusion first, short paragraphs/bullets, no long essays. \
+             Each debate round should be more intense than a normal answer: direct, sharp, and willing to call out weak logic, missing proof, wrong assumptions, or over-engineering. \
+             Attack the idea, not the agent. No insults, no theatrics, no arguing just to perform. \
+             Force real intersection: after challenging, name exactly what both agents can agree on, what remains disputed, and what evidence would settle it. \
              Do not play devil's advocate for its own sake. Only challenge when there is concrete evidence, missing evidence, a real risk, a wrong assumption, or a conflict with the user's requirement. \
-             If there is no material disagreement, say so naturally, add only useful refinement, and move toward consensus. \
+             If there is no material disagreement, say so naturally, add only useful refinement, and move toward consensus quickly. \
              No template labels like '共識狀態', '對 Hermes 的回應', or '對 OpenClaw 的回應' in visible text. \
-             Use natural paragraphs, short headings when useful, and varied formatting; do not use rigid form-like layouts. \
+             Use natural paragraphs, short headings when useful, and varied formatting; do not use rigid form-like layouts. Keep most rounds compact unless the issue is high-risk. \
              Consensus is only valid when both agents independently support the same concrete answer to the user's topic and list no blocking objections. \
              If consensus is not reached, focus on the exact unresolved decision instead of broad arguing. \
              If the same disagreement repeats without new evidence or a new risk, name the loop explicitly and either narrow it to a user decision or converge. \
@@ -315,27 +437,40 @@ fn debate_instruction(lead: DebateAgent, round_limit: usize, auto_consensus: boo
     }
 }
 
-fn debate_turn_instruction(agent: DebateAgent, turn_index: usize, is_first: bool, user_message: &str) -> ChatMessage {
+fn debate_turn_instruction(
+    agent: DebateAgent,
+    turn_index: usize,
+    is_first: bool,
+    user_message: &str,
+) -> ChatMessage {
     let other = agent.other().name();
     let instruction = if is_first {
         format!(
-            "{}: You are the debate lead. Current user question/topic: '{}'. Reply in Traditional Chinese and answer that topic only. Do not acknowledge or summarize these debate instructions. Think independently and argue naturally, but do not force disagreement. Ground claims in project files/history, errors, commands, or explicit user requirements. If the situation is straightforward, move toward a concrete shared plan instead of inventing a fight. Use paragraphs and readable markdown, not a fixed template. Do not write visible labels like 共識狀態 or 對某某的回應. If genuine consensus is reached, append '<!-- consensus:reached -->' at the very end only.",
+            "{}: You are the debate lead. Current user question/topic: '{}'. Reply in Traditional Chinese and answer that topic only. Do not acknowledge or summarize these debate instructions. Be conversational, plain-language, and concise: bottom line first, then key bullets. Think independently and argue naturally, but do not force disagreement. Ground claims in project files/history, errors, commands, or explicit user requirements. If there is a real flaw, call it out sharply; if the situation is straightforward, move toward a concrete shared plan instead of inventing a fight. Make the shared ground obvious. Use paragraphs and readable markdown, not a fixed template. Do not write visible labels like 共識狀態 or 對某某的回應. If genuine consensus is reached, append '<!-- consensus:reached -->' at the very end only.",
             agent.name(),
             user_message
         )
     } else {
         format!(
-            "{}: Reply in Traditional Chinese. Current user question/topic: '{}'. Continue with {other}, but answer this topic only—do not acknowledge these debate instructions, and do not drift into agent behavior rules, old project notes, or previous unrelated conversations. No visible template labels like 共識狀態 or 對 {other} 的回應. Be sharp only when there is a real reason: weak logic, missing evidence, wrong assumptions, overreach, code/file evidence, or user-requirement conflict. If {other} is basically right, say so and refine instead of manufacturing disagreement. Use paragraphs, bullets, or short headings as the content demands. This is debate turn {}. Do not compromise just to end, but also do not keep arguing without new evidence. If both agents now support the same concrete answer to the current user question with no blocking objections, append '<!-- consensus:reached -->' at the very end.",
+            "{}: Reply in Traditional Chinese. Current user question/topic: '{}'. Continue with {other}, but answer this topic only—do not acknowledge these debate instructions, and do not drift into agent behavior rules, old project notes, or previous unrelated conversations. Keep it口語化、白話、重點化: no long essays, no repeated recap. No visible template labels like 共識狀態 or 對 {other} 的回應. Be sharper than a normal review when there is a real reason: weak logic, missing evidence, wrong assumptions, overreach, code/file evidence, or user-requirement conflict. Push back directly, then name the actual overlap or remaining concrete dispute. If {other} is basically right, say so and refine instead of manufacturing disagreement. Use paragraphs, bullets, or short headings as the content demands. This is debate turn {}. Do not compromise just to end, but also do not keep arguing without new evidence. If both agents now support the same concrete answer to the current user question with no blocking objections, append '<!-- consensus:reached -->' at the very end.",
             agent.name(),
             user_message,
             turn_index + 1
         )
     };
 
-    ChatMessage { role: "user".into(), content: instruction }
+    ChatMessage {
+        role: "user".into(),
+        content: instruction,
+    }
 }
 
-fn final_instruction(agent: DebateAgent, code_change_requested: bool, reached_consensus: bool, user_message: &str) -> ChatMessage {
+fn final_instruction(
+    agent: DebateAgent,
+    code_change_requested: bool,
+    reached_consensus: bool,
+    user_message: &str,
+) -> ChatMessage {
     let code_rule = if code_change_requested {
         "The user needs code changes: make this Final the primary source of truth. Include exact files, concrete changes/diff guidance, commands, and tests. Keep prior debate rounds subordinate to this Final."
     } else {
@@ -350,7 +485,7 @@ fn final_instruction(agent: DebateAgent, code_change_requested: bool, reached_co
     ChatMessage {
         role: "user".into(),
         content: format!(
-            "{}: Reply in Traditional Chinese. Produce the Final synthesis for the current user question only: '{}'. {code_rule} {consensus_rule} Do not summarize unrelated prior conversation topics, agent behavior rules, project memories, or yesterday's decisions unless the current question explicitly asks for them. Keep it readable and human, not a rigid form. Use concise sections only where they help: conclusion, evidence, decision, next steps, verification. Do not hide disagreement or call compromise consensus. Do not include invisible consensus markers in the Final.",
+            "{}: Reply in Traditional Chinese. Produce the Final synthesis for the current user question only: '{}'. {code_rule} {consensus_rule} Keep it口語化、白話、重點化: conclusion first, short bullets, no long recap. Do not summarize unrelated prior conversation topics, agent behavior rules, project memories, or yesterday's decisions unless the current question explicitly asks for them. Keep it readable and human, not a rigid form. Use concise sections only where they help: conclusion, evidence, decision, next steps, verification. Do not hide disagreement or call compromise consensus. Do not include invisible consensus markers in the Final.",
             agent.name(),
             user_message
         ),
@@ -362,17 +497,40 @@ fn consensus_reached(turns: &[(DebateAgent, String)]) -> bool {
         return false;
     }
 
-    let recent = turns.iter().rev().take(2)
+    let recent = turns
+        .iter()
+        .rev()
+        .take(2)
         .map(|(_, text)| normalize_consensus_text(text))
         .collect::<Vec<_>>();
 
     let unresolved_markers = [
-        "disagree", "不同意", "反對", "尚未", "未解", " unresolved",
-        "however", "但是", "不過", "仍然", "concern", "疑慮", "風險仍", "不能接受",
-        "需要使用者決策", "交給 user", "交給使用者", "缺少證據", "資訊不足",
+        "disagree",
+        "不同意",
+        "反對",
+        "尚未",
+        "未解",
+        " unresolved",
+        "however",
+        "但是",
+        "不過",
+        "仍然",
+        "concern",
+        "疑慮",
+        "風險仍",
+        "不能接受",
+        "需要使用者決策",
+        "交給 user",
+        "交給使用者",
+        "缺少證據",
+        "資訊不足",
     ];
 
-    if recent.iter().any(|text| unresolved_markers.iter().any(|marker| text.contains(marker))) {
+    if recent.iter().any(|text| {
+        unresolved_markers
+            .iter()
+            .any(|marker| text.contains(marker))
+    }) {
         return false;
     }
 
@@ -406,25 +564,53 @@ fn has_consensus_signal(text: &str) -> bool {
         "可執行的共同",
         "收斂後",
         "結論很簡單",
-    ].iter().any(|marker| text.contains(marker))
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 fn code_change_requested(user_message: &str) -> bool {
     let text = user_message.to_lowercase();
     [
-        "改程式", "調整程式", "修改程式", "修 bug", "debug", "實作", "開發", "寫 code",
-        "code", "diff", "patch", "修正", "新增", "重構", "build", "lint", "cargo", "npm",
-    ].iter().any(|kw| text.contains(kw))
+        "改程式",
+        "調整程式",
+        "修改程式",
+        "修 bug",
+        "debug",
+        "實作",
+        "開發",
+        "寫 code",
+        "code",
+        "diff",
+        "patch",
+        "修正",
+        "新增",
+        "重構",
+        "build",
+        "lint",
+        "cargo",
+        "npm",
+    ]
+    .iter()
+    .any(|kw| text.contains(kw))
 }
 
-async fn run_agent(config: &Arc<Config>, agent: DebateAgent, ctx: Vec<ChatMessage>) -> Result<String> {
+async fn run_agent(
+    config: &Arc<Config>,
+    agent: DebateAgent,
+    ctx: Vec<ChatMessage>,
+) -> Result<String> {
     match agent {
         DebateAgent::OpenClaw => OpenClawClient::new(config).chat(ctx).await,
         DebateAgent::Hermes => HermesClient::new(config).chat(ctx).await,
     }
 }
 
-fn chat_with_turns(base: &[ChatMessage], turns: &[(DebateAgent, String)], instruction: ChatMessage) -> Vec<ChatMessage> {
+fn chat_with_turns(
+    base: &[ChatMessage],
+    turns: &[(DebateAgent, String)],
+    instruction: ChatMessage,
+) -> Vec<ChatMessage> {
     let mut ctx = base.to_vec();
     for (agent, content) in turns {
         ctx.push(ChatMessage {
@@ -445,7 +631,10 @@ pub async fn run_agent_turn(
     mode: AgentMode,
 ) -> Result<Vec<(String, String, Option<String>)>> {
     let mut chat = messages_to_chat(project, history, project_summary);
-    chat.push(ChatMessage { role: "user".into(), content: user_message.into() });
+    chat.push(ChatMessage {
+        role: "user".into(),
+        content: user_message.into(),
+    });
 
     let mut results = vec![];
     match mode {
@@ -461,7 +650,13 @@ pub async fn run_agent_turn(
             let lead = choose_debate_lead(history, user_message);
             let round_limit = debate_round_limit(config);
             let code_change = code_change_requested(user_message);
-            let mut base = vec![debate_instruction(lead, round_limit, config.debate_auto_consensus, code_change, user_message)];
+            let mut base = vec![debate_instruction(
+                lead,
+                round_limit,
+                config.debate_auto_consensus,
+                code_change,
+                user_message,
+            )];
             base.extend(chat.clone());
 
             let mut turns: Vec<(DebateAgent, String)> = vec![];
@@ -479,7 +674,11 @@ pub async fn run_agent_turn(
                     debate_turn_instruction(current, turn_index, turn_index == 0, user_message),
                 );
                 let reply = run_agent(config, current, ctx).await?;
-                results.push((current.role().into(), reply.clone(), Some(current.name().into())));
+                results.push((
+                    current.role().into(),
+                    reply.clone(),
+                    Some(current.name().into()),
+                ));
                 turns.push((current, reply));
 
                 if config.debate_auto_consensus && consensus_reached(&turns) {
@@ -492,9 +691,17 @@ pub async fn run_agent_turn(
             }
 
             let final_agent = lead;
-            let final_ctx = chat_with_turns(&base, &turns, final_instruction(final_agent, code_change, reached_consensus, user_message));
+            let final_ctx = chat_with_turns(
+                &base,
+                &turns,
+                final_instruction(final_agent, code_change, reached_consensus, user_message),
+            );
             let final_reply = run_agent(config, final_agent, final_ctx).await?;
-            results.push((final_agent.role().into(), final_reply, Some(final_agent.name().into())));
+            results.push((
+                final_agent.role().into(),
+                final_reply,
+                Some(final_agent.name().into()),
+            ));
         }
     }
     Ok(results)
@@ -514,7 +721,10 @@ pub fn run_agent_stream(
     let code_change = code_change_requested(user_message);
     let current_topic = user_message.to_string();
     let mut chat = messages_to_chat(&project, history, project_summary.as_deref());
-    chat.push(ChatMessage { role: "user".into(), content: current_topic.clone() });
+    chat.push(ChatMessage {
+        role: "user".into(),
+        content: current_topic.clone(),
+    });
 
     Box::pin(async_stream::stream! {
         match mode {

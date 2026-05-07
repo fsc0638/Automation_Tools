@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
   MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
-  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square
+  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, ArrowDown
 } from "lucide-react";
 import {
   projects as projectsApi, conversations as convsApi,
@@ -42,9 +42,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [mode, setMode] = useState<AgentMode>("openclaw");
   const [streaming, setStreaming] = useState(false);
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const streamBuffersRef = useRef<Record<string, string>>({});
   const wsRef = useRef<WebSocket | null>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const selectConv = useCallback(async (conv: Conversation) => {
@@ -94,8 +97,27 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   }, [id, mode]);
 
   useEffect(() => {
+    if (!shouldAutoScrollRef.current) {
+      return;
+    }
+
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamBuffers]);
+
+  function handleMessagesScroll() {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = distanceFromBottom < 96;
+    shouldAutoScrollRef.current = nearBottom;
+    setShowJumpToBottom(!nearBottom && (streaming || Object.keys(streamBuffersRef.current).length > 0));
+  }
+
+  function jumpToBottom() {
+    shouldAutoScrollRef.current = true;
+    setShowJumpToBottom(false);
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }
 
   async function newConv() {
     const conv = await convsApi.create(id, `${MODE_LABELS[mode]} Conversation ${convs.length + 1}`, mode);
@@ -109,6 +131,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     wsRef.current?.close();
     const ws = createWsConnection(activeConv.id, id);
     wsRef.current = ws;
+    shouldAutoScrollRef.current = true;
+    setShowJumpToBottom(false);
     streamBuffersRef.current = {};
     setStreaming(true);
     setStreamBuffers({});
@@ -132,6 +156,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       if (evt.type === "chunk" && evt.content) {
         streamBuffersRef.current[label] = (streamBuffersRef.current[label] ?? "") + evt.content;
         setStreamBuffers({ ...streamBuffersRef.current });
+        if (!shouldAutoScrollRef.current) setShowJumpToBottom(true);
       } else if (evt.type === "done") {
         const buffered = streamBuffersRef.current[label] ?? "";
         if (buffered) {
@@ -284,7 +309,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-auto px-6 py-6 space-y-4">
+        <div
+          ref={messagesScrollRef}
+          onScroll={handleMessagesScroll}
+          className="relative flex-1 overflow-auto px-6 py-6 space-y-4"
+        >
           {!activeConv ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <MessageSquarePlus size={48} className="text-[#E2E8F0] mb-4" />
@@ -307,6 +336,15 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               )}
               <div ref={bottomRef} />
             </>
+          )}
+          {showJumpToBottom && (
+            <button
+              type="button"
+              onClick={jumpToBottom}
+              className="sticky bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-[#BFDBFE] bg-white px-3 py-1.5 text-xs font-medium text-[#0050A0] shadow-sm hover:bg-blue-50"
+            >
+              <ArrowDown size={13} /> New output
+            </button>
           )}
         </div>
 

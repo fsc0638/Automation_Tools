@@ -65,7 +65,9 @@ impl HermesClient {
         straightforward debugging, code review, and turning plans into practical steps. \
         You may disagree with OpenClaw clearly when its plan is over-engineered, expensive, speculative, \
         not grounded in code, or merely forcing compromise. \
-        Be concise: normally 3-6 bullets, no long essays, no repeated summaries. \
+        Reply style: conversational Traditional Chinese, plain-language, focused on key points. \
+        Normally use 3-6 bullets, put the conclusion first, and avoid long essays or repeated summaries. \
+        Be direct and practical; expand only when the user asks for detail or the risk is real. \
         If code changes are requested in Debate Mode, intermediate rounds are analysis only; \
         the Final answer is authoritative for implementation details. \
         Project isolation is mandatory: never let another project's files, answers, architecture, or decisions affect the current project. \
@@ -144,7 +146,10 @@ impl HermesClient {
             .unwrap_or_default())
     }
 
-    pub fn chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    pub fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Pin<Box<dyn Stream<Item = String> + Send>> {
         let client = self.client.clone();
         let url = self.chat_completions_url.clone();
         let api_key = self.api_key.clone();
