@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks, Repository};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -9,10 +10,114 @@ const IGNORED_DIRS: &[&str] = &[
     ".git", "node_modules", "target", ".next", "dist", "build", "__pycache__", ".venv",
 ];
 
-pub fn clone_repository(url: &str, dest: &str) -> Result<()> {
-    git2::Repository::clone(url, dest)
+#[derive(Debug, Clone)]
+pub struct GitCredentials {
+    pub username: String,
+    pub access_token: String,
+}
+
+fn fetch_options(credentials: Option<&GitCredentials>) -> FetchOptions<'static> {
+    let mut callbacks = RemoteCallbacks::new();
+    if let Some(creds) = credentials.cloned() {
+        callbacks.credentials(move |_url, username_from_url, _allowed| {
+            let username = username_from_url.unwrap_or(&creds.username);
+            Cred::userpass_plaintext(username, &creds.access_token)
+        });
+    }
+
+    let mut fetch_options = FetchOptions::new();
+    fetch_options.remote_callbacks(callbacks);
+    fetch_options
+}
+
+pub fn clone_repository(url: &str, dest: &str, credentials: Option<&GitCredentials>, branch: Option<&str>) -> Result<()> {
+    // Embed credentials directly in the URL so git2 sends them on the first
+    // request, instead of waiting for a 401 challenge. GitHub may return 403
+    // (not 401) for private repos, which means the credentials callback is
+    // never invoked and the clone fails even with valid credentials.
+    let effective_url = match credentials {
+        Some(creds) => embed_credentials_in_url(url, creds),
+        None => url.to_string(),
+    };
+
+    let mut builder = RepoBuilder::new();
+    builder.fetch_options(fetch_options(credentials));
+    if let Some(branch) = branch.filter(|b| !b.trim().is_empty()) {
+        builder.branch(branch);
+    }
+
+    builder
+        .clone(&effective_url, Path::new(dest))
         .map(|_| ())
         .map_err(|e| anyhow!("Clone failed: {}", e))
+}
+
+fn embed_credentials_in_url(url: &str, creds: &GitCredentials) -> String {
+    // Only applies to HTTPS URLs. SSH URLs use key-based auth.
+    let Some(rest) = url.strip_prefix("https://") else {
+        return url.to_string();
+    };
+    // Strip any existing user info (e.g. https://user@host/...) to avoid duplication.
+    let rest = if let Some(at) = rest.find('@') {
+        &rest[at + 1..]
+    } else {
+        rest
+    };
+    // URL-encode only the characters that would break URL parsing.
+    let token = creds.access_token.replace('@', "%40").replace(':', "%3A");
+    format!("https://{}:{}@{}", creds.username, token, rest)
+}
+
+pub fn list_branches(repo_path: &str) -> Result<Vec<String>> {
+    let repo = Repository::open(repo_path)
+        .map_err(|e| anyhow!("Not a git repository: {}", e))?;
+
+    let mut branches = vec![];
+    for branch in repo.branches(Some(git2::BranchType::Local))? {
+        let (branch, _) = branch?;
+        if let Some(name) = branch.name()? {
+            branches.push(name.to_string());
+        }
+    }
+    branches.sort();
+    Ok(branches)
+}
+
+pub fn fetch_remote(repo_path: &str, credentials: Option<&GitCredentials>) -> Result<()> {
+    let repo = Repository::open(repo_path)
+        .map_err(|e| anyhow!("Not a git repository: {}", e))?;
+    let mut remote = repo.find_remote("origin")?;
+    let mut opts = fetch_options(credentials);
+    remote.fetch(&["+refs/heads/*:refs/remotes/origin/*"], Some(&mut opts), None)?;
+    Ok(())
+}
+
+pub fn checkout_branch(repo_path: &str, branch_name: &str, credentials: Option<&GitCredentials>) -> Result<()> {
+    if branch_name.trim().is_empty() {
+        return Err(anyhow!("branch name is required"));
+    }
+
+    let repo = Repository::open(repo_path)
+        .map_err(|e| anyhow!("Not a git repository: {}", e))?;
+
+    let has_local = repo.find_branch(branch_name, git2::BranchType::Local).is_ok();
+    if !has_local {
+        let _ = fetch_remote(repo_path, credentials);
+        let remote_branch = repo
+            .find_branch(&format!("origin/{branch_name}"), git2::BranchType::Remote)
+            .map_err(|_| anyhow!("Branch not found locally or on origin: {}", branch_name))?;
+        let target = remote_branch
+            .get()
+            .target()
+            .ok_or_else(|| anyhow!("Remote branch has no target commit"))?;
+        let commit = repo.find_commit(target)?;
+        repo.branch(branch_name, &commit, false)?;
+    }
+
+    let obj = repo.revparse_single(&format!("refs/heads/{branch_name}"))?;
+    repo.checkout_tree(&obj, None)?;
+    repo.set_head(&format!("refs/heads/{branch_name}"))?;
+    Ok(())
 }
 
 pub fn list_files(root: &str, dir: &str, depth: usize) -> Result<Vec<FileNode>> {
@@ -88,7 +193,7 @@ pub fn write_file_content(root: &str, file_path: &str, content: &str) -> Result<
 }
 
 pub fn git_status(repo_path: &str) -> Result<Value> {
-    let repo = git2::Repository::open(repo_path)
+    let repo = Repository::open(repo_path)
         .map_err(|e| anyhow!("Not a git repository: {}", e))?;
 
     let head = repo
@@ -137,4 +242,104 @@ fn sanitize_path(root: &str, file_path: &str) -> Result<PathBuf> {
     }
 
     Ok(canonical)
+}
+
+pub async fn list_remote_branches(url: &str, credentials: Option<&GitCredentials>) -> Result<Vec<String>> {
+    if url.contains("github.com") {
+        list_github_branches(url, credentials).await
+    } else if url.contains("gitlab.com") {
+        list_gitlab_branches(url, credentials).await
+    } else {
+        Ok(vec![])
+    }
+}
+
+async fn list_github_branches(url: &str, credentials: Option<&GitCredentials>) -> Result<Vec<String>> {
+    let (owner, repo) = parse_repo_slug(url)?;
+    let mut req = reqwest::Client::new()
+        .get(format!(
+            "https://api.github.com/repos/{}/{}/branches?per_page=100",
+            owner, repo
+        ))
+        .header("User-Agent", "kway-dev-platform/1.0")
+        .header("Accept", "application/vnd.github.v3+json");
+
+    if let Some(creds) = credentials {
+        req = req.bearer_auth(&creds.access_token);
+    }
+
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+        let msg = body["message"].as_str().unwrap_or("").to_string();
+        return Err(if msg.is_empty() {
+            anyhow!("GitHub API returned {}", status)
+        } else {
+            anyhow!("GitHub API {}: {}", status, msg)
+        });
+    }
+
+    let data: Vec<serde_json::Value> = resp.json().await?;
+    Ok(data
+        .iter()
+        .filter_map(|b| b["name"].as_str().map(|s| s.to_string()))
+        .collect())
+}
+
+async fn list_gitlab_branches(url: &str, credentials: Option<&GitCredentials>) -> Result<Vec<String>> {
+    let (owner, repo) = parse_repo_slug(url)?;
+    let project_path = format!("{}/{}", owner, repo).replace('/', "%2F");
+    let mut req = reqwest::Client::new()
+        .get(format!(
+            "https://gitlab.com/api/v4/projects/{}/repository/branches?per_page=100",
+            project_path
+        ))
+        .header("User-Agent", "kway-dev-platform/1.0");
+
+    if let Some(creds) = credentials {
+        req = req.header("PRIVATE-TOKEN", &creds.access_token);
+    }
+
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+        let msg = body["message"].as_str().unwrap_or("").to_string();
+        return Err(if msg.is_empty() {
+            anyhow!("GitLab API returned {}", status)
+        } else {
+            anyhow!("GitLab API {}: {}", status, msg)
+        });
+    }
+
+    let data: Vec<serde_json::Value> = resp.json().await?;
+    Ok(data
+        .iter()
+        .filter_map(|b| b["name"].as_str().map(|s| s.to_string()))
+        .collect())
+}
+
+fn parse_repo_slug(url: &str) -> Result<(String, String)> {
+    let cleaned = url.trim_end_matches('/').trim_end_matches(".git");
+    // Handle SSH: git@github.com:owner/repo
+    let path = if let Some(colon_pos) = cleaned.rfind(':') {
+        let prefix = &cleaned[..colon_pos];
+        if prefix.contains('.') && !prefix.contains('/') {
+            &cleaned[colon_pos + 1..]
+        } else {
+            cleaned
+        }
+    } else {
+        cleaned
+    };
+
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() < 2 {
+        return Err(anyhow!("Cannot parse owner/repo from URL: {}", url));
+    }
+    Ok((
+        parts[parts.len() - 2].to_string(),
+        parts[parts.len() - 1].to_string(),
+    ))
 }
