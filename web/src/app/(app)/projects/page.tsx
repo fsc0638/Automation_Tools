@@ -121,9 +121,13 @@ export default function ProjectsPage() {
     setIdentityError("");
     setIdentityCreating(true);
     try {
+      // Only validate against a specific repo URL when the user is creating
+      // both forms together (project form is visible). Standalone identity
+      // creation only validates the token via the provider's /user endpoint —
+      // the identity should be reusable across multiple repos.
       const identity = await gitIdentities.create({
         ...identityForm,
-        repository_url: form.source_type === "git" && form.source_path.trim()
+        repository_url: showCreate && form.source_type === "git" && form.source_path.trim()
           ? form.source_path.trim()
           : undefined,
       });

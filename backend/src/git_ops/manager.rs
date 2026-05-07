@@ -273,10 +273,20 @@ async fn list_github_branches(url: &str, credentials: Option<&GitCredentials>) -
         let status = resp.status();
         let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
         let msg = body["message"].as_str().unwrap_or("").to_string();
-        return Err(if msg.is_empty() {
-            anyhow!("GitHub API returned {}", status)
-        } else {
-            anyhow!("GitHub API {}: {}", status, msg)
+        // GitHub returns 404 for private repos when the token lacks access
+        // (it deliberately doesn't reveal whether the repo exists). Make
+        // that distinction visible to the user.
+        let hint = match status.as_u16() {
+            404 => Some("repo not found or token lacks access (org SSO authorization may be required for private repos)"),
+            403 => Some("token rejected — check scopes or org SSO authorization"),
+            401 => Some("token invalid"),
+            _ => None,
+        };
+        return Err(match (msg.is_empty(), hint) {
+            (true, None) => anyhow!("GitHub API returned {}", status),
+            (true, Some(h)) => anyhow!("GitHub API {} ({})", status, h),
+            (false, None) => anyhow!("GitHub API {}: {}", status, msg),
+            (false, Some(h)) => anyhow!("GitHub API {}: {} ({})", status, msg, h),
         });
     }
 
