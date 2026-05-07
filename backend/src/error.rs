@@ -44,7 +44,7 @@ impl IntoResponse for AppError {
                 tracing::error!("Internal error: {:?}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into())
             }
-            AppError::Git(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::Git(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Agent(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
         };
 

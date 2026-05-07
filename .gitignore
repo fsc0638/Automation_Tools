@@ -22,3 +22,6 @@ Thumbs.db
 
 # Data
 backend/data/
+
+# Logs
+backend/backend.log

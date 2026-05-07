@@ -23,6 +23,20 @@ pub struct Project {
     pub source_path: String,  // local path or git URL
     pub local_path: Option<String>, // cloned path for git repos
     pub default_branch: Option<String>,
+    pub git_identity_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct GitIdentity {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub provider: String,
+    pub username: String,
+    #[serde(skip_serializing)]
+    pub access_token: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -33,6 +47,7 @@ pub struct Conversation {
     pub project_id: Uuid,
     pub user_id: Uuid,
     pub title: String,
+    pub mode: String,      // "openclaw" | "hermes" | "debate"
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -46,6 +61,14 @@ pub struct Message {
     pub agent_name: Option<String>,
     pub file_path: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct ProjectMemorySummary {
+    pub project_id: Uuid,
+    pub summary: String,
+    pub source_message_count: i32,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crate::config::Config;
 
 pub mod auth;
+pub mod conversation_memory;
 pub mod conversations;
+pub mod git_identities;
 pub mod projects;
 pub mod ws;
 
@@ -17,12 +19,13 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let public = Router::new()
         .merge(auth::public_routes())
+        .merge(ws::routes())  // WS handles its own token auth via query param
         .with_state(state.clone());
 
     let protected = Router::new()
         .merge(projects::routes())
+        .merge(git_identities::routes())
         .merge(conversations::routes())
-        .merge(ws::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
