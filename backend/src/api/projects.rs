@@ -93,7 +93,10 @@ async fn create_project(
     } else {
         None
     };
-    let credentials = identity.as_ref().map(identity_credentials);
+    let credentials = match identity.as_ref() {
+        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        None => None,
+    };
 
     let local_path = if req.source_type == "git" {
         let clone_dir = format!("./data/projects/{}/{}", auth_user.id, Uuid::new_v4());
@@ -218,7 +221,10 @@ async fn switch_git_branch(
         Some(identity_id) => Some(find_git_identity(&state, identity_id, auth_user.id).await?),
         None => None,
     };
-    let credentials = identity.as_ref().map(identity_credentials);
+    let credentials = match identity.as_ref() {
+        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        None => None,
+    };
 
     checkout_branch(&root, &req.branch, credentials.as_ref())
         .map_err(|e| AppError::Git(e.to_string()))?;
@@ -244,7 +250,10 @@ async fn get_remote_branches(
         Some(id) => Some(find_git_identity(&state, id, auth_user.id).await?),
         None => None,
     };
-    let credentials = identity.as_ref().map(identity_credentials);
+    let credentials = match identity.as_ref() {
+        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        None => None,
+    };
 
     let branches = list_remote_branches(&req.url, credentials.as_ref())
         .await
@@ -276,11 +285,17 @@ async fn find_git_identity(state: &AppState, id: Uuid, user_id: Uuid) -> AppResu
     identity.ok_or_else(|| AppError::NotFound("Git identity not found".into()))
 }
 
-fn identity_credentials(identity: &GitIdentity) -> GitCredentials {
-    GitCredentials {
+fn identity_credentials(
+    identity: &GitIdentity,
+    cipher: &crate::crypto::TokenCipher,
+) -> AppResult<GitCredentials> {
+    let access_token = cipher
+        .decrypt(&identity.access_token)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("token decrypt failed: {}", e)))?;
+    Ok(GitCredentials {
         username: identity.username.clone(),
-        access_token: identity.access_token.clone(),
-    }
+        access_token,
+    })
 }
 
 fn require_git_project(project: &Project) -> AppResult<()> {

@@ -2,6 +2,7 @@ use axum::{middleware, Router};
 use sqlx::PgPool;
 use std::sync::Arc;
 use crate::config::Config;
+use crate::crypto::TokenCipher;
 
 pub mod auth;
 pub mod conversation_memory;
@@ -14,6 +15,7 @@ pub mod ws;
 pub struct AppState {
     pub db: PgPool,
     pub config: Arc<Config>,
+    pub cipher: Arc<TokenCipher>,
 }
 
 pub fn router(state: AppState) -> Router {

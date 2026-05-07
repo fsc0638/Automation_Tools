@@ -88,6 +88,11 @@ async fn create_identity(
     let provider = req.provider.as_deref().unwrap_or("github");
     validate_git_token(provider, req.access_token.trim()).await?;
 
+    let encrypted_token = state
+        .cipher
+        .encrypt(req.access_token.trim())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("token encryption failed: {}", e)))?;
+
     let identity: GitIdentity = sqlx::query_as(
         "INSERT INTO git_identities (user_id, name, provider, username, access_token)
          VALUES ($1, $2, $3, $4, $5)
@@ -97,7 +102,7 @@ async fn create_identity(
     .bind(req.name.trim())
     .bind(req.provider.unwrap_or_else(|| "generic".into()))
     .bind(req.username.trim())
-    .bind(req.access_token.trim())
+    .bind(&encrypted_token)
     .fetch_one(&state.db)
     .await?;
 

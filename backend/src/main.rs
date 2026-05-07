@@ -6,11 +6,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod agents;
 mod api;
 mod config;
+mod crypto;
 mod db;
 mod error;
 mod git_ops;
 
 use api::{router, AppState};
+use crypto::TokenCipher;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,9 +29,21 @@ async fn main() -> anyhow::Result<()> {
     let db = db::create_pool(&config.database_url).await?;
     db::run_migrations(&db).await?;
 
+    let cipher = match std::env::var("GIT_TOKEN_ENCRYPTION_KEY") {
+        Ok(k) if !k.trim().is_empty() => Arc::new(TokenCipher::from_base64_key(&k)?),
+        _ => {
+            tracing::warn!(
+                "GIT_TOKEN_ENCRYPTION_KEY not set; deriving from JWT_SECRET. \
+                Generate a dedicated key with: openssl rand -base64 32"
+            );
+            Arc::new(TokenCipher::from_passphrase(&config.jwt_secret))
+        }
+    };
+
     let state = AppState {
         db,
         config: config.clone(),
+        cipher,
     };
 
     let cors = CorsLayer::new()
