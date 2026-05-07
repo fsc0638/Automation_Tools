@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Maximum time to wait between streaming chunks before declaring the agent
-/// unresponsive. Long enough to tolerate model thinking pauses, short enough
-/// that a hung gateway eventually frees the WebSocket.
-const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default maximum time to wait for the next visible streamed token before
+/// treating an agent as stalled. This is configurable because Hermes may spend
+/// longer thinking in late debate rounds with large context.
+const DEFAULT_STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
 const DEBATE_NOTES_FILE: &str = "CONVERSATION_NOTES_DEBATE.md";
 
 use crate::{
@@ -469,6 +469,15 @@ fn debate_round_limit(config: &Config) -> usize {
         12
     } else {
         config.debate_max_rounds.clamp(2, 20)
+    }
+}
+
+fn stream_chunk_timeout(config: &Config) -> Duration {
+    let secs = config.agent_stream_chunk_timeout_secs;
+    if secs == 0 {
+        DEFAULT_STREAM_CHUNK_TIMEOUT
+    } else {
+        Duration::from_secs(secs.clamp(30, 900))
     }
 }
 
@@ -1082,6 +1091,7 @@ pub fn run_agent_stream(
 ) -> Pin<Box<dyn Stream<Item = ServerEvent> + Send>> {
     let config = config.clone();
     let project = project.clone();
+    let chunk_timeout = stream_chunk_timeout(&config);
     let history_owned: Vec<Message> = history.to_vec();
     let current_topic = user_message.to_string();
     let mut chat = messages_to_chat(&project, history, project_summary.as_deref());
@@ -1098,7 +1108,7 @@ pub fn run_agent_stream(
             AgentMode::OpenClawOnly => {
                 let mut stream = openclaw.chat_stream(chat);
                 loop {
-                    match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                    match tokio::time::timeout(chunk_timeout, stream.next()).await {
                         Ok(Some(chunk)) => yield ServerEvent::Chunk {
                             agent: "OpenClaw".into(), content: chunk, round: None, phase: None,
                         },
@@ -1114,7 +1124,7 @@ pub fn run_agent_stream(
             AgentMode::HermesOnly => {
                 let mut stream = hermes.chat_stream(chat);
                 loop {
-                    match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                    match tokio::time::timeout(chunk_timeout, stream.next()).await {
                         Ok(Some(chunk)) => yield ServerEvent::Chunk {
                             agent: "Hermes".into(), content: chunk, round: None, phase: None,
                         },
@@ -1150,7 +1160,7 @@ pub fn run_agent_stream(
                             DebateAgent::Hermes => hermes.chat_stream(ctx),
                         };
                         loop {
-                            match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                            match tokio::time::timeout(chunk_timeout, stream.next()).await {
                                 Ok(Some(chunk)) => {
                                     buffer.push_str(&chunk);
                                     yield ServerEvent::Chunk {
@@ -1201,7 +1211,7 @@ pub fn run_agent_stream(
                     };
                     let mut timed_out = false;
                     loop {
-                        match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                        match tokio::time::timeout(chunk_timeout, stream.next()).await {
                             Ok(Some(chunk)) => {
                                 buffer.push_str(&chunk);
                                 yield ServerEvent::Chunk {
@@ -1214,14 +1224,20 @@ pub fn run_agent_stream(
                             Ok(None) => break,
                             Err(_) => {
                                 timed_out = true;
-                                yield ServerEvent::Error {
-                                    message: format!("{} stream timed out at round {}", agent_name, round_num.unwrap_or(0)),
-                                };
+                                if buffer.trim().is_empty() {
+                                    yield ServerEvent::Error {
+                                        message: format!(
+                                            "{} stream timed out before producing content at round {}",
+                                            agent_name,
+                                            round_num.unwrap_or(0)
+                                        ),
+                                    };
+                                }
                                 break;
                             }
                         }
                     }
-                    if timed_out {
+                    if timed_out && buffer.trim().is_empty() {
                         return;
                     }
                     yield ServerEvent::Done {
@@ -1230,6 +1246,9 @@ pub fn run_agent_stream(
                         phase: Some("round".into()),
                     };
                     runner.record_turn(buffer);
+                    if timed_out {
+                        break;
+                    }
                 }
 
                 let final_round = runner.final_round();
@@ -1241,7 +1260,7 @@ pub fn run_agent_stream(
                     DebateAgent::Hermes => hermes.chat_stream(final_round.context),
                 };
                 loop {
-                    match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                    match tokio::time::timeout(chunk_timeout, stream.next()).await {
                         Ok(Some(chunk)) => {
                             final_buffer.push_str(&chunk);
                             yield ServerEvent::Chunk {
@@ -1253,12 +1272,21 @@ pub fn run_agent_stream(
                         },
                         Ok(None) => break,
                         Err(_) => {
-                            yield ServerEvent::Error {
-                                message: format!("{} final synthesis stream timed out", final_agent_name),
-                            };
-                            return;
+                            if final_buffer.trim().is_empty() {
+                                yield ServerEvent::Error {
+                                    message: format!(
+                                        "{} final synthesis stream timed out before producing content",
+                                        final_agent_name
+                                    ),
+                                };
+                                return;
+                            }
+                            break;
                         }
                     }
+                }
+                if final_buffer.trim().is_empty() {
+                    return;
                 }
                 yield ServerEvent::Done {
                     agent: final_agent_name,
