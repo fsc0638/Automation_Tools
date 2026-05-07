@@ -9,12 +9,17 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
-    api::{auth::verify_token, AppState},
-    agents::orchestrator::{run_agent_stream, AgentMode},
-    db::models::Message,
+    agents::orchestrator::{build_project_scope, run_agent_stream, AgentMode, ServerEvent},
+    api::{
+        auth::verify_token,
+        conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
+        AppState,
+    },
+    db::models::Project,
     error::AppError,
 };
 
@@ -49,11 +54,38 @@ async fn ws_handler(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, user_id, query)))
+    let conversation_exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3",
+    )
+    .bind(query.conversation_id)
+    .bind(query.project_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if conversation_exists.is_none() {
+        return Err(AppError::NotFound("Conversation not found".into()));
+    }
+
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, query)))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, _user_id: Uuid, query: WsQuery) {
+async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     let (mut sender, mut receiver) = socket.split();
+
+    let project: Project = match sqlx::query_as("SELECT * FROM projects WHERE id = $1")
+        .bind(query.project_id)
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(project) => project,
+        Err(_) => {
+            let error = ServerEvent::Error { message: "Project not found for agent scope".into() };
+            let _ = sender.send(WsMessage::Text(serde_json::to_string(&error).unwrap_or_default().into())).await;
+            return;
+        }
+    };
+    let project_scope = build_project_scope(&project);
 
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
@@ -69,7 +101,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, _user_id: Uuid, query
 
         let ClientEvent::Message { content, file_path, mode } = event;
 
-        let _ = sqlx::query(
+        // Load previous history before saving this turn. The orchestrator appends
+        // the current user message itself, so this avoids duplicating it in agent context.
+        let history = load_project_history(&state.db, query.project_id)
+            .await
+            .unwrap_or_default();
+        let project_summary = get_project_summary(&state.db, query.project_id)
+            .await
+            .ok()
+            .flatten();
+
+        let user_saved = sqlx::query(
             "INSERT INTO messages (conversation_id, role, content, file_path)
              VALUES ($1, 'user', $2, $3)",
         )
@@ -79,27 +121,105 @@ async fn handle_socket(socket: WebSocket, state: AppState, _user_id: Uuid, query
         .execute(&state.db)
         .await;
 
-        let history: Vec<Message> = sqlx::query_as(
-            "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
-        )
-        .bind(query.conversation_id)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+        if user_saved.is_err() {
+            let error = ServerEvent::Error { message: "Failed to save user message".into() };
+            let _ = sender.send(WsMessage::Text(serde_json::to_string(&error).unwrap_or_default().into())).await;
+            continue;
+        }
 
-        let agent_mode = match mode.as_deref() {
-            Some("hermes") => AgentMode::HermesOnly,
-            Some("debate") => AgentMode::Debate,
-            _ => AgentMode::OpenClawOnly,
-        };
+        let _ = sqlx::query("UPDATE conversations SET updated_at = NOW() WHERE id = $1")
+            .bind(query.conversation_id)
+            .execute(&state.db)
+            .await;
 
-        let mut stream = run_agent_stream(&state.config, &history, &content, agent_mode);
+        let agent_mode = agent_mode_from_str(mode.as_deref());
+
+        let mut stream = run_agent_stream(
+            &state.config,
+            &project_scope,
+            &history,
+            project_summary.map(|summary| summary.summary),
+            &content,
+            agent_mode,
+        );
+        let mut buffers: HashMap<String, String> = HashMap::new();
 
         while let Some(event) = stream.next().await {
+            match &event {
+                ServerEvent::Chunk { agent, content, round, phase } => {
+                    let key = event_key(agent, *round, phase.as_deref());
+                    buffers.entry(key).or_default().push_str(content);
+                }
+                ServerEvent::Done { agent, round, phase } => {
+                    let key = event_key(agent, *round, phase.as_deref());
+                    if let Some(content) = buffers.remove(&key) {
+                        if !content.trim().is_empty() {
+                            let role = agent_role(agent);
+                            let display_name = display_agent_name(agent, *round, phase.as_deref());
+                            let _ = sqlx::query(
+                                "INSERT INTO messages (conversation_id, role, content, agent_name)
+                                 VALUES ($1, $2, $3, $4)",
+                            )
+                            .bind(query.conversation_id)
+                            .bind(role)
+                            .bind(&content)
+                            .bind(&display_name)
+                            .execute(&state.db)
+                            .await;
+
+                            let _ = sqlx::query("UPDATE conversations SET updated_at = NOW() WHERE id = $1")
+                                .bind(query.conversation_id)
+                                .execute(&state.db)
+                                .await;
+                        }
+                    }
+                }
+                ServerEvent::Error { message } => {
+                    let _ = sqlx::query(
+                        "INSERT INTO messages (conversation_id, role, content, agent_name)
+                         VALUES ($1, 'system', $2, 'System')",
+                    )
+                    .bind(query.conversation_id)
+                    .bind(message)
+                    .execute(&state.db)
+                    .await;
+                }
+            }
+
             let json = serde_json::to_string(&event).unwrap_or_default();
             if sender.send(WsMessage::Text(json.into())).await.is_err() {
                 return;
             }
         }
+
+        let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;
+    }
+}
+
+fn agent_mode_from_str(mode: Option<&str>) -> AgentMode {
+    match mode {
+        Some("hermes") => AgentMode::HermesOnly,
+        Some("debate") => AgentMode::Debate,
+        _ => AgentMode::OpenClawOnly,
+    }
+}
+
+fn agent_role(agent: &str) -> &'static str {
+    if agent.starts_with("Hermes") {
+        "hermes"
+    } else {
+        "openclaw"
+    }
+}
+
+fn event_key(agent: &str, round: Option<usize>, phase: Option<&str>) -> String {
+    format!("{}:{}:{}", agent, phase.unwrap_or("single"), round.map(|r| r.to_string()).unwrap_or_default())
+}
+
+fn display_agent_name(agent: &str, round: Option<usize>, phase: Option<&str>) -> String {
+    match (phase, round) {
+        (Some("round"), Some(r)) => format!("{agent} · Round {r}"),
+        (Some("final"), _) => format!("{agent} · Final"),
+        _ => agent.to_string(),
     }
 }

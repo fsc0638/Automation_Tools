@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -9,14 +9,25 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    api::{auth::AuthUser, AppState},
-    db::models::{Conversation, Message},
+    agents::orchestrator::{build_project_scope, run_agent_turn, AgentMode},
+    api::{
+        auth::AuthUser,
+        conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
+        AppState,
+    },
+    db::models::{Conversation, Message, Project},
     error::{AppError, AppResult},
 };
 
 #[derive(Debug, Deserialize)]
 pub struct CreateConversationRequest {
     pub title: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListConversationsQuery {
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,15 +64,29 @@ async fn list_conversations(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(project_id): Path<Uuid>,
+    Query(query): Query<ListConversationsQuery>,
 ) -> AppResult<Json<Vec<Conversation>>> {
     verify_project_access(&state, project_id, auth_user.id).await?;
 
-    let convs: Vec<Conversation> = sqlx::query_as(
-        "SELECT * FROM conversations WHERE project_id = $1 ORDER BY updated_at DESC",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
+    let convs: Vec<Conversation> = match normalize_mode_optional(query.mode.as_deref()) {
+        Some(mode) => {
+            sqlx::query_as(
+                "SELECT * FROM conversations WHERE project_id = $1 AND mode = $2 ORDER BY updated_at DESC",
+            )
+            .bind(project_id)
+            .bind(mode)
+            .fetch_all(&state.db)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT * FROM conversations WHERE project_id = $1 ORDER BY updated_at DESC",
+            )
+            .bind(project_id)
+            .fetch_all(&state.db)
+            .await?
+        }
+    };
 
     Ok(Json(convs))
 }
@@ -74,15 +99,17 @@ async fn create_conversation(
 ) -> AppResult<(StatusCode, Json<Conversation>)> {
     verify_project_access(&state, project_id, auth_user.id).await?;
 
-    let title = req.title.unwrap_or_else(|| "New Conversation".into());
+    let mode = normalize_mode(req.mode.as_deref());
+    let title = req.title.unwrap_or_else(|| default_title_for_mode(mode));
     let conv: Conversation = sqlx::query_as(
-        "INSERT INTO conversations (project_id, user_id, title)
-         VALUES ($1, $2, $3)
+        "INSERT INTO conversations (project_id, user_id, title, mode)
+         VALUES ($1, $2, $3, $4)
          RETURNING *",
     )
     .bind(project_id)
     .bind(auth_user.id)
     .bind(&title)
+    .bind(mode)
     .fetch_one(&state.db)
     .await?;
 
@@ -122,9 +149,14 @@ async fn send_message(
     Path((project_id, conv_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<SendMessageRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    use crate::agents::orchestrator::{run_agent_turn, AgentMode};
-
     verify_project_access(&state, project_id, auth_user.id).await?;
+
+    let project: Project = sqlx::query_as("SELECT * FROM projects WHERE id = $1 AND user_id = $2")
+        .bind(project_id)
+        .bind(auth_user.id)
+        .fetch_one(&state.db)
+        .await?;
+    let project_scope = build_project_scope(&project);
 
     let conv: Option<Conversation> = sqlx::query_as(
         "SELECT * FROM conversations WHERE id = $1 AND project_id = $2",
@@ -135,7 +167,12 @@ async fn send_message(
     .await?;
     let conv = conv.ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
 
-    // Save user message
+    // Load conversation history before saving this turn, then append the current
+    // user message exactly once for the agent call.
+    let history = load_project_history(&state.db, project_id).await?;
+    let project_summary = get_project_summary(&state.db, project_id).await?;
+
+    // Save user message so every turn is persisted.
     let _user_msg: Message = sqlx::query_as(
         "INSERT INTO messages (conversation_id, role, content, file_path)
          VALUES ($1, 'user', $2, $3)
@@ -147,22 +184,16 @@ async fn send_message(
     .fetch_one(&state.db)
     .await?;
 
-    // Load conversation history
-    let history: Vec<Message> = sqlx::query_as(
-        "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
+    let mode = agent_mode_from_str(req.mode.as_deref());
+
+    let responses = run_agent_turn(
+        &state.config,
+        &project_scope,
+        &history,
+        project_summary.as_ref().map(|summary| summary.summary.as_str()),
+        &req.content,
+        mode,
     )
-    .bind(conv_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    let mode = match req.mode.as_deref() {
-        Some("hermes") => AgentMode::HermesOnly,
-        Some("openclaw") => AgentMode::OpenClawOnly,
-        Some("debate") => AgentMode::Debate,
-        _ => AgentMode::OpenClawOnly,
-    };
-
-    let responses = run_agent_turn(&state.config, &history, &req.content, mode)
         .await
         .map_err(|e| AppError::Agent(e.to_string()))?;
 
@@ -187,7 +218,42 @@ async fn send_message(
         .execute(&state.db)
         .await?;
 
+    let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;
+
     Ok(Json(serde_json::json!({ "messages": saved_messages })))
+}
+
+fn agent_mode_from_str(mode: Option<&str>) -> AgentMode {
+    match mode {
+        Some("hermes") => AgentMode::HermesOnly,
+        Some("debate") => AgentMode::Debate,
+        _ => AgentMode::OpenClawOnly,
+    }
+}
+
+fn normalize_mode_optional(mode: Option<&str>) -> Option<&'static str> {
+    match mode {
+        Some("hermes") => Some("hermes"),
+        Some("debate") => Some("debate"),
+        Some("openclaw") => Some("openclaw"),
+        _ => None,
+    }
+}
+
+fn normalize_mode(mode: Option<&str>) -> &'static str {
+    match mode {
+        Some("hermes") => "hermes",
+        Some("debate") => "debate",
+        _ => "openclaw",
+    }
+}
+
+fn default_title_for_mode(mode: &str) -> String {
+    match mode {
+        "hermes" => "Hermes Conversation".into(),
+        "debate" => "Debate Conversation".into(),
+        _ => "OpenClaw Conversation".into(),
+    }
 }
 
 async fn verify_project_access(
