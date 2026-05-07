@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState, use } from "react";
+import { memo, useCallback, useEffect, useRef, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
@@ -62,7 +62,21 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
+  const flushRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Coalesce multiple incoming chunks into a single React state update per
+  // animation frame. Without this, fast token streams trigger 30-60+ setState
+  // calls per second, each causing a full re-render of streaming bubbles.
+  const scheduleStreamFlush = useCallback(() => {
+    if (flushRafRef.current !== null) return;
+    flushRafRef.current = requestAnimationFrame(() => {
+      flushRafRef.current = null;
+      setStreamBuffers({ ...streamBuffersRef.current });
+      setStreamStatuses({ ...streamStatusesRef.current });
+    });
+  }, []);
 
   const selectConv = useCallback(async (conv: Conversation) => {
     setActiveConv(conv);
@@ -145,9 +159,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           startedAt: Date.now(),
         };
         setStatusNow(Date.now());
-        setStreamStatuses({ ...streamStatusesRef.current });
         setStreaming(true);
         if (!shouldAutoScrollRef.current) setShowJumpToBottom(true);
+        scheduleStreamFlush();
         return;
       }
 
@@ -163,6 +177,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         } as Message]);
         streamBuffersRef.current = {};
         streamStatusesRef.current = {};
+        if (flushRafRef.current !== null) {
+          cancelAnimationFrame(flushRafRef.current);
+          flushRafRef.current = null;
+        }
         setStreamBuffers({});
         setStreamStatuses({});
         setStreaming(false);
@@ -173,13 +191,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       const label = displayAgentName(evt.agent, evt.round, evt.phase);
       if (evt.type === "chunk" && evt.content) {
         delete streamStatusesRef.current[label];
-        setStreamStatuses({ ...streamStatusesRef.current });
         streamBuffersRef.current[label] = (streamBuffersRef.current[label] ?? "") + evt.content;
-        setStreamBuffers({ ...streamBuffersRef.current });
         if (!shouldAutoScrollRef.current) setShowJumpToBottom(true);
+        scheduleStreamFlush();
       } else if (evt.type === "done") {
         delete streamStatusesRef.current[label];
-        setStreamStatuses({ ...streamStatusesRef.current });
         const buffered = streamBuffersRef.current[label] ?? "";
         if (buffered) {
           const role = evt.agent.startsWith("Hermes") ? "hermes" : "openclaw";
@@ -193,7 +209,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           } as Message]);
         }
         delete streamBuffersRef.current[label];
-        setStreamBuffers({ ...streamBuffersRef.current });
+        scheduleStreamFlush();
         if (Object.keys(streamBuffersRef.current).length === 0 && Object.keys(streamStatusesRef.current).length === 0) setStreaming(false);
       }
     };
@@ -222,13 +238,32 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     return () => {
       ws.close();
       if (wsRef.current === ws) wsRef.current = null;
+      if (flushRafRef.current !== null) {
+        cancelAnimationFrame(flushRafRef.current);
+        flushRafRef.current = null;
+      }
     };
-  }, [activeConv?.id, id, wsReconnectKey]);
+  }, [activeConv?.id, id, wsReconnectKey, scheduleStreamFlush]);
 
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamBuffers, streamStatuses]);
+    // Coalesce scroll requests to once per animation frame so chunk-driven
+    // updates don't pile up smooth-scroll animations on top of each other.
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      // "auto" while streaming avoids fighting the smooth-animation queue;
+      // committed messages still get smooth scroll on the next paint.
+      const behavior: ScrollBehavior = streaming ? "auto" : "smooth";
+      bottomRef.current?.scrollIntoView({ behavior });
+    });
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+  }, [messages, streamBuffers, streamStatuses, streaming]);
 
   useEffect(() => {
     if (!streaming || Object.keys(streamStatuses).length === 0) return;
@@ -616,7 +651,7 @@ function StatusMessage({ label, status, now }: { label: string; status: StreamSt
   );
 }
 
-function ChatMessage({ message, streaming }: { message: Message; streaming?: boolean }) {
+const ChatMessage = memo(function ChatMessage({ message, streaming }: { message: Message; streaming?: boolean }) {
   const isUser = message.role === "user";
   const isHermes = message.role === "hermes";
   const isOpenClaw = message.role === "openclaw";
@@ -663,7 +698,11 @@ function ChatMessage({ message, streaming }: { message: Message; streaming?: boo
               ? "bg-[#F5F3FF] border border-[#E9D5FF] text-[#1A1A2E] rounded-tl-sm"
               : "bg-[#EFF6FF] border border-[#BFDBFE] text-[#1A1A2E] rounded-tl-sm"
         )}>
-          {isUser ? (
+          {isUser || streaming ? (
+            // While streaming, render as plain text — re-parsing markdown on
+            // every chunk is the dominant cost when buffers are long.
+            // Markdown + syntax highlighting kicks in once the message is
+            // committed (streaming=false).
             <p className="whitespace-pre-wrap">{visibleContent}</p>
           ) : (
             <div className="prose prose-sm max-w-none">
@@ -689,7 +728,7 @@ function ChatMessage({ message, streaming }: { message: Message; streaming?: boo
       </div>
     </div>
   );
-}
+});
 
 function FileNodeItem({ node, depth }: { node: FileNode; depth: number }) {
   const [open, setOpen] = useState(depth === 0);
