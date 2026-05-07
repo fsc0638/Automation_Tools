@@ -1,21 +1,31 @@
 "use client";
-import { useEffect, useRef, useState, use } from "react";
+import { useCallback, useEffect, useRef, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
   MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
-  GitBranch, Bot, Cpu, User, Zap, ArrowLeft, Plus, File
+  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square
 } from "lucide-react";
 import {
   projects as projectsApi, conversations as convsApi,
   createWsConnection, type Project, type Conversation,
-  type Message, type FileNode,
+  type Message, type FileNode, type AgentMode,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { cn, formatDate } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
-type AgentMode = "openclaw" | "hermes" | "debate";
+const MODE_LABELS: Record<AgentMode, string> = {
+  openclaw: "OpenClaw",
+  hermes: "Hermes",
+  debate: "Debate Mode",
+};
+
+function displayAgentName(agent: string, round?: number, phase?: string) {
+  if (phase === "round" && round) return `${agent} · Round ${round}`;
+  if (phase === "final") return `${agent} · Final`;
+  return agent;
+}
 
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -23,6 +33,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
   const [project, setProject] = useState<Project | null>(null);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
+  const [branches, setBranches] = useState<string[]>([]);
+  const [switchingBranch, setSwitchingBranch] = useState(false);
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -30,38 +42,63 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [mode, setMode] = useState<AgentMode>("openclaw");
   const [streaming, setStreaming] = useState(false);
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
+  const streamBuffersRef = useRef<Record<string, string>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => {
-    loadProject();
+  const selectConv = useCallback(async (conv: Conversation) => {
+    setActiveConv(conv);
+    const data = await convsApi.get(id, conv.id);
+    setMessages(data.messages);
   }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadProject() {
+      const p = await projectsApi.get(id);
+      const [files, cs, branchData] = await Promise.all([
+        projectsApi.fileTree(id).catch(() => []),
+        convsApi.list(id, mode),
+        p.source_type === "git" ? projectsApi.gitBranches(id).catch(() => ({ branches: [] })) : Promise.resolve({ branches: [] }),
+      ]);
+
+      if (cancelled) return;
+
+      streamBuffersRef.current = {};
+      setStreamBuffers({});
+      setStreaming(false);
+      setProject(p);
+      setFileTree(files);
+      setBranches(branchData.branches);
+      setConvs(cs);
+
+      if (cs.length > 0) {
+        setActiveConv(cs[0]);
+        const data = await convsApi.get(id, cs[0].id);
+        if (!cancelled) setMessages(data.messages);
+      } else {
+        setActiveConv(null);
+        setMessages([]);
+      }
+    }
+
+    wsRef.current?.close();
+    streamBuffersRef.current = {};
+    void loadProject();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, mode]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamBuffers]);
 
-  async function loadProject() {
-    const [p, files, cs] = await Promise.all([
-      projectsApi.get(id),
-      projectsApi.fileTree(id).catch(() => []),
-      convsApi.list(id),
-    ]);
-    setProject(p);
-    setFileTree(files);
-    setConvs(cs);
-    if (cs.length > 0) selectConv(cs[0]);
-  }
-
-  async function selectConv(conv: Conversation) {
-    setActiveConv(conv);
-    const data = await convsApi.get(id, conv.id);
-    setMessages(data.messages);
-  }
-
   async function newConv() {
-    const conv = await convsApi.create(id, `Conversation ${convs.length + 1}`);
+    const conv = await convsApi.create(id, `${MODE_LABELS[mode]} Conversation ${convs.length + 1}`, mode);
     setConvs((cs) => [conv, ...cs]);
     setMessages([]);
     setActiveConv(conv);
@@ -72,52 +109,76 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     wsRef.current?.close();
     const ws = createWsConnection(activeConv.id, id);
     wsRef.current = ws;
+    streamBuffersRef.current = {};
     setStreaming(true);
     setStreamBuffers({});
 
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      conversation_id: activeConv.id,
+    const convId = activeConv.id;
+    setMessages((ms) => [...ms, {
+      id: crypto.randomUUID(),
+      conversation_id: convId,
       role: "user",
       content,
       created_at: new Date().toISOString(),
-    };
-    setMessages((ms) => [...ms, userMsg]);
+    } as Message]);
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "message", content, mode }));
     };
 
     ws.onmessage = (e) => {
-      const evt = JSON.parse(e.data);
-      if (evt.type === "chunk") {
-        setStreamBuffers((b) => ({ ...b, [evt.agent]: (b[evt.agent] ?? "") + evt.content }));
+      const evt = JSON.parse(e.data) as { type: string; agent: string; content?: string; round?: number; phase?: string };
+      const label = displayAgentName(evt.agent, evt.round, evt.phase);
+      if (evt.type === "chunk" && evt.content) {
+        streamBuffersRef.current[label] = (streamBuffersRef.current[label] ?? "") + evt.content;
+        setStreamBuffers({ ...streamBuffersRef.current });
       } else if (evt.type === "done") {
-        setStreamBuffers((b) => {
-          const content = b[evt.agent] ?? "";
-          if (content) {
-            const role = evt.agent === "Hermes" ? "hermes" : "openclaw";
-            setMessages((ms) => [
-              ...ms,
-              {
-                id: Date.now().toString() + evt.agent,
-                conversation_id: activeConv.id,
-                role,
-                content,
-                agent_name: evt.agent,
-                created_at: new Date().toISOString(),
-              } as Message,
-            ]);
-          }
-          const next = { ...b };
-          delete next[evt.agent];
-          if (Object.keys(next).length === 0) setStreaming(false);
-          return next;
-        });
+        const buffered = streamBuffersRef.current[label] ?? "";
+        if (buffered) {
+          const role = evt.agent.startsWith("Hermes") ? "hermes" : "openclaw";
+          setMessages((ms) => [...ms, {
+            id: crypto.randomUUID(),
+            conversation_id: convId,
+            role,
+            content: buffered,
+            agent_name: label,
+            created_at: new Date().toISOString(),
+          } as Message]);
+        }
+        delete streamBuffersRef.current[label];
+        setStreamBuffers({ ...streamBuffersRef.current });
+        if (Object.keys(streamBuffersRef.current).length === 0) setStreaming(false);
       }
     };
 
     ws.onclose = () => setStreaming(false);
+  }
+
+  function stopStreaming() {
+    wsRef.current?.close();
+    wsRef.current = null;
+    streamBuffersRef.current = {};
+    setStreamBuffers({});
+    setStreaming(false);
+  }
+
+  async function switchBranch(branch: string) {
+    if (!project || project.source_type !== "git" || !branch || branch === project.default_branch) return;
+    setSwitchingBranch(true);
+    try {
+      const updated = await projectsApi.checkoutBranch(id, branch);
+      const [files, branchData] = await Promise.all([
+        projectsApi.fileTree(id).catch(() => []),
+        projectsApi.gitBranches(id).catch(() => ({ branches: [] })),
+      ]);
+      setProject(updated);
+      setFileTree(files);
+      setBranches(branchData.branches);
+      streamBuffersRef.current = {};
+      setStreamBuffers({});
+    } finally {
+      setSwitchingBranch(false);
+    }
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -157,7 +218,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           </div>
 
           <div className="px-4 py-2 border-t border-[#F1F5F9] flex items-center justify-between">
-            <p className="text-xs font-semibold text-[#94A3B8] uppercase tracking-wider">Conversations</p>
+            <p className="text-xs font-semibold text-[#94A3B8] uppercase tracking-wider">{MODE_LABELS[mode]} Chats</p>
             <button onClick={newConv} className="text-[#94A3B8] hover:text-[#0050A0]">
               <Plus size={13} />
             </button>
@@ -184,6 +245,23 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       <div className="flex-1 flex flex-col min-w-0">
         {/* Toolbar */}
         <div className="h-14 border-b border-[#E2E8F0] bg-white flex items-center px-6 gap-4">
+          {project?.source_type === "git" && (
+            <div className="flex items-center gap-2 border-r border-[#E2E8F0] pr-4 mr-1">
+              <GitBranch size={13} className="text-[#0050A0]" />
+              <select
+                value={project.default_branch ?? ""}
+                disabled={switchingBranch || streaming}
+                onChange={(e) => void switchBranch(e.target.value)}
+                className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs text-[#1A1A2E] disabled:opacity-50"
+                title="Switch Git branch"
+              >
+                {(branches.length ? branches : [project.default_branch ?? "main"]).map((branch) => (
+                  <option key={branch} value={branch}>{branch}</option>
+                ))}
+              </select>
+              {switchingBranch && <span className="text-xs text-[#94A3B8]">switching...</span>}
+            </div>
+          )}
           <span className="text-sm font-medium text-[#64748B]">Mode:</span>
           {(["openclaw", "hermes", "debate"] as AgentMode[]).map((m) => (
             <button key={m}
@@ -197,7 +275,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               {m === "openclaw" && <Cpu size={12} />}
               {m === "hermes" && <Bot size={12} />}
               {m === "debate" && <Zap size={12} />}
-              {m === "openclaw" ? "OpenClaw" : m === "hermes" ? "Hermes" : "Debate Mode"}
+              {MODE_LABELS[m] as string}
             </button>
           ))}
           {mode === "debate" && (
@@ -219,14 +297,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               {messages.map((msg) => <ChatMessage key={msg.id} message={msg} />)}
 
               {/* Streaming buffers */}
-              {Object.entries(streamBuffers).map(([agent, content]) => (
-                content && (
-                  <ChatMessage key={`stream-${agent}`} message={{
-                    id: `stream-${agent}`, conversation_id: "", role: agent === "Hermes" ? "hermes" : "openclaw",
-                    content, agent_name: agent, created_at: new Date().toISOString(),
+              {Object.entries(streamBuffers).map(([agentLabel, content]) =>
+                content ? (
+                  <ChatMessage key={`streaming-buffer-${agentLabel}`} message={{
+                    id: `streaming-buffer-${agentLabel}`, conversation_id: "", role: agentLabel.startsWith("Hermes") ? "hermes" : "openclaw",
+                    content, agent_name: agentLabel, created_at: new Date().toISOString(),
                   }} streaming />
-                )
-              ))}
+                ) : null
+              )}
               <div ref={bottomRef} />
             </>
           )}
@@ -255,9 +333,15 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 t.style.height = Math.min(t.scrollHeight, 160) + "px";
               }}
             />
-            <Button type="submit" disabled={!activeConv || !input.trim() || streaming} loading={streaming}>
-              <Send size={15} />
-            </Button>
+            {streaming ? (
+              <Button type="button" variant="secondary" onClick={stopStreaming}>
+                <Square size={14} /> Stop
+              </Button>
+            ) : (
+              <Button type="submit" disabled={!activeConv || !input.trim()}>
+                <Send size={15} />
+              </Button>
+            )}
           </form>
         </div>
       </div>
@@ -269,6 +353,7 @@ function ChatMessage({ message, streaming }: { message: Message; streaming?: boo
   const isUser = message.role === "user";
   const isHermes = message.role === "hermes";
   const isOpenClaw = message.role === "openclaw";
+  const visibleContent = message.content.replace(/<!--\s*consensus:reached\s*-->/gi, "").trim();
 
   return (
     <div className={cn("flex gap-3", isUser && "flex-row-reverse")}>
@@ -302,26 +387,26 @@ function ChatMessage({ message, streaming }: { message: Message; streaming?: boo
               : "bg-[#EFF6FF] border border-[#BFDBFE] text-[#1A1A2E] rounded-tl-sm"
         )}>
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            <p className="whitespace-pre-wrap">{visibleContent}</p>
           ) : (
-            <ReactMarkdown
-              className="prose prose-sm max-w-none"
-              components={{
-                code({ node, className, children, ...props }) {
-                  const match = /language-(\w+)/.exec(className || "");
-                  const isBlock = !!match;
-                  return isBlock ? (
-                    <SyntaxHighlighter language={match[1]}>{String(children)}</SyntaxHighlighter>
-                  ) : (
-                    <code className="bg-black/10 rounded px-1 py-0.5 font-mono text-xs" {...props}>
-                      {children}
-                    </code>
-                  );
-                },
-              }}
-            >
-              {message.content}
-            </ReactMarkdown>
+            <div className="prose prose-sm max-w-none">
+              <ReactMarkdown
+                components={{
+                  code({ className, children, ...props }) {
+                    const match = /language-(\w+)/.exec(className || "");
+                    return match ? (
+                      <SyntaxHighlighter language={match[1]}>{String(children)}</SyntaxHighlighter>
+                    ) : (
+                      <code className="bg-black/10 rounded px-1 py-0.5 font-mono text-xs" {...props}>
+                        {children}
+                      </code>
+                    );
+                  },
+                }}
+              >
+                {visibleContent}
+              </ReactMarkdown>
+            </div>
           )}
         </div>
       </div>
