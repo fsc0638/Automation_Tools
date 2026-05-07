@@ -417,10 +417,15 @@ fn code_change_requested(user_message: &str) -> bool {
     ].iter().any(|kw| text.contains(kw))
 }
 
-async fn run_agent(config: &Arc<Config>, agent: DebateAgent, ctx: Vec<ChatMessage>) -> Result<String> {
+async fn run_agent(
+    openclaw: &OpenClawClient,
+    hermes: &HermesClient,
+    agent: DebateAgent,
+    ctx: Vec<ChatMessage>,
+) -> Result<String> {
     match agent {
-        DebateAgent::OpenClaw => OpenClawClient::new(config).chat(ctx).await,
-        DebateAgent::Hermes => HermesClient::new(config).chat(ctx).await,
+        DebateAgent::OpenClaw => openclaw.chat(ctx).await,
+        DebateAgent::Hermes => hermes.chat(ctx).await,
     }
 }
 
@@ -444,17 +449,20 @@ pub async fn run_agent_turn(
     user_message: &str,
     mode: AgentMode,
 ) -> Result<Vec<(String, String, Option<String>)>> {
+    let openclaw = OpenClawClient::new(config);
+    let hermes = HermesClient::new(config);
+
     let mut chat = messages_to_chat(project, history, project_summary);
     chat.push(ChatMessage { role: "user".into(), content: user_message.into() });
 
     let mut results = vec![];
     match mode {
         AgentMode::OpenClawOnly => {
-            let reply = run_agent(config, DebateAgent::OpenClaw, chat).await?;
+            let reply = run_agent(&openclaw, &hermes, DebateAgent::OpenClaw, chat).await?;
             results.push(("openclaw".into(), reply, Some("OpenClaw".into())));
         }
         AgentMode::HermesOnly => {
-            let reply = run_agent(config, DebateAgent::Hermes, chat).await?;
+            let reply = run_agent(&openclaw, &hermes, DebateAgent::Hermes, chat).await?;
             results.push(("hermes".into(), reply, Some("Hermes".into())));
         }
         AgentMode::Debate => {
@@ -478,7 +486,7 @@ pub async fn run_agent_turn(
                     &turns,
                     debate_turn_instruction(current, turn_index, turn_index == 0, user_message),
                 );
-                let reply = run_agent(config, current, ctx).await?;
+                let reply = run_agent(&openclaw, &hermes, current, ctx).await?;
                 results.push((current.role().into(), reply.clone(), Some(current.name().into())));
                 turns.push((current, reply));
 
@@ -493,7 +501,7 @@ pub async fn run_agent_turn(
 
             let final_agent = lead;
             let final_ctx = chat_with_turns(&base, &turns, final_instruction(final_agent, code_change, reached_consensus, user_message));
-            let final_reply = run_agent(config, final_agent, final_ctx).await?;
+            let final_reply = run_agent(&openclaw, &hermes, final_agent, final_ctx).await?;
             results.push((final_agent.role().into(), final_reply, Some(final_agent.name().into())));
         }
     }
@@ -517,16 +525,19 @@ pub fn run_agent_stream(
     chat.push(ChatMessage { role: "user".into(), content: current_topic.clone() });
 
     Box::pin(async_stream::stream! {
+        let openclaw = OpenClawClient::new(&config);
+        let hermes = HermesClient::new(&config);
+
         match mode {
             AgentMode::OpenClawOnly => {
-                let mut stream = OpenClawClient::new(&config).chat_stream(chat);
+                let mut stream = openclaw.chat_stream(chat);
                 while let Some(chunk) = stream.next().await {
                     yield ServerEvent::Chunk { agent: "OpenClaw".into(), content: chunk, round: None, phase: None };
                 }
                 yield ServerEvent::Done { agent: "OpenClaw".into(), round: None, phase: None };
             }
             AgentMode::HermesOnly => {
-                let mut stream = HermesClient::new(&config).chat_stream(chat);
+                let mut stream = hermes.chat_stream(chat);
                 while let Some(chunk) = stream.next().await {
                     yield ServerEvent::Chunk { agent: "Hermes".into(), content: chunk, round: None, phase: None };
                 }
@@ -555,21 +566,13 @@ pub fn run_agent_stream(
                     );
 
                     let mut buffer = String::new();
-                    match current {
-                        DebateAgent::OpenClaw => {
-                            let mut stream = OpenClawClient::new(&config).chat_stream(ctx);
-                            while let Some(chunk) = stream.next().await {
-                                buffer.push_str(&chunk);
-                                yield ServerEvent::Chunk { agent: current.name().into(), content: chunk, round: Some(turn_index + 1), phase: Some("round".into()) };
-                            }
-                        }
-                        DebateAgent::Hermes => {
-                            let mut stream = HermesClient::new(&config).chat_stream(ctx);
-                            while let Some(chunk) = stream.next().await {
-                                buffer.push_str(&chunk);
-                                yield ServerEvent::Chunk { agent: current.name().into(), content: chunk, round: Some(turn_index + 1), phase: Some("round".into()) };
-                            }
-                        }
+                    let mut stream = match current {
+                        DebateAgent::OpenClaw => openclaw.chat_stream(ctx),
+                        DebateAgent::Hermes => hermes.chat_stream(ctx),
+                    };
+                    while let Some(chunk) = stream.next().await {
+                        buffer.push_str(&chunk);
+                        yield ServerEvent::Chunk { agent: current.name().into(), content: chunk, round: Some(turn_index + 1), phase: Some("round".into()) };
                     }
                     yield ServerEvent::Done { agent: current.name().into(), round: Some(turn_index + 1), phase: Some("round".into()) };
 
@@ -586,19 +589,12 @@ pub fn run_agent_stream(
 
                 let final_agent = lead;
                 let final_ctx = chat_with_turns(&base, &turns, final_instruction(final_agent, code_change, reached_consensus, &current_topic));
-                match final_agent {
-                    DebateAgent::OpenClaw => {
-                        let mut stream = OpenClawClient::new(&config).chat_stream(final_ctx);
-                        while let Some(chunk) = stream.next().await {
-                            yield ServerEvent::Chunk { agent: final_agent.name().into(), content: chunk, round: None, phase: Some("final".into()) };
-                        }
-                    }
-                    DebateAgent::Hermes => {
-                        let mut stream = HermesClient::new(&config).chat_stream(final_ctx);
-                        while let Some(chunk) = stream.next().await {
-                            yield ServerEvent::Chunk { agent: final_agent.name().into(), content: chunk, round: None, phase: Some("final".into()) };
-                        }
-                    }
+                let mut stream = match final_agent {
+                    DebateAgent::OpenClaw => openclaw.chat_stream(final_ctx),
+                    DebateAgent::Hermes => hermes.chat_stream(final_ctx),
+                };
+                while let Some(chunk) = stream.next().await {
+                    yield ServerEvent::Chunk { agent: final_agent.name().into(), content: chunk, round: None, phase: Some("final".into()) };
                 }
                 yield ServerEvent::Done { agent: final_agent.name().into(), round: None, phase: Some("final".into()) };
             }
