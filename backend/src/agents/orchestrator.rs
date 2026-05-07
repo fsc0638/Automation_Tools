@@ -16,6 +16,11 @@ use uuid::Uuid;
 const DEFAULT_STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
 const DEBATE_NOTES_FILE: &str = "CONVERSATION_NOTES_DEBATE.md";
 
+/// Batch upstream tokens into chunks of at least this many bytes before
+/// forwarding to the WebSocket. Reduces ServerEvent volume from ~1/token
+/// (often 30-60/sec) to ~1/sentence, cutting frontend re-render frequency.
+const STREAM_BATCH_BYTES: usize = 80;
+
 use crate::{
     agents::{
         hermes::HermesClient,
@@ -488,6 +493,26 @@ fn stream_chunk_timeout(config: &Config) -> Duration {
     } else {
         Duration::from_secs(secs.clamp(30, 900))
     }
+}
+
+/// Wrap an LLM token stream so it emits coalesced chunks of at least
+/// STREAM_BATCH_BYTES (final partial chunk is always flushed at end).
+fn batch_chunks(
+    stream: Pin<Box<dyn Stream<Item = String> + Send>>,
+) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    Box::pin(async_stream::stream! {
+        let mut buf = String::new();
+        let mut s = stream;
+        while let Some(chunk) = s.next().await {
+            buf.push_str(&chunk);
+            if buf.len() >= STREAM_BATCH_BYTES {
+                yield std::mem::take(&mut buf);
+            }
+        }
+        if !buf.is_empty() {
+            yield buf;
+        }
+    })
 }
 
 fn debate_instruction(
@@ -1121,7 +1146,7 @@ pub fn run_agent_stream(
                     round: None,
                     phase: Some("thinking".into()),
                 };
-                let mut stream = openclaw.chat_stream(chat);
+                let mut stream = batch_chunks(openclaw.chat_stream(chat));
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
                         Ok(Some(chunk)) => yield ServerEvent::Chunk {
@@ -1143,7 +1168,7 @@ pub fn run_agent_stream(
                     round: None,
                     phase: Some("thinking".into()),
                 };
-                let mut stream = hermes.chat_stream(chat);
+                let mut stream = batch_chunks(hermes.chat_stream(chat));
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
                         Ok(Some(chunk)) => yield ServerEvent::Chunk {
@@ -1182,10 +1207,10 @@ pub fn run_agent_stream(
                             phase: Some(phase.into()),
                         };
                         let mut buffer = String::new();
-                        let mut stream = match agent {
+                        let mut stream = batch_chunks(match agent {
                             DebateAgent::OpenClaw => openclaw.chat_stream(ctx),
                             DebateAgent::Hermes => hermes.chat_stream(ctx),
-                        };
+                        });
                         loop {
                             match tokio::time::timeout(chunk_timeout, stream.next()).await {
                                 Ok(Some(chunk)) => {
@@ -1242,10 +1267,10 @@ pub fn run_agent_stream(
                         phase: Some("round".into()),
                     };
                     let mut buffer = String::new();
-                    let mut stream = match round.agent {
+                    let mut stream = batch_chunks(match round.agent {
                         DebateAgent::OpenClaw => openclaw.chat_stream(round.context),
                         DebateAgent::Hermes => hermes.chat_stream(round.context),
-                    };
+                    });
                     let mut timed_out = false;
                     loop {
                         match tokio::time::timeout(chunk_timeout, stream.next()).await {
@@ -1298,10 +1323,10 @@ pub fn run_agent_stream(
                     phase: Some("final".into()),
                 };
                 let mut final_buffer = String::new();
-                let mut stream = match final_round.agent {
+                let mut stream = batch_chunks(match final_round.agent {
                     DebateAgent::OpenClaw => openclaw.chat_stream(final_round.context),
                     DebateAgent::Hermes => hermes.chat_stream(final_round.context),
-                };
+                });
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
                         Ok(Some(chunk)) => {
