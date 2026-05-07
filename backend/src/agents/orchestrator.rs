@@ -4,7 +4,13 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
+
+/// Maximum time to wait between streaming chunks before declaring the agent
+/// unresponsive. Long enough to tolerate model thinking pauses, short enough
+/// that a hung gateway eventually frees the WebSocket.
+const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
 
 use crate::{
     agents::{hermes::HermesClient, openclaw::{ChatMessage, OpenClawClient}},
@@ -599,15 +605,33 @@ pub fn run_agent_stream(
         match mode {
             AgentMode::OpenClawOnly => {
                 let mut stream = openclaw.chat_stream(chat);
-                while let Some(chunk) = stream.next().await {
-                    yield ServerEvent::Chunk { agent: "OpenClaw".into(), content: chunk, round: None, phase: None };
+                loop {
+                    match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                            agent: "OpenClaw".into(), content: chunk, round: None, phase: None,
+                        },
+                        Ok(None) => break,
+                        Err(_) => {
+                            yield ServerEvent::Error { message: "OpenClaw stream timed out".into() };
+                            return;
+                        }
+                    }
                 }
                 yield ServerEvent::Done { agent: "OpenClaw".into(), round: None, phase: None };
             }
             AgentMode::HermesOnly => {
                 let mut stream = hermes.chat_stream(chat);
-                while let Some(chunk) = stream.next().await {
-                    yield ServerEvent::Chunk { agent: "Hermes".into(), content: chunk, round: None, phase: None };
+                loop {
+                    match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                            agent: "Hermes".into(), content: chunk, round: None, phase: None,
+                        },
+                        Ok(None) => break,
+                        Err(_) => {
+                            yield ServerEvent::Error { message: "Hermes stream timed out".into() };
+                            return;
+                        }
+                    }
                 }
                 yield ServerEvent::Done { agent: "Hermes".into(), round: None, phase: None };
             }
@@ -621,14 +645,30 @@ pub fn run_agent_stream(
                         DebateAgent::OpenClaw => openclaw.chat_stream(round.context),
                         DebateAgent::Hermes => hermes.chat_stream(round.context),
                     };
-                    while let Some(chunk) = stream.next().await {
-                        buffer.push_str(&chunk);
-                        yield ServerEvent::Chunk {
-                            agent: agent_name.clone(),
-                            content: chunk,
-                            round: round_num,
-                            phase: Some("round".into()),
-                        };
+                    let mut timed_out = false;
+                    loop {
+                        match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                            Ok(Some(chunk)) => {
+                                buffer.push_str(&chunk);
+                                yield ServerEvent::Chunk {
+                                    agent: agent_name.clone(),
+                                    content: chunk,
+                                    round: round_num,
+                                    phase: Some("round".into()),
+                                };
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                timed_out = true;
+                                yield ServerEvent::Error {
+                                    message: format!("{} stream timed out at round {}", agent_name, round_num.unwrap_or(0)),
+                                };
+                                break;
+                            }
+                        }
+                    }
+                    if timed_out {
+                        return;
                     }
                     yield ServerEvent::Done {
                         agent: agent_name,
@@ -644,13 +684,22 @@ pub fn run_agent_stream(
                     DebateAgent::OpenClaw => openclaw.chat_stream(final_round.context),
                     DebateAgent::Hermes => hermes.chat_stream(final_round.context),
                 };
-                while let Some(chunk) = stream.next().await {
-                    yield ServerEvent::Chunk {
-                        agent: final_agent_name.clone(),
-                        content: chunk,
-                        round: None,
-                        phase: Some("final".into()),
-                    };
+                loop {
+                    match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                            agent: final_agent_name.clone(),
+                            content: chunk,
+                            round: None,
+                            phase: Some("final".into()),
+                        },
+                        Ok(None) => break,
+                        Err(_) => {
+                            yield ServerEvent::Error {
+                                message: format!("{} final synthesis stream timed out", final_agent_name),
+                            };
+                            return;
+                        }
+                    }
                 }
                 yield ServerEvent::Done {
                     agent: final_agent_name,
