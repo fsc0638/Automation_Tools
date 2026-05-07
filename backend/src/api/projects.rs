@@ -99,7 +99,11 @@ async fn create_project(
     };
 
     let local_path = if req.source_type == "git" {
-        let clone_dir = format!("./data/projects/{}/{}", auth_user.id, Uuid::new_v4());
+        let clone_dir = build_clone_dir(
+            &state.config.project_data_root,
+            &req.source_path,
+            Uuid::new_v4(),
+        );
         clone_repository(
             &req.source_path,
             &clone_dir,
@@ -311,4 +315,35 @@ fn project_root_path(project: &Project) -> String {
     } else {
         project.source_path.clone()
     }
+}
+
+/// Build the on-disk clone directory: `<root>/<repo-slug>-<short>`.
+/// Slug is derived from the URL's last segment, sanitised; short is 8 hex
+/// chars from the supplied UUID. Existing projects keep whatever path was
+/// stored at create time, so old clones remain accessible after upgrades.
+fn build_clone_dir(root: &str, source_url: &str, clone_id: Uuid) -> String {
+    let slug = repo_slug_from_url(source_url);
+    let mut short = clone_id.to_string();
+    short.retain(|c| c != '-');
+    let short = short.chars().take(8).collect::<String>();
+    let root = root.trim_end_matches(['/', '\\']);
+    format!("{}/{}-{}", root, slug, short)
+}
+
+fn repo_slug_from_url(source_url: &str) -> String {
+    let cleaned = source_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    // Take everything after the last '/' or ':' (covers HTTPS and SSH URLs).
+    let last = cleaned
+        .rsplit(['/', ':'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("repo");
+    let safe: String = last
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect();
+    let trimmed = safe.trim_matches(['_', '.', '-']).to_string();
+    if trimmed.is_empty() { "repo".into() } else { trimmed }
 }

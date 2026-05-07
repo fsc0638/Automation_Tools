@@ -16,6 +16,7 @@ pub struct Config {
     pub agent_stream_chunk_timeout_secs: u64,
     pub server_host: String,
     pub server_port: u16,
+    pub project_data_root: String,
 }
 
 impl Config {
@@ -57,6 +58,11 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8080),
+            project_data_root: std::env::var("PROJECT_DATA_ROOT")
+                .unwrap_or_else(|_| "./data/projects".into())
+                .trim_end_matches('/')
+                .trim_end_matches('\\')
+                .to_string(),
         })
     }
 }
