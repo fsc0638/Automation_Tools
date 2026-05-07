@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
   MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
-  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square
+  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, AlertCircle
 } from "lucide-react";
 import {
   projects as projectsApi, conversations as convsApi,
@@ -44,6 +44,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
   const streamBuffersRef = useRef<Record<string, string>>({});
   const wsRef = useRef<WebSocket | null>(null);
+  const [wsReconnectKey, setWsReconnectKey] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -53,27 +54,35 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setMessages(data.messages);
   }, [id]);
 
+  // Effect 1: project + file tree + branches — reload only when project id changes.
   useEffect(() => {
     let cancelled = false;
-
-    async function loadProject() {
+    (async () => {
       const p = await projectsApi.get(id);
-      const [files, cs, branchData] = await Promise.all([
+      const [files, branchData] = await Promise.all([
         projectsApi.fileTree(id).catch(() => []),
-        convsApi.list(id, mode),
-        p.source_type === "git" ? projectsApi.gitBranches(id).catch(() => ({ branches: [] })) : Promise.resolve({ branches: [] }),
+        p.source_type === "git"
+          ? projectsApi.gitBranches(id).catch(() => ({ branches: [] }))
+          : Promise.resolve({ branches: [] }),
       ]);
-
       if (cancelled) return;
-
-      streamBuffersRef.current = {};
-      setStreamBuffers({});
-      setStreaming(false);
       setProject(p);
       setFileTree(files);
       setBranches(branchData.branches);
-      setConvs(cs);
+    })();
+    return () => { cancelled = true; };
+  }, [id]);
 
+  // Effect 2: conversations list — reload when project id or mode changes.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const cs = await convsApi.list(id, mode);
+      if (cancelled) return;
+      setConvs(cs);
+      streamBuffersRef.current = {};
+      setStreamBuffers({});
+      setStreaming(false);
       if (cs.length > 0) {
         setActiveConv(cs[0]);
         const data = await convsApi.get(id, cs[0].id);
@@ -82,52 +91,49 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         setActiveConv(null);
         setMessages([]);
       }
-    }
-
-    wsRef.current?.close();
-    streamBuffersRef.current = {};
-    void loadProject();
-
-    return () => {
-      cancelled = true;
-    };
+    })();
+    return () => { cancelled = true; };
   }, [id, mode]);
 
+  // Effect 3: WebSocket bound to activeConv lifecycle.
+  // Opens once per conversation; sendViaWs reuses the live connection.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamBuffers]);
-
-  async function newConv() {
-    const conv = await convsApi.create(id, `${MODE_LABELS[mode]} Conversation ${convs.length + 1}`, mode);
-    setConvs((cs) => [conv, ...cs]);
-    setMessages([]);
-    setActiveConv(conv);
-  }
-
-  function sendViaWs(content: string) {
-    if (!activeConv) return;
-    wsRef.current?.close();
-    const ws = createWsConnection(activeConv.id, id);
-    wsRef.current = ws;
-    streamBuffersRef.current = {};
-    setStreaming(true);
-    setStreamBuffers({});
-
+    if (!activeConv) {
+      wsRef.current?.close();
+      wsRef.current = null;
+      return;
+    }
     const convId = activeConv.id;
-    setMessages((ms) => [...ms, {
-      id: crypto.randomUUID(),
-      conversation_id: convId,
-      role: "user",
-      content,
-      created_at: new Date().toISOString(),
-    } as Message]);
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "message", content, mode }));
-    };
+    const ws = createWsConnection(convId, id);
+    wsRef.current = ws;
 
     ws.onmessage = (e) => {
-      const evt = JSON.parse(e.data) as { type: string; agent: string; content?: string; round?: number; phase?: string };
+      const evt = JSON.parse(e.data) as {
+        type: string;
+        agent?: string;
+        content?: string;
+        round?: number;
+        phase?: string;
+        message?: string;
+      };
+
+      if (evt.type === "error") {
+        const errorText = evt.message ?? "Agent error";
+        setMessages((ms) => [...ms, {
+          id: crypto.randomUUID(),
+          conversation_id: convId,
+          role: "system",
+          content: errorText,
+          agent_name: "System",
+          created_at: new Date().toISOString(),
+        } as Message]);
+        streamBuffersRef.current = {};
+        setStreamBuffers({});
+        setStreaming(false);
+        return;
+      }
+
+      if (!evt.agent) return;
       const label = displayAgentName(evt.agent, evt.round, evt.phase);
       if (evt.type === "chunk" && evt.content) {
         streamBuffersRef.current[label] = (streamBuffersRef.current[label] ?? "") + evt.content;
@@ -151,15 +157,82 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       }
     };
 
-    ws.onclose = () => setStreaming(false);
+    ws.onclose = () => {
+      if (wsRef.current === ws) {
+        setStreaming(false);
+      }
+    };
+
+    ws.onerror = () => {
+      if (wsRef.current !== ws) return;
+      setMessages((ms) => [...ms, {
+        id: crypto.randomUUID(),
+        conversation_id: convId,
+        role: "system",
+        content: "WebSocket connection error",
+        agent_name: "System",
+        created_at: new Date().toISOString(),
+      } as Message]);
+      setStreaming(false);
+    };
+
+    return () => {
+      ws.close();
+      if (wsRef.current === ws) wsRef.current = null;
+    };
+  }, [activeConv?.id, id, wsReconnectKey]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, streamBuffers]);
+
+  async function newConv() {
+    const conv = await convsApi.create(id, `${MODE_LABELS[mode]} Conversation ${convs.length + 1}`, mode);
+    setConvs((cs) => [conv, ...cs]);
+    setMessages([]);
+    setActiveConv(conv);
+  }
+
+  function sendViaWs(content: string) {
+    if (!activeConv) return;
+    const ws = wsRef.current;
+    const convId = activeConv.id;
+
+    streamBuffersRef.current = {};
+    setStreamBuffers({});
+    setStreaming(true);
+    setMessages((ms) => [...ms, {
+      id: crypto.randomUUID(),
+      conversation_id: convId,
+      role: "user",
+      content,
+      created_at: new Date().toISOString(),
+    } as Message]);
+
+    const payload = JSON.stringify({ type: "message", content, mode });
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(payload);
+    } else if (ws && ws.readyState === WebSocket.CONNECTING) {
+      ws.addEventListener("open", () => ws.send(payload), { once: true });
+    } else {
+      // Connection lost — trigger reconnect, then send when ready.
+      setWsReconnectKey((k) => k + 1);
+      setTimeout(() => {
+        const next = wsRef.current;
+        if (!next) return;
+        if (next.readyState === WebSocket.OPEN) next.send(payload);
+        else next.addEventListener("open", () => next.send(payload), { once: true });
+      }, 0);
+    }
   }
 
   function stopStreaming() {
     wsRef.current?.close();
-    wsRef.current = null;
     streamBuffersRef.current = {};
     setStreamBuffers({});
     setStreaming(false);
+    // Force the WS effect to reconnect for the next message.
+    setWsReconnectKey((k) => k + 1);
   }
 
   async function switchBranch(branch: string) {
@@ -353,7 +426,17 @@ function ChatMessage({ message, streaming }: { message: Message; streaming?: boo
   const isUser = message.role === "user";
   const isHermes = message.role === "hermes";
   const isOpenClaw = message.role === "openclaw";
+  const isSystem = message.role === "system";
   const visibleContent = message.content.replace(/<!--\s*consensus:reached\s*-->/gi, "").trim();
+
+  if (isSystem) {
+    return (
+      <div className="flex items-start gap-2 mx-auto max-w-[80%] rounded-md border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs text-[#991B1B]">
+        <AlertCircle size={13} className="flex-shrink-0 mt-0.5" />
+        <span className="whitespace-pre-wrap">{visibleContent}</span>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("flex gap-3", isUser && "flex-row-reverse")}>
