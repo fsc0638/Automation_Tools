@@ -5,8 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     agents::{
-        hermes::HermesClient,
-        openclaw::ChatMessage,
+        openclaw::{ChatMessage, OpenClawClient},
         orchestrator::ProjectScope,
     },
     config::Config,
@@ -18,7 +17,10 @@ const SUMMARY_SOURCE_LIMIT: i64 = 40;
 const SUMMARY_CHAR_BUDGET: usize = 14_000;
 const SUMMARY_MAX_CHARS: usize = 2_400;
 
-pub async fn load_project_history(db: &PgPool, project_id: Uuid) -> Result<Vec<Message>, sqlx::Error> {
+pub async fn load_project_history(
+    db: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<Message>, sqlx::Error> {
     let mut rows: Vec<Message> = sqlx::query_as(
         "SELECT m.*
          FROM messages m
@@ -36,7 +38,10 @@ pub async fn load_project_history(db: &PgPool, project_id: Uuid) -> Result<Vec<M
     Ok(rows)
 }
 
-pub async fn get_project_summary(db: &PgPool, project_id: Uuid) -> Result<Option<ProjectMemorySummary>, sqlx::Error> {
+pub async fn get_project_summary(
+    db: &PgPool,
+    project_id: Uuid,
+) -> Result<Option<ProjectMemorySummary>, sqlx::Error> {
     sqlx::query_as(
         "SELECT project_id, summary, source_message_count, updated_at
          FROM project_memory_summaries
@@ -59,7 +64,7 @@ pub async fn refresh_project_summary(
 
     let existing = get_project_summary(db, project.id).await?;
     let prompt = build_summary_prompt(project, existing.as_ref(), &recent_messages);
-    let summary = HermesClient::new(config).chat(prompt).await?;
+    let summary = OpenClawClient::new(config).chat(prompt).await?;
     let normalized = normalize_summary(&summary);
     if normalized.is_empty() {
         return Ok(existing);
@@ -84,7 +89,10 @@ pub async fn refresh_project_summary(
     Ok(Some(record))
 }
 
-async fn load_recent_project_messages_for_summary(db: &PgPool, project_id: Uuid) -> Result<Vec<Message>, sqlx::Error> {
+async fn load_recent_project_messages_for_summary(
+    db: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<Message>, sqlx::Error> {
     let mut rows: Vec<Message> = sqlx::query_as(
         "SELECT m.*
          FROM messages m
@@ -116,7 +124,7 @@ fn build_summary_prompt(
     vec![
         ChatMessage {
             role: "system".into(),
-            content: "You maintain durable project memory for a multi-agent coding workspace. Respond in Traditional Chinese. Produce a concise but information-dense markdown summary that future Hermes/OpenClaw turns can load as project memory. Focus only on durable facts: architecture, confirmed decisions, accepted constraints, important file paths, unresolved questions, user preferences, and recent meaningful changes. Exclude chatter, duplicated reasoning, and ephemeral phrasing. If facts conflict, call out the conflict explicitly instead of guessing. Keep the summary under 12 bullets and under 2400 characters.".into(),
+            content: "You are OpenClaw maintaining durable project memory for a multi-agent coding workspace. Respond in Traditional Chinese. Produce a concise but information-dense markdown summary that future Hermes/OpenClaw turns can load as project memory. Do not distort, invent, or promote unresolved debate into consensus. Focus only on durable facts grounded in the transcript: architecture, confirmed decisions, accepted constraints, important file paths, unresolved questions, user preferences, and recent meaningful changes. Exclude chatter, duplicated reasoning, and ephemeral phrasing. If facts conflict, call out the conflict explicitly instead of guessing. Keep the summary under 12 bullets and under 2400 characters.".into(),
         },
         ChatMessage {
             role: "user".into(),
@@ -162,6 +170,11 @@ fn normalize_summary(summary: &str) -> String {
     if normalized.chars().count() <= SUMMARY_MAX_CHARS {
         normalized
     } else {
-        normalized.chars().take(SUMMARY_MAX_CHARS).collect::<String>().trim().to_string()
+        normalized
+            .chars()
+            .take(SUMMARY_MAX_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_string()
     }
 }
