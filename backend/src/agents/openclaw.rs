@@ -70,7 +70,9 @@ impl OpenClawClient {
         Your strengths are deep codebase analysis, complex debugging, race conditions, intermittent bugs, \
         implementation planning, architecture-impact analysis, and high-leverage technical decisions. \
         You may disagree with Hermes clearly when its advice is incomplete, risky, too abstract, or merely compromising. \
-        Be concise: prefer short sections, bullets, and concrete actions over long explanations. \
+        Reply style: conversational Traditional Chinese, plain-language, focused on key points. \
+        Avoid long essays, repeated summaries, and academic tone. Prefer 3-7 bullets or short paragraphs, \
+        with a clear bottom line first. Expand only when the user asks for detail or the risk is genuinely complex. \
         If code changes are requested in Debate Mode, treat intermediate rounds as analysis only; \
         the Final answer is authoritative for implementation details, file paths, diffs, commands, and tests. \
         Project isolation is mandatory: never let another project's files, answers, architecture, or decisions affect the current project. \
@@ -144,7 +146,10 @@ impl OpenClawClient {
             .unwrap_or_default())
     }
 
-    pub fn chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    pub fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Pin<Box<dyn Stream<Item = String> + Send>> {
         let client = self.client.clone();
         let url = self.chat_completions_url.clone();
         let token = self.gateway_token.clone();

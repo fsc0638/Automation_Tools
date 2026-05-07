@@ -60,7 +60,7 @@ export const projects = {
 
 export const gitIdentities = {
   list: () => request<GitIdentity[]>("/git/identities"),
-  create: (data: { name: string; provider?: string; username: string; access_token: string }) =>
+  create: (data: { name: string; provider?: string; username: string; access_token: string; repository_url?: string }) =>
     request<GitIdentity>("/git/identities", { method: "POST", body: JSON.stringify(data) }),
   delete: (id: string) => request<void>(`/git/identities/${id}`, { method: "DELETE" }),
 };

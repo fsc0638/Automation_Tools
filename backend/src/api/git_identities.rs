@@ -12,14 +12,12 @@ use crate::{
     api::{auth::AuthUser, AppState},
     db::models::GitIdentity,
     error::{AppError, AppResult},
+    git_ops::manager::{list_remote_branches, GitCredentials},
 };
 
 async fn validate_git_token(provider: &str, token: &str) -> AppResult<()> {
     let (url, auth_value) = match provider.to_lowercase().as_str() {
-        "github" => (
-            "https://api.github.com/user",
-            format!("token {}", token),
-        ),
+        "github" => ("https://api.github.com/user", format!("token {}", token)),
         "gitlab" => (
             "https://gitlab.com/api/v4/user",
             format!("Bearer {}", token),
@@ -54,11 +52,15 @@ pub struct CreateGitIdentityRequest {
     pub provider: Option<String>,
     pub username: String,
     pub access_token: String,
+    pub repository_url: Option<String>,
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/git/identities", get(list_identities).post(create_identity))
+        .route(
+            "/git/identities",
+            get(list_identities).post(create_identity),
+        )
         .route("/git/identities/:id", delete(delete_identity))
 }
 
@@ -66,12 +68,11 @@ async fn list_identities(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<Vec<GitIdentity>>> {
-    let identities: Vec<GitIdentity> = sqlx::query_as(
-        "SELECT * FROM git_identities WHERE user_id = $1 ORDER BY updated_at DESC",
-    )
-    .bind(auth_user.id)
-    .fetch_all(&state.db)
-    .await?;
+    let identities: Vec<GitIdentity> =
+        sqlx::query_as("SELECT * FROM git_identities WHERE user_id = $1 ORDER BY updated_at DESC")
+            .bind(auth_user.id)
+            .fetch_all(&state.db)
+            .await?;
 
     Ok(Json(identities))
 }
@@ -81,12 +82,42 @@ async fn create_identity(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateGitIdentityRequest>,
 ) -> AppResult<(StatusCode, Json<GitIdentity>)> {
-    if req.name.trim().is_empty() || req.username.trim().is_empty() || req.access_token.trim().is_empty() {
-        return Err(AppError::BadRequest("name, username and access_token are required".into()));
+    if req.name.trim().is_empty()
+        || req.username.trim().is_empty()
+        || req.access_token.trim().is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "name, username and access_token are required".into(),
+        ));
     }
 
-    let provider = req.provider.as_deref().unwrap_or("github");
-    validate_git_token(provider, req.access_token.trim()).await?;
+    let provider = req
+        .provider
+        .as_deref()
+        .unwrap_or("github")
+        .trim()
+        .to_lowercase();
+    validate_git_token(&provider, req.access_token.trim()).await?;
+
+    if let Some(repository_url) = req
+        .repository_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        let credentials = GitCredentials {
+            username: req.username.trim().to_string(),
+            access_token: req.access_token.trim().to_string(),
+        };
+        let branches = list_remote_branches(repository_url, Some(&credentials))
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Repository validation failed: {}", e)))?;
+        if branches.is_empty() {
+            return Err(AppError::BadRequest(
+                "Repository validation failed: no branches found".into(),
+            ));
+        }
+    }
 
     let encrypted_token = state
         .cipher
@@ -100,7 +131,7 @@ async fn create_identity(
     )
     .bind(auth_user.id)
     .bind(req.name.trim())
-    .bind(req.provider.unwrap_or_else(|| "generic".into()))
+    .bind(provider)
     .bind(req.username.trim())
     .bind(&encrypted_token)
     .fetch_one(&state.db)
