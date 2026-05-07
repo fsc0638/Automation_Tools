@@ -441,6 +441,103 @@ fn chat_with_turns(base: &[ChatMessage], turns: &[(DebateAgent, String)], instru
     ctx
 }
 
+/// One round of the debate (or the final synthesis), packaged with its
+/// chat context and the agent that should answer it.
+struct DebateRound {
+    agent: DebateAgent,
+    context: Vec<ChatMessage>,
+    /// 1-based round number for round phase; `None` for final synthesis.
+    round_number: Option<usize>,
+}
+
+/// Shared driver for Debate Mode used by both the REST (run_agent_turn)
+/// and WebSocket (run_agent_stream) paths. Owns the running list of turns
+/// and decides when to stop (max rounds or consensus).
+struct DebateRunner {
+    base: Vec<ChatMessage>,
+    user_message: String,
+    code_change: bool,
+    round_limit: usize,
+    auto_consensus: bool,
+    lead: DebateAgent,
+    turns: Vec<(DebateAgent, String)>,
+    current: DebateAgent,
+    turn_index: usize,
+    reached_consensus: bool,
+}
+
+impl DebateRunner {
+    fn new(
+        config: &Config,
+        history: &[Message],
+        user_message: &str,
+        chat_with_user_msg: Vec<ChatMessage>,
+    ) -> Self {
+        let lead = choose_debate_lead(history, user_message);
+        let round_limit = debate_round_limit(config);
+        let code_change = code_change_requested(user_message);
+        let mut base = vec![debate_instruction(
+            lead,
+            round_limit,
+            config.debate_auto_consensus,
+            code_change,
+            user_message,
+        )];
+        base.extend(chat_with_user_msg);
+        Self {
+            base,
+            user_message: user_message.to_string(),
+            code_change,
+            round_limit,
+            auto_consensus: config.debate_auto_consensus,
+            lead,
+            turns: Vec::new(),
+            current: lead,
+            turn_index: 0,
+            reached_consensus: false,
+        }
+    }
+
+    fn next_round(&self) -> Option<DebateRound> {
+        if self.reached_consensus || self.turn_index >= self.round_limit {
+            return None;
+        }
+        let ctx = chat_with_turns(
+            &self.base,
+            &self.turns,
+            debate_turn_instruction(self.current, self.turn_index, self.turn_index == 0, &self.user_message),
+        );
+        Some(DebateRound {
+            agent: self.current,
+            context: ctx,
+            round_number: Some(self.turn_index + 1),
+        })
+    }
+
+    fn record_turn(&mut self, reply: String) {
+        self.turns.push((self.current, reply));
+        if self.auto_consensus && consensus_reached(&self.turns) {
+            self.reached_consensus = true;
+            return;
+        }
+        self.current = self.current.other();
+        self.turn_index += 1;
+    }
+
+    fn final_round(&self) -> DebateRound {
+        let ctx = chat_with_turns(
+            &self.base,
+            &self.turns,
+            final_instruction(self.lead, self.code_change, self.reached_consensus, &self.user_message),
+        );
+        DebateRound {
+            agent: self.lead,
+            context: ctx,
+            round_number: None,
+        }
+    }
+}
+
 pub async fn run_agent_turn(
     config: &Arc<Config>,
     project: &ProjectScope,
@@ -466,43 +563,15 @@ pub async fn run_agent_turn(
             results.push(("hermes".into(), reply, Some("Hermes".into())));
         }
         AgentMode::Debate => {
-            let lead = choose_debate_lead(history, user_message);
-            let round_limit = debate_round_limit(config);
-            let code_change = code_change_requested(user_message);
-            let mut base = vec![debate_instruction(lead, round_limit, config.debate_auto_consensus, code_change, user_message)];
-            base.extend(chat.clone());
-
-            let mut turns: Vec<(DebateAgent, String)> = vec![];
-            let mut current = lead;
-            let mut turn_index = 0usize;
-            let mut reached_consensus = false;
-            loop {
-                if turn_index >= round_limit {
-                    break;
-                }
-
-                let ctx = chat_with_turns(
-                    &base,
-                    &turns,
-                    debate_turn_instruction(current, turn_index, turn_index == 0, user_message),
-                );
-                let reply = run_agent(&openclaw, &hermes, current, ctx).await?;
-                results.push((current.role().into(), reply.clone(), Some(current.name().into())));
-                turns.push((current, reply));
-
-                if config.debate_auto_consensus && consensus_reached(&turns) {
-                    reached_consensus = true;
-                    break;
-                }
-
-                current = current.other();
-                turn_index += 1;
+            let mut runner = DebateRunner::new(config, history, user_message, chat.clone());
+            while let Some(round) = runner.next_round() {
+                let reply = run_agent(&openclaw, &hermes, round.agent, round.context).await?;
+                results.push((round.agent.role().into(), reply.clone(), Some(round.agent.name().into())));
+                runner.record_turn(reply);
             }
-
-            let final_agent = lead;
-            let final_ctx = chat_with_turns(&base, &turns, final_instruction(final_agent, code_change, reached_consensus, user_message));
-            let final_reply = run_agent(&openclaw, &hermes, final_agent, final_ctx).await?;
-            results.push((final_agent.role().into(), final_reply, Some(final_agent.name().into())));
+            let final_round = runner.final_round();
+            let final_reply = run_agent(&openclaw, &hermes, final_round.agent, final_round.context).await?;
+            results.push((final_round.agent.role().into(), final_reply, Some(final_round.agent.name().into())));
         }
     }
     Ok(results)
@@ -518,8 +587,7 @@ pub fn run_agent_stream(
 ) -> Pin<Box<dyn Stream<Item = ServerEvent> + Send>> {
     let config = config.clone();
     let project = project.clone();
-    let debate_lead = choose_debate_lead(history, user_message);
-    let code_change = code_change_requested(user_message);
+    let history_owned: Vec<Message> = history.to_vec();
     let current_topic = user_message.to_string();
     let mut chat = messages_to_chat(&project, history, project_summary.as_deref());
     chat.push(ChatMessage { role: "user".into(), content: current_topic.clone() });
@@ -544,59 +612,51 @@ pub fn run_agent_stream(
                 yield ServerEvent::Done { agent: "Hermes".into(), round: None, phase: None };
             }
             AgentMode::Debate => {
-                let lead = debate_lead;
-                let round_limit = debate_round_limit(&config);
-                let mut base = vec![debate_instruction(lead, round_limit, config.debate_auto_consensus, code_change, &current_topic)];
-                base.extend(chat.clone());
-
-                let mut turns: Vec<(DebateAgent, String)> = vec![];
-                let mut current = lead;
-                let mut turn_index = 0usize;
-                let mut reached_consensus = false;
-
-                loop {
-                    if turn_index >= round_limit {
-                        break;
-                    }
-
-                    let ctx = chat_with_turns(
-                        &base,
-                        &turns,
-                        debate_turn_instruction(current, turn_index, turn_index == 0, &current_topic),
-                    );
-
+                let mut runner = DebateRunner::new(&config, &history_owned, &current_topic, chat);
+                while let Some(round) = runner.next_round() {
+                    let agent_name = round.agent.name().to_string();
+                    let round_num = round.round_number;
                     let mut buffer = String::new();
-                    let mut stream = match current {
-                        DebateAgent::OpenClaw => openclaw.chat_stream(ctx),
-                        DebateAgent::Hermes => hermes.chat_stream(ctx),
+                    let mut stream = match round.agent {
+                        DebateAgent::OpenClaw => openclaw.chat_stream(round.context),
+                        DebateAgent::Hermes => hermes.chat_stream(round.context),
                     };
                     while let Some(chunk) = stream.next().await {
                         buffer.push_str(&chunk);
-                        yield ServerEvent::Chunk { agent: current.name().into(), content: chunk, round: Some(turn_index + 1), phase: Some("round".into()) };
+                        yield ServerEvent::Chunk {
+                            agent: agent_name.clone(),
+                            content: chunk,
+                            round: round_num,
+                            phase: Some("round".into()),
+                        };
                     }
-                    yield ServerEvent::Done { agent: current.name().into(), round: Some(turn_index + 1), phase: Some("round".into()) };
-
-                    turns.push((current, buffer));
-
-                    if config.debate_auto_consensus && consensus_reached(&turns) {
-                        reached_consensus = true;
-                        break;
-                    }
-
-                    current = current.other();
-                    turn_index += 1;
+                    yield ServerEvent::Done {
+                        agent: agent_name,
+                        round: round_num,
+                        phase: Some("round".into()),
+                    };
+                    runner.record_turn(buffer);
                 }
 
-                let final_agent = lead;
-                let final_ctx = chat_with_turns(&base, &turns, final_instruction(final_agent, code_change, reached_consensus, &current_topic));
-                let mut stream = match final_agent {
-                    DebateAgent::OpenClaw => openclaw.chat_stream(final_ctx),
-                    DebateAgent::Hermes => hermes.chat_stream(final_ctx),
+                let final_round = runner.final_round();
+                let final_agent_name = final_round.agent.name().to_string();
+                let mut stream = match final_round.agent {
+                    DebateAgent::OpenClaw => openclaw.chat_stream(final_round.context),
+                    DebateAgent::Hermes => hermes.chat_stream(final_round.context),
                 };
                 while let Some(chunk) = stream.next().await {
-                    yield ServerEvent::Chunk { agent: final_agent.name().into(), content: chunk, round: None, phase: Some("final".into()) };
+                    yield ServerEvent::Chunk {
+                        agent: final_agent_name.clone(),
+                        content: chunk,
+                        round: None,
+                        phase: Some("final".into()),
+                    };
                 }
-                yield ServerEvent::Done { agent: final_agent.name().into(), round: None, phase: Some("final".into()) };
+                yield ServerEvent::Done {
+                    agent: final_agent_name,
+                    round: None,
+                    phase: Some("final".into()),
+                };
             }
         }
     })
