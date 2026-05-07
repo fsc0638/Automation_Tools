@@ -28,6 +28,14 @@ function displayAgentName(agent: string, round?: number, phase?: string) {
   return agent;
 }
 
+type StreamStatus = {
+  agent: string;
+  message: string;
+  round?: number;
+  phase?: string;
+  startedAt: number;
+};
+
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
@@ -43,9 +51,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [mode, setMode] = useState<AgentMode>("openclaw");
   const [streaming, setStreaming] = useState(false);
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
+  const [streamStatuses, setStreamStatuses] = useState<Record<string, StreamStatus>>({});
+  const [statusNow, setStatusNow] = useState(0);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const streamBuffersRef = useRef<Record<string, string>>({});
+  const streamStatusesRef = useRef<Record<string, StreamStatus>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const [wsReconnectKey, setWsReconnectKey] = useState(0);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
@@ -86,7 +97,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       if (cancelled) return;
       setConvs(cs);
       streamBuffersRef.current = {};
+      streamStatusesRef.current = {};
       setStreamBuffers({});
+      setStreamStatuses({});
       setStreaming(false);
       if (cs.length > 0) {
         setActiveConv(cs[0]);
@@ -122,6 +135,22 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         message?: string;
       };
 
+      if (evt.type === "status" && evt.agent && evt.message) {
+        const label = displayAgentName(evt.agent, evt.round, evt.phase);
+        streamStatusesRef.current[label] = {
+          agent: evt.agent,
+          message: evt.message,
+          round: evt.round,
+          phase: evt.phase,
+          startedAt: Date.now(),
+        };
+        setStatusNow(Date.now());
+        setStreamStatuses({ ...streamStatusesRef.current });
+        setStreaming(true);
+        if (!shouldAutoScrollRef.current) setShowJumpToBottom(true);
+        return;
+      }
+
       if (evt.type === "error") {
         const errorText = evt.message ?? "Agent error";
         setMessages((ms) => [...ms, {
@@ -133,7 +162,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           created_at: new Date().toISOString(),
         } as Message]);
         streamBuffersRef.current = {};
+        streamStatusesRef.current = {};
         setStreamBuffers({});
+        setStreamStatuses({});
         setStreaming(false);
         return;
       }
@@ -141,10 +172,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       if (!evt.agent) return;
       const label = displayAgentName(evt.agent, evt.round, evt.phase);
       if (evt.type === "chunk" && evt.content) {
+        delete streamStatusesRef.current[label];
+        setStreamStatuses({ ...streamStatusesRef.current });
         streamBuffersRef.current[label] = (streamBuffersRef.current[label] ?? "") + evt.content;
         setStreamBuffers({ ...streamBuffersRef.current });
         if (!shouldAutoScrollRef.current) setShowJumpToBottom(true);
       } else if (evt.type === "done") {
+        delete streamStatusesRef.current[label];
+        setStreamStatuses({ ...streamStatusesRef.current });
         const buffered = streamBuffersRef.current[label] ?? "";
         if (buffered) {
           const role = evt.agent.startsWith("Hermes") ? "hermes" : "openclaw";
@@ -159,7 +194,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         }
         delete streamBuffersRef.current[label];
         setStreamBuffers({ ...streamBuffersRef.current });
-        if (Object.keys(streamBuffersRef.current).length === 0) setStreaming(false);
+        if (Object.keys(streamBuffersRef.current).length === 0 && Object.keys(streamStatusesRef.current).length === 0) setStreaming(false);
       }
     };
 
@@ -179,6 +214,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         agent_name: "System",
         created_at: new Date().toISOString(),
       } as Message]);
+      streamStatusesRef.current = {};
+      setStreamStatuses({});
       setStreaming(false);
     };
 
@@ -191,7 +228,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamBuffers]);
+  }, [messages, streamBuffers, streamStatuses]);
+
+  useEffect(() => {
+    if (!streaming || Object.keys(streamStatuses).length === 0) return;
+    const timer = window.setInterval(() => setStatusNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [streaming, streamStatuses]);
 
   function handleMessagesScroll() {
     const el = messagesScrollRef.current;
@@ -260,7 +303,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     shouldAutoScrollRef.current = true;
     setShowJumpToBottom(false);
     streamBuffersRef.current = {};
+    streamStatusesRef.current = {};
     setStreamBuffers({});
+    setStreamStatuses({});
     setStreaming(true);
     setMessages((ms) => [...ms, {
       id: crypto.randomUUID(),
@@ -290,7 +335,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   function stopStreaming() {
     wsRef.current?.close();
     streamBuffersRef.current = {};
+    streamStatusesRef.current = {};
     setStreamBuffers({});
+    setStreamStatuses({});
     setStreaming(false);
     // Force the WS effect to reconnect for the next message.
     setWsReconnectKey((k) => k + 1);
@@ -309,7 +356,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       setFileTree(files);
       setBranches(branchData.branches);
       streamBuffersRef.current = {};
+      streamStatusesRef.current = {};
       setStreamBuffers({});
+      setStreamStatuses({});
     } finally {
       setSwitchingBranch(false);
     }
@@ -462,6 +511,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             <>
               {messages.map((msg) => <ChatMessage key={msg.id} message={msg} />)}
 
+              {/* Waiting statuses */}
+              {Object.entries(streamStatuses).map(([agentLabel, status]) => (
+                <StatusMessage key={`streaming-status-${agentLabel}`} label={agentLabel} status={status} now={statusNow} />
+              ))}
+
               {/* Streaming buffers */}
               {Object.entries(streamBuffers).map(([agentLabel, content]) =>
                 content ? (
@@ -518,6 +572,44 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               </Button>
             )}
           </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatusMessage({ label, status, now }: { label: string; status: StreamStatus; now: number }) {
+  const isHermes = status.agent.startsWith("Hermes") || label.startsWith("Hermes");
+  const elapsed = Math.max(0, Math.floor(((now || status.startedAt) - status.startedAt) / 1000));
+
+  return (
+    <div className="flex gap-3">
+      <div className={cn(
+        "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-white text-xs font-bold",
+        isHermes ? "bg-[#7C3AED]" : "bg-[#0050A0]",
+      )}>
+        {isHermes ? <Bot size={14} /> : <Cpu size={14} />}
+      </div>
+      <div className="max-w-[75%]">
+        <span className={cn(
+          "text-xs font-semibold mb-1 block",
+          isHermes ? "text-[#7C3AED]" : "text-[#0050A0]"
+        )}>
+          {label}
+          <span className="ml-1 animate-pulse">●</span>
+        </span>
+        <div className={cn(
+          "rounded-xl px-4 py-3 text-sm rounded-tl-sm border flex items-center gap-2",
+          isHermes
+            ? "bg-[#F5F3FF] border-[#E9D5FF] text-[#1A1A2E]"
+            : "bg-[#EFF6FF] border-[#BFDBFE] text-[#1A1A2E]"
+        )}>
+          <span className={cn(
+            "h-3 w-3 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0",
+            isHermes ? "border-[#7C3AED]" : "border-[#0050A0]"
+          )} />
+          <span>{status.message}</span>
+          <span className="text-xs text-[#64748B] tabular-nums">{elapsed}s</span>
         </div>
       </div>
     </div>

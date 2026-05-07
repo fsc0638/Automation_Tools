@@ -51,8 +51,8 @@ async fn ws_handler(
     State(state): State<AppState>,
 ) -> Result<Response, AppError> {
     let claims = verify_token(&query.token, &state.config.jwt_secret)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
 
     let conversation_exists: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3",
@@ -80,8 +80,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     {
         Ok(project) => project,
         Err(_) => {
-            let error = ServerEvent::Error { message: "Project not found for agent scope".into() };
-            let _ = sender.send(WsMessage::Text(serde_json::to_string(&error).unwrap_or_default().into())).await;
+            let error = ServerEvent::Error {
+                message: "Project not found for agent scope".into(),
+            };
+            let _ = sender
+                .send(WsMessage::Text(
+                    serde_json::to_string(&error).unwrap_or_default().into(),
+                ))
+                .await;
             return;
         }
     };
@@ -99,7 +105,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             Err(_) => continue,
         };
 
-        let ClientEvent::Message { content, file_path, mode } = event;
+        let ClientEvent::Message {
+            content,
+            file_path,
+            mode,
+        } = event;
 
         // Load previous history before saving this turn. The orchestrator appends
         // the current user message itself, so this avoids duplicating it in agent context.
@@ -122,8 +132,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
         .await;
 
         if user_saved.is_err() {
-            let error = ServerEvent::Error { message: "Failed to save user message".into() };
-            let _ = sender.send(WsMessage::Text(serde_json::to_string(&error).unwrap_or_default().into())).await;
+            let error = ServerEvent::Error {
+                message: "Failed to save user message".into(),
+            };
+            let _ = sender
+                .send(WsMessage::Text(
+                    serde_json::to_string(&error).unwrap_or_default().into(),
+                ))
+                .await;
             continue;
         }
 
@@ -146,11 +162,21 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
 
         while let Some(event) = stream.next().await {
             match &event {
-                ServerEvent::Chunk { agent, content, round, phase } => {
+                ServerEvent::Status { .. } => {}
+                ServerEvent::Chunk {
+                    agent,
+                    content,
+                    round,
+                    phase,
+                } => {
                     let key = event_key(agent, *round, phase.as_deref());
                     buffers.entry(key).or_default().push_str(content);
                 }
-                ServerEvent::Done { agent, round, phase } => {
+                ServerEvent::Done {
+                    agent,
+                    round,
+                    phase,
+                } => {
                     let key = event_key(agent, *round, phase.as_deref());
                     if let Some(content) = buffers.remove(&key) {
                         if !content.trim().is_empty() {
@@ -167,10 +193,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             .execute(&state.db)
                             .await;
 
-                            let _ = sqlx::query("UPDATE conversations SET updated_at = NOW() WHERE id = $1")
-                                .bind(query.conversation_id)
-                                .execute(&state.db)
-                                .await;
+                            let _ = sqlx::query(
+                                "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
+                            )
+                            .bind(query.conversation_id)
+                            .execute(&state.db)
+                            .await;
                         }
                     }
                 }
@@ -213,7 +241,12 @@ fn agent_role(agent: &str) -> &'static str {
 }
 
 fn event_key(agent: &str, round: Option<usize>, phase: Option<&str>) -> String {
-    format!("{}:{}:{}", agent, phase.unwrap_or("single"), round.map(|r| r.to_string()).unwrap_or_default())
+    format!(
+        "{}:{}:{}",
+        agent,
+        phase.unwrap_or("single"),
+        round.map(|r| r.to_string()).unwrap_or_default()
+    )
 }
 
 fn display_agent_name(agent: &str, round: Option<usize>, phase: Option<&str>) -> String {

@@ -28,6 +28,15 @@ use crate::{
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "status")]
+    Status {
+        agent: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        round: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+    },
     #[serde(rename = "chunk")]
     Chunk {
         agent: String,
@@ -1106,6 +1115,12 @@ pub fn run_agent_stream(
 
         match mode {
             AgentMode::OpenClawOnly => {
+                yield ServerEvent::Status {
+                    agent: "OpenClaw".into(),
+                    message: "OpenClaw 正在整理問題與專案脈絡...".into(),
+                    round: None,
+                    phase: Some("thinking".into()),
+                };
                 let mut stream = openclaw.chat_stream(chat);
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
@@ -1122,6 +1137,12 @@ pub fn run_agent_stream(
                 yield ServerEvent::Done { agent: "OpenClaw".into(), round: None, phase: None };
             }
             AgentMode::HermesOnly => {
+                yield ServerEvent::Status {
+                    agent: "Hermes".into(),
+                    message: "Hermes 正在整理問題與專案脈絡...".into(),
+                    round: None,
+                    phase: Some("thinking".into()),
+                };
                 let mut stream = hermes.chat_stream(chat);
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
@@ -1154,6 +1175,12 @@ pub fn run_agent_stream(
                             &turns,
                             lightweight_debate_instruction(agent, intent, &current_topic),
                         );
+                        yield ServerEvent::Status {
+                            agent: agent_name.clone(),
+                            message: format!("{} 正在整理回覆...", agent_name),
+                            round: None,
+                            phase: Some(phase.into()),
+                        };
                         let mut buffer = String::new();
                         let mut stream = match agent {
                             DebateAgent::OpenClaw => openclaw.chat_stream(ctx),
@@ -1204,6 +1231,16 @@ pub fn run_agent_stream(
                 while let Some(round) = runner.next_round() {
                     let agent_name = round.agent.name().to_string();
                     let round_num = round.round_number;
+                    yield ServerEvent::Status {
+                        agent: agent_name.clone(),
+                        message: format!(
+                            "{} · Round {} 正在分析、檢查反例與整理觀點...",
+                            agent_name,
+                            round_num.unwrap_or(0)
+                        ),
+                        round: round_num,
+                        phase: Some("round".into()),
+                    };
                     let mut buffer = String::new();
                     let mut stream = match round.agent {
                         DebateAgent::OpenClaw => openclaw.chat_stream(round.context),
@@ -1254,6 +1291,12 @@ pub fn run_agent_stream(
                 let final_round = runner.final_round();
                 let final_agent_name = final_round.agent.name().to_string();
                 let final_agent = final_round.agent;
+                yield ServerEvent::Status {
+                    agent: final_agent_name.clone(),
+                    message: format!("{} · Final 正在彙整最終結論...", final_agent_name),
+                    round: None,
+                    phase: Some("final".into()),
+                };
                 let mut final_buffer = String::new();
                 let mut stream = match final_round.agent {
                     DebateAgent::OpenClaw => openclaw.chat_stream(final_round.context),
