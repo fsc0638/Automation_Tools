@@ -1,183 +1,234 @@
-use anyhow::Result;
-use reqwest::Client;
+use anyhow::{Context, Result};
+use futures_util::{Stream, StreamExt};
+use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
-use futures_util::StreamExt;
 use std::pin::Pin;
-use futures_util::Stream;
 
 use crate::{agents::openclaw::ChatMessage, config::Config};
 
-#[derive(Clone)]
-pub struct HermesClient {
-    client: Client,
-    api_url: String,
-    api_key: String,
-    model: String,
-}
-
-// Anthropic /v1/messages request
 #[derive(Debug, Serialize)]
-struct AnthropicRequest {
+struct ChatRequest {
     model: String,
-    max_tokens: u32,
-    system: String,
-    messages: Vec<AnthropicMessage>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    messages: Vec<ChatMessage>,
     stream: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct AnthropicMessage {
-    role: String, // "user" | "assistant"
-    content: String,
-}
-
-// Non-streaming response
 #[derive(Debug, Deserialize)]
-struct AnthropicResponse {
-    content: Vec<ContentBlock>,
+struct ChatResponse {
+    choices: Vec<Choice>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    block_type: String,
-    text: Option<String>,
-}
-
-// Streaming SSE events
-#[derive(Debug, Deserialize)]
-struct StreamEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    delta: Option<StreamDelta>,
+struct Choice {
+    message: ChatMessage,
 }
 
 #[derive(Debug, Deserialize)]
 struct StreamDelta {
-    #[serde(rename = "type")]
-    delta_type: Option<String>,
-    text: Option<String>,
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    choices: Option<Vec<StreamChoice>>,
+}
+
+#[derive(Clone)]
+pub struct HermesClient {
+    client: Client,
+    chat_completions_url: String,
+    api_key: String,
+    model: String,
 }
 
 impl HermesClient {
     pub fn new(config: &Config) -> Self {
         Self {
             client: Client::new(),
-            api_url: config.hermes_api_url.clone(),
+            chat_completions_url: Self::chat_completions_url(&config.hermes_api_url),
             api_key: config.hermes_api_key.clone(),
             model: config.hermes_model.clone(),
         }
     }
 
     pub fn system_prompt() -> &'static str {
-        "You are Hermes, a senior software architect AI assistant. \
-        Your role is to provide high-level architectural insights, identify code patterns, \
-        design trade-offs, and strategic guidance. You collaborate with OpenClaw, \
-        a code-focused agent. Be analytical, thorough, and constructive. \
-        When reviewing OpenClaw's suggestions, provide critical feedback and alternative approaches. \
+        "You are Hermes, a fixed and independent GPT-5.4 pragmatic engineering agent. \
+        Identity is important: you are not OpenClaw, and you must keep your own technical judgment. \
+        Default language: Traditional Chinese. Only use English when the user explicitly asks for English, \
+        or when preserving code/API/error text. \
+        Your strengths are day-to-day development, cost-efficient implementation, quick iteration, \
+        straightforward debugging, code review, and turning plans into practical steps. \
+        You may disagree with OpenClaw clearly when its plan is over-engineered, expensive, speculative, \
+        not grounded in code, or merely forcing compromise. \
+        Be concise: normally 3-6 bullets, no long essays, no repeated summaries. \
+        If code changes are requested in Debate Mode, intermediate rounds are analysis only; \
+        the Final answer is authoritative for implementation details. \
+        Project isolation is mandatory: never let another project's files, answers, architecture, or decisions affect the current project. \
+        Shared learning is limited to general engineering skill and reasoning patterns. \
+        Prefer stable, maintainable, incremental solutions and call out when a task should be escalated to OpenClaw/GPT-5.5. \
         Format code blocks with proper markdown."
     }
 
-    fn to_anthropic_messages(messages: Vec<ChatMessage>) -> Vec<AnthropicMessage> {
-        messages
-            .into_iter()
-            .filter(|m| m.role != "system")
-            .map(|m| AnthropicMessage {
-                role: if m.role == "user" { "user".into() } else { "assistant".into() },
-                content: m.content,
+    fn chat_completions_url(api_url: &str) -> String {
+        let base = api_url.trim_end_matches('/');
+        if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{base}/chat/completions")
+        }
+    }
+
+    fn build_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+        let mut full = vec![ChatMessage {
+            role: "system".into(),
+            content: Self::system_prompt().into(),
+        }];
+
+        full.extend(messages.into_iter().filter_map(|msg| {
+            let role = match msg.role.as_str() {
+                "system" | "developer" | "user" | "assistant" => msg.role,
+                "openclaw" | "hermes" => "assistant".into(),
+                _ => return None,
+            };
+
+            Some(ChatMessage {
+                role,
+                content: msg.content,
             })
-            .collect()
+        }));
+
+        full
+    }
+
+    fn request(&self, messages: Vec<ChatMessage>, stream: bool) -> ChatRequest {
+        ChatRequest {
+            // Hermes is an independent local agent/gateway. This is its own model
+            // or agent target, not an OpenClaw Gateway target.
+            model: self.model.clone(),
+            messages: Self::build_messages(messages),
+            stream,
+        }
+    }
+
+    fn with_auth(&self, request: RequestBuilder) -> RequestBuilder {
+        if self.api_key.trim().is_empty() {
+            request
+        } else {
+            request.bearer_auth(&self.api_key)
+        }
     }
 
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
-        let req = AnthropicRequest {
-            model: self.model.clone(),
-            max_tokens: 8192,
-            system: Self::system_prompt().into(),
-            messages: Self::to_anthropic_messages(messages),
-            stream: false,
-        };
+        let response = self
+            .with_auth(self.client.post(&self.chat_completions_url))
+            .json(&self.request(messages, false))
+            .send()
+            .await
+            .context("failed to send request to Hermes Agent")?
+            .error_for_status()
+            .context("Hermes Agent returned an error status")?
+            .json::<ChatResponse>()
+            .await
+            .context("failed to parse Hermes Agent response")?;
 
-        let res: AnthropicResponse = self.client
-            .post(format!("{}/v1/messages", self.api_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&req)
-            .send().await?
-            .error_for_status()?
-            .json().await?;
-
-        Ok(res.content.into_iter()
-            .filter(|b| b.block_type == "text")
-            .filter_map(|b| b.text)
-            .collect::<Vec<_>>()
-            .join(""))
+        Ok(response
+            .choices
+            .into_iter()
+            .next()
+            .map(|choice| choice.message.content)
+            .unwrap_or_default())
     }
 
     pub fn chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = String> + Send>> {
         let client = self.client.clone();
-        let url = format!("{}/v1/messages", self.api_url);
+        let url = self.chat_completions_url.clone();
         let api_key = self.api_key.clone();
-        let model = self.model.clone();
-        let anthropic_messages = Self::to_anthropic_messages(messages);
+        let request = self.request(messages, true);
 
         Box::pin(async_stream::stream! {
-            let req = AnthropicRequest {
-                model,
-                max_tokens: 8192,
-                system: Self::system_prompt().into(),
-                messages: anthropic_messages,
-                stream: true,
-            };
-
-            let response = match client
-                .post(&url)
-                .header("x-api-key", &api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&req)
-                .send().await
-            {
-                Ok(r) => r,
-                Err(e) => { yield format!("[Hermes error: {}]", e); return; }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                yield format!("[Hermes error: {} — {}]", status, body);
-                return;
+            let mut builder = client.post(&url).json(&request);
+            if !api_key.trim().is_empty() {
+                builder = builder.bearer_auth(&api_key);
             }
 
-            let mut stream = response.bytes_stream();
-            let mut buf = String::new();
+            let response = match builder.send().await {
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => response,
+                    Err(error) => {
+                        yield format!("[Hermes error: Agent returned an error status: {error}]");
+                        return;
+                    }
+                },
+                Err(error) => {
+                    yield format!("[Hermes error: failed to send request to Agent: {error}]");
+                    return;
+                }
+            };
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = match chunk { Ok(c) => c, Err(_) => break };
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+            let mut bytes = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut current_event: Option<String> = None;
 
-                // Process complete lines from buffer
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].trim().to_string();
-                    buf = buf[pos + 1..].to_string();
+            while let Some(chunk) = bytes.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield format!("[Hermes stream error: {error}]");
+                        return;
+                    }
+                };
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" { return; }
-                        if let Ok(event) = serde_json::from_str::<StreamEvent>(data) {
-                            if event.event_type == "content_block_delta" {
-                                if let Some(delta) = event.delta {
-                                    if delta.delta_type.as_deref() == Some("text_delta") {
-                                        if let Some(text) = delta.text {
-                                            yield text;
-                                        }
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        current_event = None;
+                        continue;
+                    }
+
+                    if let Some(event_name) = line.strip_prefix("event:").map(str::trim) {
+                        current_event = Some(event_name.to_string());
+                        continue;
+                    }
+
+                    let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                        continue;
+                    };
+
+                    if data == "[DONE]" {
+                        return;
+                    }
+
+                    if matches!(current_event.as_deref(), Some("hermes.tool.progress")) {
+                        current_event = None;
+                        continue;
+                    }
+
+                    match serde_json::from_str::<StreamChunk>(data) {
+                        Ok(parsed) => {
+                            if let Some(choices) = parsed.choices {
+                                for choice in choices {
+                                    if let Some(content) = choice.delta.content {
+                                        yield content;
                                     }
                                 }
                             }
-                            if event.event_type == "message_stop" { return; }
+                        }
+                        Err(_) => {
+                            current_event = None;
+                            continue;
                         }
                     }
+
+                    current_event = None;
                 }
             }
         })
