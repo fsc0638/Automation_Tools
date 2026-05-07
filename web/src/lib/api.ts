@@ -85,12 +85,14 @@ export const conversations = {
 
 export function createWsConnection(conversationId: string, projectId: string): WebSocket {
   const token = getToken();
-  const wsBase = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080")
-    .replace("http", "ws")
-    .replace("/api", "");
-  return new WebSocket(
-    `${wsBase}/api/ws/chat?token=${token}&conversation_id=${conversationId}&project_id=${projectId}`
-  );
+  const apiUrl = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080/api");
+  const wsProtocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+  const params = new URLSearchParams({
+    ...(token ? { token } : {}),
+    conversation_id: conversationId,
+    project_id: projectId,
+  });
+  return new WebSocket(`${wsProtocol}//${apiUrl.host}/api/ws/chat?${params.toString()}`);
 }
 
 // Types

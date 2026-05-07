@@ -1,5 +1,6 @@
+use axum::http::HeaderValue;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -46,10 +47,31 @@ async fn main() -> anyhow::Result<()> {
         cipher,
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = match std::env::var("CORS_ALLOWED_ORIGINS")
+        .ok()
+        .filter(|s| !s.trim().is_empty() && s.trim() != "*")
+    {
+        Some(raw) => {
+            let origins: Vec<HeaderValue> = raw
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| HeaderValue::from_str(s).ok())
+                .collect();
+            tracing::info!("CORS locked to {} allowed origin(s)", origins.len());
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
+        None => {
+            tracing::warn!(
+                "CORS_ALLOWED_ORIGINS not set or '*' — allowing any origin. \
+                Set CORS_ALLOWED_ORIGINS=https://your-domain.com in production."
+            );
+            CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any)
+        }
+    };
 
     let app = router(state).layer(TraceLayer::new_for_http()).layer(cors);
 
