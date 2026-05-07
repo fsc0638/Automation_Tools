@@ -1,6 +1,9 @@
 use anyhow::Result;
+use chrono::Utc;
 use futures_util::{Stream, StreamExt};
 use serde::Serialize;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,9 +14,13 @@ use uuid::Uuid;
 /// unresponsive. Long enough to tolerate model thinking pauses, short enough
 /// that a hung gateway eventually frees the WebSocket.
 const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+const DEBATE_NOTES_FILE: &str = "CONVERSATION_NOTES_DEBATE.md";
 
 use crate::{
-    agents::{hermes::HermesClient, openclaw::{ChatMessage, OpenClawClient}},
+    agents::{
+        hermes::HermesClient,
+        openclaw::{ChatMessage, OpenClawClient},
+    },
     config::Config,
     db::models::{Message, Project},
 };
@@ -64,6 +71,14 @@ enum DebateAgent {
     Hermes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DebateIntent {
+    CasualChat,
+    QuickAgreement,
+    DebateRequired,
+    ImplementationTask,
+}
+
 impl DebateAgent {
     fn name(self) -> &'static str {
         match self {
@@ -89,7 +104,10 @@ impl DebateAgent {
 
 pub fn build_project_scope(project: &Project) -> ProjectScope {
     let root = if project.source_type == "git" {
-        project.local_path.clone().unwrap_or_else(|| project.source_path.clone())
+        project
+            .local_path
+            .clone()
+            .unwrap_or_else(|| project.source_path.clone())
     } else {
         project.source_path.clone()
     };
@@ -112,7 +130,10 @@ fn absolutize_path(path: &str) -> Option<String> {
     } else {
         std::env::current_dir().ok()?.join(path)
     };
-    candidate.canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+    candidate
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
 }
 
 fn build_file_snapshot(root: &str) -> Option<String> {
@@ -127,7 +148,11 @@ fn build_file_snapshot(root: &str) -> Option<String> {
     let mut important = String::new();
     for file in important_files(root_path) {
         if let Ok(content) = std::fs::read_to_string(&file) {
-            let rel = file.strip_prefix(root_path).unwrap_or(&file).to_string_lossy().replace('\\', "/");
+            let rel = file
+                .strip_prefix(root_path)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/");
             let snippet: String = content.chars().take(8_000).collect();
             important.push_str(&format!("\n\n--- FILE: {rel} ---\n{snippet}"));
         }
@@ -147,18 +172,33 @@ fn collect_tree(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
     if depth > 4 || out.len() >= 180 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries = entries.filter_map(|e| e.ok()).collect::<Vec<_>>();
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
-        if out.len() >= 180 { break; }
+        if out.len() >= 180 {
+            break;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
-        if should_ignore(&name) { continue; }
+        if should_ignore(&name) {
+            continue;
+        }
         let path = entry.path();
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        out.push(format!("{}{}{}", "  ".repeat(depth), rel, if is_dir { "/" } else { "" }));
+        out.push(format!(
+            "{}{}{}",
+            "  ".repeat(depth),
+            rel,
+            if is_dir { "/" } else { "" }
+        ));
         if is_dir {
             collect_tree(root, &path, depth + 1, out);
         }
@@ -179,12 +219,31 @@ fn should_ignore(name: &str) -> bool {
 
 fn important_files(root: &Path) -> Vec<PathBuf> {
     let candidates = [
-        "README.md", "readme.md", "package.json", "Cargo.toml", "pyproject.toml",
-        "requirements.txt", "go.mod", "pom.xml", "build.gradle", "docker-compose.yml",
-        "Dockerfile", "src/main.rs", "src/main.ts", "src/main.tsx", "src/index.ts",
-        "src/index.tsx", "src/App.tsx", "main.py", "app.py",
+        "README.md",
+        "readme.md",
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "requirements.txt",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "docker-compose.yml",
+        "Dockerfile",
+        "src/main.rs",
+        "src/main.ts",
+        "src/main.tsx",
+        "src/index.ts",
+        "src/index.tsx",
+        "src/App.tsx",
+        "main.py",
+        "app.py",
     ];
-    candidates.iter().map(|p| root.join(p)).filter(|p| p.is_file()).collect()
+    candidates
+        .iter()
+        .map(|p| root.join(p))
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 fn project_scope_message(project: &ProjectScope) -> ChatMessage {
@@ -217,13 +276,21 @@ fn project_summary_message(summary: &str) -> ChatMessage {
     }
 }
 
-fn messages_to_chat(project: &ProjectScope, history: &[Message], project_summary: Option<&str>) -> Vec<ChatMessage> {
+fn messages_to_chat(
+    project: &ProjectScope,
+    history: &[Message],
+    project_summary: Option<&str>,
+) -> Vec<ChatMessage> {
     let mut messages = vec![project_scope_message(project)];
     if let Some(summary) = project_summary.filter(|s| !s.trim().is_empty()) {
         messages.push(project_summary_message(summary));
     }
     messages.extend(history.iter().map(|m| {
-        let role = if m.role == "user" { "user" } else { "assistant" };
+        let role = if m.role == "user" {
+            "user"
+        } else {
+            "assistant"
+        };
         let content = match m.role.as_str() {
             "openclaw" => format!("[OpenClaw]: {}", m.content),
             "hermes" => format!("[Hermes]: {}", m.content),
@@ -242,23 +309,79 @@ fn messages_to_chat(project: &ProjectScope, history: &[Message], project_summary
 fn choose_debate_lead(history: &[Message], user_message: &str) -> DebateAgent {
     let text = format!(
         "{}\n{}",
-        history.iter().rev().take(8).map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n"),
+        history
+            .iter()
+            .rev()
+            .take(8)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
         user_message
-    ).to_lowercase();
+    )
+    .to_lowercase();
 
     let openclaw_keywords = [
-        "架構", "設計", "規劃", "計畫", "技術選型", "大型", "複雜", "系統", "重構",
-        "race", "deadlock", "concurrency", "async", "間歇", "難題", "根因", "root cause",
-        "security", "安全", "migration", "資料模型", "跨", "影響範圍", "邊界", "scal",
-        "performance", "效能", "memory", "debug 難", "難 bug",
+        "架構",
+        "設計",
+        "規劃",
+        "計畫",
+        "技術選型",
+        "大型",
+        "複雜",
+        "系統",
+        "重構",
+        "race",
+        "deadlock",
+        "concurrency",
+        "async",
+        "間歇",
+        "難題",
+        "根因",
+        "root cause",
+        "security",
+        "安全",
+        "migration",
+        "資料模型",
+        "跨",
+        "影響範圍",
+        "邊界",
+        "scal",
+        "performance",
+        "效能",
+        "memory",
+        "debug 難",
+        "難 bug",
     ];
     let hermes_keywords = [
-        "寫", "新增", "修改", "調整", "修正", "一般", "簡單", "快速", "日常", "樣式",
-        "ui", "copy", "文字", "按鈕", "表單", "lint", "format", "小改", "直接修",
+        "寫",
+        "新增",
+        "修改",
+        "調整",
+        "修正",
+        "一般",
+        "簡單",
+        "快速",
+        "日常",
+        "樣式",
+        "ui",
+        "copy",
+        "文字",
+        "按鈕",
+        "表單",
+        "lint",
+        "format",
+        "小改",
+        "直接修",
     ];
 
-    let openclaw_score = openclaw_keywords.iter().filter(|kw| text.contains(**kw)).count();
-    let hermes_score = hermes_keywords.iter().filter(|kw| text.contains(**kw)).count();
+    let openclaw_score = openclaw_keywords
+        .iter()
+        .filter(|kw| text.contains(**kw))
+        .count();
+    let hermes_score = hermes_keywords
+        .iter()
+        .filter(|kw| text.contains(**kw))
+        .count();
 
     if openclaw_score > hermes_score || text.len() > 700 {
         DebateAgent::OpenClaw
@@ -267,8 +390,76 @@ fn choose_debate_lead(history: &[Message], user_message: &str) -> DebateAgent {
     }
 }
 
+fn classify_debate_intent(user_message: &str) -> DebateIntent {
+    let text = user_message.to_lowercase();
+
+    let explicit_debate = [
+        "辯論",
+        "debate",
+        "互相反駁",
+        "吵一下",
+        "挑戰彼此",
+        "兩派",
+        "方案 a",
+        "方案a",
+        "方案 b",
+        "方案b",
+        "取捨",
+        "tradeoff",
+        "比較兩個方案",
+        "哪個方案",
+        "架構選型",
+        "技術選型",
+    ];
+    if explicit_debate.iter().any(|kw| text.contains(kw)) {
+        return DebateIntent::DebateRequired;
+    }
+
+    if code_change_requested(user_message) {
+        return DebateIntent::ImplementationTask;
+    }
+
+    let casual_chat = [
+        "三個人的聊天",
+        "三人聊天",
+        "聊一下",
+        "討論一下",
+        "問一下",
+        "你們覺得",
+        "你們怎麼看",
+        "想聽你們",
+        "不用改",
+        "先不要改",
+        "先聊",
+        "只是問",
+        "確認一下",
+    ];
+    if casual_chat.iter().any(|kw| text.contains(kw)) {
+        return DebateIntent::CasualChat;
+    }
+
+    let quick_agreement = [
+        "可以嗎",
+        "對嗎",
+        "是不是",
+        "是否",
+        "這樣行嗎",
+        "這樣可以",
+        "有沒有問題",
+        "確認",
+        "檢查一下",
+    ];
+    if quick_agreement.iter().any(|kw| text.contains(kw)) || text.chars().count() < 80 {
+        return DebateIntent::QuickAgreement;
+    }
+
+    DebateIntent::DebateRequired
+}
+
 fn debate_round_limit_label(max_rounds: usize) -> String {
-    format!("up to {max_rounds} agent turns, then stop and return unresolved disagreements to the user")
+    format!(
+        "up to {max_rounds} agent turns, then stop and return unresolved disagreements to the user"
+    )
 }
 
 fn debate_round_limit(config: &Config) -> usize {
@@ -281,7 +472,13 @@ fn debate_round_limit(config: &Config) -> usize {
     }
 }
 
-fn debate_instruction(lead: DebateAgent, round_limit: usize, auto_consensus: bool, code_change_requested: bool, user_message: &str) -> ChatMessage {
+fn debate_instruction(
+    lead: DebateAgent,
+    round_limit: usize,
+    auto_consensus: bool,
+    code_change_requested: bool,
+    user_message: &str,
+) -> ChatMessage {
     let lead_reason = match lead {
         DebateAgent::OpenClaw => "OpenClaw/GPT-5.5 leads first because the task appears complex, strategic, architectural, or high-risk.",
         DebateAgent::Hermes => "Hermes/GPT-5.4 leads first because the task appears implementation-oriented, routine, or suited to quick iteration.",
@@ -315,13 +512,19 @@ fn debate_instruction(lead: DebateAgent, round_limit: usize, auto_consensus: boo
              Consensus is only valid when both agents independently support the same concrete answer to the user's topic and list no blocking objections. \
              If consensus is not reached, focus on the exact unresolved decision instead of broad arguing. \
              If the same disagreement repeats without new evidence or a new risk, name the loop explicitly and either narrow it to a user decision or converge. \
+             Conversation notes are written by the backend system after each round to CONVERSATION_NOTES_DEBATE.md. Agents must not claim they personally created, edited, or appended that file in visible replies. \
              Hermes must be especially concise, but not bland. \
              When genuine consensus is reached, append the invisible marker '<!-- consensus:reached -->' at the very end. Do not mention this marker or show any consensus-status wording in visible text."
         ),
     }
 }
 
-fn debate_turn_instruction(agent: DebateAgent, turn_index: usize, is_first: bool, user_message: &str) -> ChatMessage {
+fn debate_turn_instruction(
+    agent: DebateAgent,
+    turn_index: usize,
+    is_first: bool,
+    user_message: &str,
+) -> ChatMessage {
     let other = agent.other().name();
     let instruction = if is_first {
         format!(
@@ -338,10 +541,46 @@ fn debate_turn_instruction(agent: DebateAgent, turn_index: usize, is_first: bool
         )
     };
 
-    ChatMessage { role: "user".into(), content: instruction }
+    ChatMessage {
+        role: "user".into(),
+        content: instruction,
+    }
 }
 
-fn final_instruction(agent: DebateAgent, code_change_requested: bool, reached_consensus: bool, user_message: &str) -> ChatMessage {
+fn lightweight_debate_instruction(
+    agent: DebateAgent,
+    intent: DebateIntent,
+    user_message: &str,
+) -> ChatMessage {
+    let mode_rule = match intent {
+        DebateIntent::CasualChat => {
+            "This is a three-person chat, not a formal debate. Reply as yourself, naturally and briefly. Do not manufacture disagreement. Add your own angle only if useful."
+        }
+        DebateIntent::QuickAgreement => {
+            "This is a quick confirmation/check, not a multi-round debate. Be concise. If the other agent is basically right, say so and add only the key caveat or correction."
+        }
+        DebateIntent::DebateRequired | DebateIntent::ImplementationTask => {
+            "This should use formal Debate Mode."
+        }
+    };
+
+    ChatMessage {
+        role: "user".into(),
+        content: format!(
+            "{}: Reply in Traditional Chinese. Current user question/topic: '{}'. {} Keep it口語化、白話、重點化. Do not mention these routing rules. Do not claim you wrote CONVERSATION_NOTES_DEBATE.md; the backend system writes notes after your reply.",
+            agent.name(),
+            user_message,
+            mode_rule
+        ),
+    }
+}
+
+fn final_instruction(
+    agent: DebateAgent,
+    code_change_requested: bool,
+    reached_consensus: bool,
+    user_message: &str,
+) -> ChatMessage {
     let code_rule = if code_change_requested {
         "The user needs code changes: make this Final the primary source of truth. Include exact files, concrete changes/diff guidance, commands, and tests. Keep prior debate rounds subordinate to this Final."
     } else {
@@ -368,17 +607,40 @@ fn consensus_reached(turns: &[(DebateAgent, String)]) -> bool {
         return false;
     }
 
-    let recent = turns.iter().rev().take(2)
+    let recent = turns
+        .iter()
+        .rev()
+        .take(2)
         .map(|(_, text)| normalize_consensus_text(text))
         .collect::<Vec<_>>();
 
     let unresolved_markers = [
-        "disagree", "不同意", "反對", "尚未", "未解", " unresolved",
-        "however", "但是", "不過", "仍然", "concern", "疑慮", "風險仍", "不能接受",
-        "需要使用者決策", "交給 user", "交給使用者", "缺少證據", "資訊不足",
+        "disagree",
+        "不同意",
+        "反對",
+        "尚未",
+        "未解",
+        " unresolved",
+        "however",
+        "但是",
+        "不過",
+        "仍然",
+        "concern",
+        "疑慮",
+        "風險仍",
+        "不能接受",
+        "需要使用者決策",
+        "交給 user",
+        "交給使用者",
+        "缺少證據",
+        "資訊不足",
     ];
 
-    if recent.iter().any(|text| unresolved_markers.iter().any(|marker| text.contains(marker))) {
+    if recent.iter().any(|text| {
+        unresolved_markers
+            .iter()
+            .any(|marker| text.contains(marker))
+    }) {
         return false;
     }
 
@@ -387,6 +649,20 @@ fn consensus_reached(turns: &[(DebateAgent, String)]) -> bool {
 
 fn normalize_consensus_text(text: &str) -> String {
     text.to_lowercase()
+        .replace("沒有新的反對點", "no_objection")
+        .replace("沒有新反對點", "no_objection")
+        .replace("沒有新的實質反對", "no_objection")
+        .replace("沒有實質反對", "no_objection")
+        .replace("沒有阻礙性反對", "no_objection")
+        .replace("沒有新的阻礙性反對", "no_objection")
+        .replace("沒有新的阻塞", "no_objection")
+        .replace("沒有反對", "no_objection")
+        .replace("無反對", "no_objection")
+        .replace("我這邊沒有新的反對點", "no_objection")
+        .replace("我沒有新的反對點", "no_objection")
+        .replace("我同意", "i_agree")
+        .replace("方向是對的", "i_agree")
+        .replace("補得對", "i_agree")
         .replace("沒有 blocking objection", "no_objection")
         .replace("no blocking objection", "no_objection")
         .replace("沒有阻塞異議", "no_objection")
@@ -403,24 +679,51 @@ fn has_consensus_signal(text: &str) -> bool {
         "不需要硬辯",
         "不硬製造分歧",
         "沒有實質反對",
+        "沒有新的反對點",
+        "沒有新的實質反對",
+        "沒有阻礙性反對",
+        "i_agree",
+        "我同意",
         "沒有 material disagreement",
         "基本正確",
         "方向沒問題",
+        "方向是對的",
+        "補得對",
         "我支持",
         "同一個具體方向",
         "同一個具體方案",
         "可執行的共同",
         "收斂後",
         "結論很簡單",
-    ].iter().any(|marker| text.contains(marker))
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 fn code_change_requested(user_message: &str) -> bool {
     let text = user_message.to_lowercase();
     [
-        "改程式", "調整程式", "修改程式", "修 bug", "debug", "實作", "開發", "寫 code",
-        "code", "diff", "patch", "修正", "新增", "重構", "build", "lint", "cargo", "npm",
-    ].iter().any(|kw| text.contains(kw))
+        "改程式",
+        "調整程式",
+        "修改程式",
+        "修 bug",
+        "debug",
+        "實作",
+        "開發",
+        "寫 code",
+        "code",
+        "diff",
+        "patch",
+        "修正",
+        "新增",
+        "重構",
+        "build",
+        "lint",
+        "cargo",
+        "npm",
+    ]
+    .iter()
+    .any(|kw| text.contains(kw))
 }
 
 async fn run_agent(
@@ -435,7 +738,11 @@ async fn run_agent(
     }
 }
 
-fn chat_with_turns(base: &[ChatMessage], turns: &[(DebateAgent, String)], instruction: ChatMessage) -> Vec<ChatMessage> {
+fn chat_with_turns(
+    base: &[ChatMessage],
+    turns: &[(DebateAgent, String)],
+    instruction: ChatMessage,
+) -> Vec<ChatMessage> {
     let mut ctx = base.to_vec();
     for (agent, content) in turns {
         ctx.push(ChatMessage {
@@ -445,6 +752,110 @@ fn chat_with_turns(base: &[ChatMessage], turns: &[(DebateAgent, String)], instru
     }
     ctx.push(instruction);
     ctx
+}
+
+fn append_debate_note(
+    project_root: Option<&str>,
+    agent: DebateAgent,
+    phase_label: &str,
+    user_message: &str,
+    reply: &str,
+) {
+    let Some(root) = project_root else {
+        return;
+    };
+    let path = Path::new(root).join(DEBATE_NOTES_FILE);
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+
+    let highlights = extract_note_highlights(reply);
+    let keywords = extract_note_keywords(user_message, reply);
+    let entry = format!(
+        "\n---\n\n## {} · {} · {}\n\n- 使用者問題：{}\n- 對話重點：\n{}\n- 關鍵字：{}\n- 紀錄規則：此筆由系統依該 Agent 本輪回覆自動追加；只往下新增，不覆蓋舊內容。\n",
+        Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+        agent.name(),
+        phase_label,
+        sanitize_note_line(user_message, 240),
+        highlights,
+        keywords.join("、")
+    );
+    let _ = file.write_all(entry.as_bytes());
+}
+
+fn extract_note_highlights(reply: &str) -> String {
+    let mut lines = reply
+        .replace("\r", "")
+        .lines()
+        .map(|line| line.trim().trim_start_matches(['-', '*', '#', ' ']).trim())
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.contains("<!-- consensus:reached -->"))
+        .take(5)
+        .map(|line| format!("  - {}", sanitize_note_line(line, 180)))
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        lines.push("  - 本輪沒有可摘錄的有效文字。".into());
+    }
+    lines.join("\n")
+}
+
+fn extract_note_keywords(user_message: &str, reply: &str) -> Vec<String> {
+    let text = format!("{}\n{}", user_message, reply).to_lowercase();
+    let candidates = [
+        "OpenClaw",
+        "Hermes",
+        "Debate",
+        "Final",
+        "共識",
+        "分歧",
+        "阻塞",
+        "重複",
+        "濃縮",
+        "CONVERSATION_NOTES_DEBATE.md",
+        "Git",
+        "Branch",
+        "Identity",
+        "Repository",
+        "Token",
+        "驗證",
+        "專案",
+        "記憶",
+        "對話紀錄",
+        "關鍵字",
+        "重點",
+        "風險",
+        "實作",
+        "測試",
+        "cargo",
+        "npm",
+        "lint",
+        "build",
+        "streaming",
+        "scroll",
+        "WebSocket",
+    ];
+
+    let mut keywords = candidates
+        .iter()
+        .filter(|keyword| text.contains(&keyword.to_lowercase()))
+        .map(|keyword| (*keyword).to_string())
+        .take(10)
+        .collect::<Vec<_>>();
+
+    if keywords.is_empty() {
+        keywords.push("一般對話".into());
+    }
+    keywords
+}
+
+fn sanitize_note_line(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut output = compact.chars().take(max_chars).collect::<String>();
+    if compact.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
 }
 
 /// One round of the debate (or the final synthesis), packaged with its
@@ -466,6 +877,7 @@ struct DebateRunner {
     round_limit: usize,
     auto_consensus: bool,
     lead: DebateAgent,
+    project_root: Option<String>,
     turns: Vec<(DebateAgent, String)>,
     current: DebateAgent,
     turn_index: usize,
@@ -477,6 +889,7 @@ impl DebateRunner {
         config: &Config,
         history: &[Message],
         user_message: &str,
+        project_root: Option<String>,
         chat_with_user_msg: Vec<ChatMessage>,
     ) -> Self {
         let lead = choose_debate_lead(history, user_message);
@@ -497,6 +910,7 @@ impl DebateRunner {
             round_limit,
             auto_consensus: config.debate_auto_consensus,
             lead,
+            project_root,
             turns: Vec::new(),
             current: lead,
             turn_index: 0,
@@ -511,7 +925,12 @@ impl DebateRunner {
         let ctx = chat_with_turns(
             &self.base,
             &self.turns,
-            debate_turn_instruction(self.current, self.turn_index, self.turn_index == 0, &self.user_message),
+            debate_turn_instruction(
+                self.current,
+                self.turn_index,
+                self.turn_index == 0,
+                &self.user_message,
+            ),
         );
         Some(DebateRound {
             agent: self.current,
@@ -521,6 +940,14 @@ impl DebateRunner {
     }
 
     fn record_turn(&mut self, reply: String) {
+        let phase_label = format!("Round {}", self.turn_index + 1);
+        append_debate_note(
+            self.project_root.as_deref(),
+            self.current,
+            &phase_label,
+            &self.user_message,
+            &reply,
+        );
         self.turns.push((self.current, reply));
         if self.auto_consensus && consensus_reached(&self.turns) {
             self.reached_consensus = true;
@@ -534,7 +961,12 @@ impl DebateRunner {
         let ctx = chat_with_turns(
             &self.base,
             &self.turns,
-            final_instruction(self.lead, self.code_change, self.reached_consensus, &self.user_message),
+            final_instruction(
+                self.lead,
+                self.code_change,
+                self.reached_consensus,
+                &self.user_message,
+            ),
         );
         DebateRound {
             agent: self.lead,
@@ -556,7 +988,10 @@ pub async fn run_agent_turn(
     let hermes = HermesClient::new(config);
 
     let mut chat = messages_to_chat(project, history, project_summary);
-    chat.push(ChatMessage { role: "user".into(), content: user_message.into() });
+    chat.push(ChatMessage {
+        role: "user".into(),
+        content: user_message.into(),
+    });
 
     let mut results = vec![];
     match mode {
@@ -569,15 +1004,69 @@ pub async fn run_agent_turn(
             results.push(("hermes".into(), reply, Some("Hermes".into())));
         }
         AgentMode::Debate => {
-            let mut runner = DebateRunner::new(config, history, user_message, chat.clone());
-            while let Some(round) = runner.next_round() {
-                let reply = run_agent(&openclaw, &hermes, round.agent, round.context).await?;
-                results.push((round.agent.role().into(), reply.clone(), Some(round.agent.name().into())));
-                runner.record_turn(reply);
+            let intent = classify_debate_intent(user_message);
+            match intent {
+                DebateIntent::CasualChat | DebateIntent::QuickAgreement => {
+                    let lead = choose_debate_lead(history, user_message);
+                    let mut turns: Vec<(DebateAgent, String)> = Vec::new();
+                    for agent in [lead, lead.other()] {
+                        let ctx = chat_with_turns(
+                            &chat,
+                            &turns,
+                            lightweight_debate_instruction(agent, intent, user_message),
+                        );
+                        let reply = run_agent(&openclaw, &hermes, agent, ctx).await?;
+                        append_debate_note(
+                            project.root.as_deref(),
+                            agent,
+                            match intent {
+                                DebateIntent::CasualChat => "Chat",
+                                DebateIntent::QuickAgreement => "Quick Check",
+                                _ => "Round",
+                            },
+                            user_message,
+                            &reply,
+                        );
+                        turns.push((agent, reply.clone()));
+                        results.push((agent.role().into(), reply, Some(agent.name().into())));
+                    }
+                }
+                DebateIntent::DebateRequired | DebateIntent::ImplementationTask => {
+                    let mut runner = DebateRunner::new(
+                        config,
+                        history,
+                        user_message,
+                        project.root.clone(),
+                        chat.clone(),
+                    );
+                    while let Some(round) = runner.next_round() {
+                        let reply =
+                            run_agent(&openclaw, &hermes, round.agent, round.context).await?;
+                        results.push((
+                            round.agent.role().into(),
+                            reply.clone(),
+                            Some(round.agent.name().into()),
+                        ));
+                        runner.record_turn(reply);
+                    }
+                    let final_round = runner.final_round();
+                    let final_reply =
+                        run_agent(&openclaw, &hermes, final_round.agent, final_round.context)
+                            .await?;
+                    append_debate_note(
+                        project.root.as_deref(),
+                        final_round.agent,
+                        "Final",
+                        user_message,
+                        &final_reply,
+                    );
+                    results.push((
+                        final_round.agent.role().into(),
+                        final_reply,
+                        Some(final_round.agent.name().into()),
+                    ));
+                }
             }
-            let final_round = runner.final_round();
-            let final_reply = run_agent(&openclaw, &hermes, final_round.agent, final_round.context).await?;
-            results.push((final_round.agent.role().into(), final_reply, Some(final_round.agent.name().into())));
         }
     }
     Ok(results)
@@ -596,7 +1085,10 @@ pub fn run_agent_stream(
     let history_owned: Vec<Message> = history.to_vec();
     let current_topic = user_message.to_string();
     let mut chat = messages_to_chat(&project, history, project_summary.as_deref());
-    chat.push(ChatMessage { role: "user".into(), content: current_topic.clone() });
+    chat.push(ChatMessage {
+        role: "user".into(),
+        content: current_topic.clone(),
+    });
 
     Box::pin(async_stream::stream! {
         let openclaw = OpenClawClient::new(&config);
@@ -636,7 +1128,69 @@ pub fn run_agent_stream(
                 yield ServerEvent::Done { agent: "Hermes".into(), round: None, phase: None };
             }
             AgentMode::Debate => {
-                let mut runner = DebateRunner::new(&config, &history_owned, &current_topic, chat);
+                let intent = classify_debate_intent(&current_topic);
+                if matches!(intent, DebateIntent::CasualChat | DebateIntent::QuickAgreement) {
+                    let lead = choose_debate_lead(&history_owned, &current_topic);
+                    let mut turns: Vec<(DebateAgent, String)> = Vec::new();
+                    for agent in [lead, lead.other()] {
+                        let agent_name = agent.name().to_string();
+                        let phase = match intent {
+                            DebateIntent::CasualChat => "chat",
+                            DebateIntent::QuickAgreement => "quick_check",
+                            _ => "round",
+                        };
+                        let ctx = chat_with_turns(
+                            &chat,
+                            &turns,
+                            lightweight_debate_instruction(agent, intent, &current_topic),
+                        );
+                        let mut buffer = String::new();
+                        let mut stream = match agent {
+                            DebateAgent::OpenClaw => openclaw.chat_stream(ctx),
+                            DebateAgent::Hermes => hermes.chat_stream(ctx),
+                        };
+                        loop {
+                            match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                                Ok(Some(chunk)) => {
+                                    buffer.push_str(&chunk);
+                                    yield ServerEvent::Chunk {
+                                        agent: agent_name.clone(),
+                                        content: chunk,
+                                        round: None,
+                                        phase: Some(phase.into()),
+                                    };
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    yield ServerEvent::Error {
+                                        message: format!("{} stream timed out", agent_name),
+                                    };
+                                    return;
+                                }
+                            }
+                        }
+                        yield ServerEvent::Done {
+                            agent: agent_name,
+                            round: None,
+                            phase: Some(phase.into()),
+                        };
+                        append_debate_note(
+                            project.root.as_deref(),
+                            agent,
+                            match intent {
+                                DebateIntent::CasualChat => "Chat",
+                                DebateIntent::QuickAgreement => "Quick Check",
+                                _ => "Round",
+                            },
+                            &current_topic,
+                            &buffer,
+                        );
+                        turns.push((agent, buffer));
+                    }
+                    return;
+                }
+
+                let mut runner = DebateRunner::new(&config, &history_owned, &current_topic, project.root.clone(), chat);
                 while let Some(round) = runner.next_round() {
                     let agent_name = round.agent.name().to_string();
                     let round_num = round.round_number;
@@ -680,17 +1234,22 @@ pub fn run_agent_stream(
 
                 let final_round = runner.final_round();
                 let final_agent_name = final_round.agent.name().to_string();
+                let final_agent = final_round.agent;
+                let mut final_buffer = String::new();
                 let mut stream = match final_round.agent {
                     DebateAgent::OpenClaw => openclaw.chat_stream(final_round.context),
                     DebateAgent::Hermes => hermes.chat_stream(final_round.context),
                 };
                 loop {
                     match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
-                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
-                            agent: final_agent_name.clone(),
-                            content: chunk,
-                            round: None,
-                            phase: Some("final".into()),
+                        Ok(Some(chunk)) => {
+                            final_buffer.push_str(&chunk);
+                            yield ServerEvent::Chunk {
+                                agent: final_agent_name.clone(),
+                                content: chunk,
+                                round: None,
+                                phase: Some("final".into()),
+                            }
                         },
                         Ok(None) => break,
                         Err(_) => {
@@ -706,6 +1265,13 @@ pub fn run_agent_stream(
                     round: None,
                     phase: Some("final".into()),
                 };
+                append_debate_note(
+                    project.root.as_deref(),
+                    final_agent,
+                    "Final",
+                    &current_topic,
+                    &final_buffer,
+                );
             }
         }
     })
