@@ -544,7 +544,23 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </div>
           ) : (
             <>
-              {messages.map((msg) => <ChatMessage key={msg.id} message={msg} />)}
+              {messages.map((msg) => (
+                // content-visibility:auto lets the browser skip layout/paint
+                // for off-screen messages — effectively virtualizes long
+                // histories without restructuring the DOM tree. The
+                // contain-intrinsic-size placeholder (200px estimate) gives
+                // the scrollbar something stable to work with before the
+                // real content is rendered on scroll into view.
+                <div
+                  key={msg.id}
+                  style={{
+                    contentVisibility: "auto",
+                    containIntrinsicSize: "0 200px",
+                  }}
+                >
+                  <ChatMessage message={msg} />
+                </div>
+              ))}
 
               {/* Waiting statuses */}
               {Object.entries(streamStatuses).map(([agentLabel, status]) => (
