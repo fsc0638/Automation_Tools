@@ -405,6 +405,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   async function switchBranch(branch: string) {
     if (!project || project.source_type !== "git" || !branch || branch === project.default_branch) return;
     setSwitchingBranch(true);
+    setRefreshStatus("");
     try {
       const updated = await projectsApi.checkoutBranch(id, branch);
       const [files, branchData] = await Promise.all([
@@ -418,6 +419,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       streamStatusesRef.current = {};
       setStreamBuffers({});
       setStreamStatuses({});
+    } catch (err) {
+      // Most likely on Windows + OneDrive: a working-tree file/dir is held
+      // open by the OneDrive sync engine and git2 can't rmdir it.
+      const msg = err instanceof Error ? err.message : "Branch switch failed";
+      setRefreshStatus(`Switch failed: ${msg}`);
+      setTimeout(() => setRefreshStatus(""), 6000);
     } finally {
       setSwitchingBranch(false);
     }

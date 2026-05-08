@@ -145,9 +145,21 @@ pub fn sync_current_branch(
         let mut reference = repo.find_reference(&local_refname)?;
         reference.set_target(remote_oid, "Fast-forward via sync")?;
         repo.set_head(&local_refname)?;
-        let mut checkout = git2::build::CheckoutBuilder::default();
-        checkout.force();
-        repo.checkout_head(Some(&mut checkout))?;
+        // Retry on Locked just like checkout_branch — same Windows lock window.
+        let mut attempts = 0u32;
+        loop {
+            let mut checkout = git2::build::CheckoutBuilder::default();
+            checkout.force();
+            match repo.checkout_head(Some(&mut checkout)) {
+                Ok(()) => break,
+                Err(e) if e.code() == git2::ErrorCode::Locked && attempts < 3 => {
+                    std::thread::sleep(std::time::Duration::from_millis(200 * (attempts as u64 + 1)));
+                    attempts += 1;
+                    continue;
+                }
+                Err(e) => return Err(anyhow!("Fast-forward checkout failed: {}", e)),
+            }
+        }
         return Ok(SyncResult::FastForwarded);
     }
 
@@ -165,6 +177,44 @@ pub fn fetch_remote(repo_path: &str, credentials: Option<&GitCredentials>) -> Re
     let mut opts = fetch_options(credentials);
     remote.fetch(&["+refs/heads/*:refs/remotes/origin/*"], Some(&mut opts), None)?;
     Ok(())
+}
+
+/// Run a checkout-tree operation, retrying briefly when git2 reports
+/// `Locked` errors. On Windows + OneDrive (or antivirus / IDE indexers)
+/// the working tree's files can be momentarily held open, causing
+/// rmdir to fail with class=Os code=Locked. Most lock windows clear
+/// within a few hundred milliseconds — so a small retry loop converts
+/// transient lock errors into success without the user noticing.
+fn checkout_tree_with_retries(
+    repo: &Repository,
+    obj: &git2::Object,
+    opts: Option<&mut git2::build::CheckoutBuilder>,
+) -> std::result::Result<(), git2::Error> {
+    let mut attempts = 0u32;
+    loop {
+        let result = match opts.as_ref() {
+            // We can't keep `opts` borrowed across attempts easily, so on
+            // each attempt we either pass None or a fresh default builder.
+            // Callers needing custom options should pass them via opts on
+            // the first call; subsequent retries use a default Force builder.
+            Some(_) => {
+                let mut builder = git2::build::CheckoutBuilder::default();
+                builder.force();
+                repo.checkout_tree(obj, Some(&mut builder))
+            }
+            None => repo.checkout_tree(obj, None),
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if e.code() == git2::ErrorCode::Locked && attempts < 3 => {
+                let backoff_ms = 200u64 * (attempts as u64 + 1);
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                attempts += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub fn checkout_branch(repo_path: &str, branch_name: &str, credentials: Option<&GitCredentials>) -> Result<()> {
@@ -190,7 +240,8 @@ pub fn checkout_branch(repo_path: &str, branch_name: &str, credentials: Option<&
     }
 
     let obj = repo.revparse_single(&format!("refs/heads/{branch_name}"))?;
-    repo.checkout_tree(&obj, None)?;
+    checkout_tree_with_retries(&repo, &obj, None)
+        .map_err(|e| anyhow!("Checkout failed: {} (often a Windows file-lock from OneDrive / AV / editor)", e))?;
     repo.set_head(&format!("refs/heads/{branch_name}"))?;
     Ok(())
 }
