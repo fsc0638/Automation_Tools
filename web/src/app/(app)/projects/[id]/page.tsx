@@ -551,6 +551,19 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         scheduleStreamFlush();
         if (Object.keys(streamBuffersRef.current).length === 0 && Object.keys(streamStatusesRef.current).length === 0) {
           setStreaming(false);
+          // Re-fetch conversation messages so client-side placeholder UUIDs are
+          // replaced with the real DB IDs. Without this, "Add to Roadmap"
+          // would send a non-existent source_message_id and the FK constraint
+          // on project_tasks.source_message_id => messages.id would 500.
+          (async () => {
+            try {
+              const data = await convsApi.get(id, convId);
+              setMessages(data.messages);
+            } catch {
+              // best-effort; if refetch fails, the fake-UUID rows stay until
+              // the next conversation switch
+            }
+          })();
         }
       }
     };
@@ -1317,7 +1330,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     disabled={!activeConv || streaming}
                     rows={1}
                     className={cn(
-                      "min-h-[76px] max-h-44 flex-1 resize-none overflow-auto rounded-[24px] border border-[#D6DFEA] bg-white px-4 py-3.5 text-[15px] leading-7 text-[#1A1A2E]",
+                      "min-h-[68px] max-h-44 flex-1 resize-none overflow-auto rounded-[24px] border border-[#D6DFEA] bg-white px-4 py-3 text-[13px] leading-6 text-[#1A1A2E]",
                       "placeholder:text-[#94A3B8] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[#0050A0]",
                       "disabled:cursor-not-allowed disabled:opacity-50"
                     )}
@@ -1890,7 +1903,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
           {timestamp && <span className="text-[11px] text-[#94A3B8]">{timestamp}</span>}
         </div>
         <div className={cn(
-          "rounded-[24px] px-5 py-4 text-[15px] leading-7 shadow-[0_10px_30px_rgba(15,23,42,0.05)]",
+          "rounded-[24px] px-4 py-3 text-[13px] leading-6 shadow-[0_10px_30px_rgba(15,23,42,0.05)]",
           isUser
             ? "rounded-tr-md bg-[#002D62] text-white"
             : isHermes
@@ -1900,7 +1913,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
           {isUser || streaming ? (
             <p className="whitespace-pre-wrap">{visibleContent}</p>
           ) : (
-            <div className="prose prose-sm max-w-none leading-7 prose-headings:text-[#1A1A2E] prose-p:text-[#1A1A2E] prose-li:text-[#334155] prose-strong:text-[#0F172A] prose-code:text-[#1E293B] prose-pre:rounded-2xl prose-pre:border prose-pre:border-[#E2E8F0] prose-pre:bg-[#F8FAFC] prose-pre:text-[#0F172A]">
+            <div className="prose prose-sm max-w-none text-[13px] leading-6 prose-headings:text-[#1A1A2E] prose-p:text-[#1A1A2E] prose-p:my-2 prose-li:text-[#334155] prose-li:my-0.5 prose-strong:text-[#0F172A] prose-code:text-[#1E293B] prose-pre:rounded-2xl prose-pre:border prose-pre:border-[#E2E8F0] prose-pre:bg-[#F8FAFC] prose-pre:text-[#0F172A]">
               <ReactMarkdown
                 components={{
                   code({ className, children, ...props }) {

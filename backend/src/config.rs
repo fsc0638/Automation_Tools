@@ -51,8 +51,11 @@ impl Config {
             debate_max_rounds: std::env::var("DEBATE_MAX_ROUNDS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                // Safety cap: prevents debate loops when agents cannot converge.
-                .unwrap_or(12),
+                // 0 = "effectively unlimited" (caps at 50 in orchestrator) —
+                // converge via consensus_reached() instead of a hard cap.
+                // The default keeps a generous ceiling so deep debates can
+                // run without artificially short rounds.
+                .unwrap_or(0),
             debate_auto_consensus: std::env::var("DEBATE_AUTO_CONSENSUS")
                 .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(true),

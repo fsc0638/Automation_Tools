@@ -489,12 +489,13 @@ fn debate_round_limit_label(max_rounds: usize) -> String {
 }
 
 fn debate_round_limit(config: &Config) -> usize {
-    // 0 used to mean unlimited, but that created unstoppable debate loops.
-    // Treat 0 as the safe default instead.
+    // 0 = "effectively unlimited" — rely on consensus_reached() and the
+    // model's own loop-detection prompt to converge instead of a hard cap.
+    // The 50-turn ceiling is a safety net for cost/runtime, not a target.
     if config.debate_max_rounds == 0 {
-        12
+        50
     } else {
-        config.debate_max_rounds.clamp(2, 20)
+        config.debate_max_rounds.clamp(2, 50)
     }
 }
 
