@@ -93,6 +93,8 @@ export const projects = {
     ),
   reindex: (id: string) =>
     request<{ indexed_files: number }>(`/projects/${id}/index`, { method: "POST" }),
+  metricsSummary: (id: string) =>
+    request<MetricsSummary>(`/projects/${id}/metrics/summary`),
   remoteBranches: (url: string, git_identity_id?: string) =>
     request<{ branches: string[] }>("/git/remote-branches", {
       method: "POST",
@@ -217,4 +219,24 @@ export interface Message {
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
+}
+
+export interface MetricsSummary {
+  totals: {
+    conversations: number;
+    messages: number;
+    user_messages: number;
+    agent_messages: number;
+  };
+  mode_distribution: Array<{ mode: string; count: number }>;
+  avg_chars_by_agent: Array<{ agent: string; avg_chars: number; response_count: number }>;
+  consensus: { debate_finals: number; with_consensus: number; rate: number };
+  debate_round_distribution: Array<{ round: number; count: number }>;
+  timing: {
+    avg_ttft_ms: number | null;
+    avg_total_ms: number | null;
+    p50_total_ms: number | null;
+    p95_total_ms: number | null;
+  };
+  file_citation: { total: number; with_citation: number; rate: number };
 }

@@ -15,6 +15,9 @@ import {
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { InsightsTab } from "@/components/InsightsTab";
+
+type ProjectTab = "chat" | "insights" | "cost" | "roadmap";
 
 const MODE_LABELS: Record<AgentMode, string> = {
   openclaw: "OpenClaw",
@@ -89,6 +92,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshStatus, setRefreshStatus] = useState<string>("");
+  const [activeTab, setActiveTab] = useState<ProjectTab>("chat");
   const streamBuffersRef = useRef<Record<string, string>>({});
   const streamStatusesRef = useRef<Record<string, StreamStatus>>({});
   const wsRef = useRef<WebSocket | null>(null);
@@ -567,8 +571,35 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         </div>
       </div>
 
-      {/* Right: Chat */}
+      {/* Right: tab content */}
       <div className="flex-1 flex flex-col min-w-0">
+        {/* Tab bar */}
+        <div className="h-10 border-b border-[#E2E8F0] bg-white flex items-end px-6 gap-1">
+          {(["chat", "insights", "cost", "roadmap"] as ProjectTab[]).map((t) => (
+            <button
+              key={t}
+              onClick={() => setActiveTab(t)}
+              className={cn(
+                "px-3 py-1.5 text-xs font-medium rounded-t-md transition-colors -mb-px border-b-2",
+                activeTab === t
+                  ? "border-[#0050A0] text-[#0050A0] bg-[#F8FAFC]"
+                  : "border-transparent text-[#64748B] hover:text-[#1A1A2E]"
+              )}
+            >
+              {t === "chat" ? "Chat" : t === "insights" ? "Insights" : t === "cost" ? "Cost" : "Roadmap"}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "insights" && <InsightsTab projectId={id} />}
+        {activeTab === "cost" && (
+          <div className="p-8 text-center text-[#94A3B8] text-sm">Cost tab — coming in Phase 2</div>
+        )}
+        {activeTab === "roadmap" && (
+          <div className="p-8 text-center text-[#94A3B8] text-sm">Roadmap tab — coming in Phase 4</div>
+        )}
+
+        {activeTab === "chat" && (<>
         {/* Toolbar */}
         <div className="h-14 border-b border-[#E2E8F0] bg-white flex items-center px-6 gap-4">
           {project?.source_type === "git" && (
@@ -719,6 +750,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             )}
           </form>
         </div>
+        </>)}
       </div>
     </div>
   );
