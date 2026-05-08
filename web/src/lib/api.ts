@@ -138,6 +138,15 @@ export const gitIdentities = {
   delete: (id: string) => request<void>(`/git/identities/${id}`, { method: "DELETE" }),
 };
 
+export const agentProfiles = {
+  list: () => request<AgentProfile[]>("/agents"),
+  create: (data: CreateAgentProfileInput) =>
+    request<AgentProfile>("/agents", { method: "POST", body: JSON.stringify(data) }),
+  update: (id: string, data: UpdateAgentProfileInput) =>
+    request<AgentProfile>(`/agents/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/agents/${id}`, { method: "DELETE" }),
+};
+
 // Conversations
 export const conversations = {
   list: (projectId: string, mode?: AgentMode) =>
@@ -225,6 +234,40 @@ export interface GitStatus {
 }
 
 export type AgentMode = "openclaw" | "hermes" | "debate";
+export type ChatMode = AgentMode | `agent:${string}` | `agents:${string}`;
+
+export interface AgentProfile {
+  id: string;
+  user_id: string;
+  name: string;
+  provider: "openai" | "openai_compatible" | "gemini" | "anthropic";
+  model: string;
+  base_url?: string | null;
+  role_prompt: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateAgentProfileInput {
+  name: string;
+  provider: string;
+  model: string;
+  base_url?: string;
+  role_prompt?: string;
+  api_key: string;
+  enabled?: boolean;
+}
+
+export interface UpdateAgentProfileInput {
+  name?: string;
+  provider?: string;
+  model?: string;
+  base_url?: string;
+  role_prompt?: string;
+  api_key?: string;
+  enabled?: boolean;
+}
 
 export interface Conversation {
   id: string;

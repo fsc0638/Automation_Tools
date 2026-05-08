@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::crypto::TokenCipher;
 
 pub mod auth;
+pub mod agent_profiles;
 pub mod conversation_memory;
 pub mod conversations;
 pub mod feedback;
@@ -30,6 +31,7 @@ pub fn router(state: AppState) -> Router {
 
     let protected = Router::new()
         .merge(projects::routes())
+        .merge(agent_profiles::routes())
         .merge(git_identities::routes())
         .merge(conversations::routes())
         .merge(metrics::routes())

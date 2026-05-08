@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar, Cell,
 } from "recharts";
@@ -21,7 +21,7 @@ export function CostTab({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -31,9 +31,12 @@ export function CostTab({ projectId }: { projectId: string }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [projectId]);
 
-  useEffect(() => { void refresh(); }, [projectId]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void refresh(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
 
   if (loading && !data) return <div className="p-8 text-center text-[#94A3B8]">Loading…</div>;
   if (error) return <div className="p-8 text-center text-[#C8102E]">{error}</div>;

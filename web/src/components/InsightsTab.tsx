@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   PieChart, Pie, Cell,
@@ -24,7 +24,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -39,9 +39,12 @@ export function InsightsTab({ projectId }: { projectId: string }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [projectId]);
 
-  useEffect(() => { void refresh(); }, [projectId]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void refresh(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
 
   if (loading && !metrics) {
     return <div className="p-8 text-center text-[#94A3B8]">Loading metrics…</div>;

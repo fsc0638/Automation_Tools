@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Bot, FolderOpen, LogOut, Sparkles } from "lucide-react";
+import { Bot, FolderOpen, LogOut, Sparkles, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 
@@ -11,6 +11,12 @@ const nav = [
     label: "Projects",
     description: "Manage repositories and workspaces",
     icon: FolderOpen,
+  },
+  {
+    href: "/agents",
+    label: "Agents",
+    description: "Connect GPT, Gemini, Claude, or custom models",
+    icon: UserCog,
   },
 ];
 

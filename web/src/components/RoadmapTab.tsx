@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { tasks as tasksApi, type ProjectTask, type TaskPriority, type TaskStatus } from "@/lib/api";
 
@@ -32,7 +32,7 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
   const [draft, setDraft] = useState({ title: "", why: "", priority: "medium" as TaskPriority });
   const [hoverCol, setHoverCol] = useState<TaskStatus | null>(null);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setLoading(true);
     setErr("");
     try {
@@ -42,9 +42,12 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [projectId]);
 
-  useEffect(() => { void refresh(); }, [projectId]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void refresh(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
 
   async function createTask(e: React.FormEvent) {
     e.preventDefault();
