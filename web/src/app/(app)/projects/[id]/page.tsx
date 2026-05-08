@@ -759,7 +759,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,_#F8FBFF_0%,_#F5F7FB_38%,_#EEF3F8_100%)]">
+    <div className="flex h-screen min-h-0 flex-col bg-[radial-gradient(circle_at_top,_#F8FBFF_0%,_#F5F7FB_38%,_#EEF3F8_100%)]">
       <div className="border-b border-[#E2E8F0] bg-white px-5 py-4">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="flex items-start gap-3">
