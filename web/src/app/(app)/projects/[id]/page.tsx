@@ -86,14 +86,14 @@ const QUICK_ACTIONS: Array<{ key: QuickAction; labelKey: string; icon: typeof Ac
     labelKey: "quick.roadmap",
     icon: ListChecks,
     prompt:
-      "請把目前專案可優化方向整理成可執行 Roadmap。請輸出任務清單，每個任務包含：title、priority、why、affected files、acceptance criteria、estimated effort、dependencies、建議由 OpenClaw 或 Hermes 主導。任務必須根據專案檔案與目前對話，不要憑空發明。",
+      "請把目前專案可優化方向整理成可執行 Roadmap，必須根據專案檔案與目前對話，不要憑空發明。\n\n輸出格式：先用一段 markdown 敘述為什麼這些任務重要，接著一個 ```json fenced block，內容是 JSON array，每個元素一個任務：\n\n```json\n[\n  {\n    \"title\": \"短句任務名稱（≤80 字）\",\n    \"priority\": \"low | medium | high | critical\",\n    \"why\": \"為什麼這項重要、會解決什麼問題\",\n    \"affected_files\": [\"path/to/foo.ts\", \"backend/src/bar.rs\"],\n    \"acceptance_criteria\": \"開發者或代理人可驗證的條件：例如『跑 X 測試會通過』、『B 檔案的 Y 函式變成 Z 行為』、『diff 不超過 N 行』\",\n    \"estimated_effort\": \"S | M | L 或 0.5d / 2d 等\"\n  }\n]\n```\n\n至少 3 項、最多 8 項。每個任務都必須引用真實的檔案路徑或對話中提到的問題。",
   },
   {
     key: "patch",
     labelKey: "quick.patchPlan",
     icon: Code2,
     prompt:
-      "請進入 Patch / PR 規劃模式。根據目前專案狀態，挑選最高價值且風險可控的一項改善，產生 patch-ready 計畫。請輸出：目標、受影響檔案、修改步驟、預期 diff 摘要、測試指令、回滾方案、PR 標題與描述。不要實際 commit 或 push；若證據不足，先列出需要讀取或確認的檔案。",
+      "請進入 Patch / PR 規劃模式。根據目前專案狀態，挑選最高價值且風險可控的 1~3 項改善，產生 patch-ready 計畫。\n\n輸出格式：先用 markdown 說明選擇這些 patch 的理由，再用 ```json fenced block 給出陣列，每個 patch 一個物件：\n\n```json\n[\n  {\n    \"title\": \"PR 標題（祈使句、≤72 字）\",\n    \"priority\": \"low | medium | high | critical\",\n    \"why\": \"目標、影響範圍、預期收益\",\n    \"affected_files\": [\"路徑1\", \"路徑2\"],\n    \"acceptance_criteria\": \"明確驗證條件，包含：1) 應通過的測試指令 2) 預期 diff 摘要 3) 行為驗證步驟 4) 回滾方案\",\n    \"estimated_effort\": \"S | M | L\"\n  }\n]\n```\n\n不要實際 commit 或 push；若證據不足，先列出需要讀取或確認的檔案，並說明該 patch 為何尚不該實作。",
   },
 ];
 
@@ -409,6 +409,39 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const data = await convsApi.get(id, conv.id);
     setMessages(data.messages);
   }, [id]);
+
+  /** Roadmap → workspace deep-link. Switches to the workspace tab, opens the
+   *  conversation that owns the message, and scrolls to it once messages
+   *  load (handled by the effect below via pendingScrollMessageId). */
+  const [pendingScrollMessageId, setPendingScrollMessageId] = useState<string | null>(null);
+  const openSourceMessage = useCallback(async (conversationId: string, messageId: string) => {
+    setProjectTab("workspace");
+    setPendingScrollMessageId(messageId);
+    const target = convs.find((c) => c.id === conversationId);
+    if (target && (!activeConv || activeConv.id !== conversationId)) {
+      await selectConv(target);
+    } else if (!target) {
+      // conv not in current list — refetch and try again
+      try {
+        const list = await convsApi.list(id);
+        setConvs(list);
+        const found = list.find((c) => c.id === conversationId);
+        if (found) await selectConv(found);
+      } catch { /* best-effort */ }
+    }
+  }, [convs, activeConv, selectConv, id]);
+
+  useEffect(() => {
+    if (!pendingScrollMessageId) return;
+    if (!messages.some((m) => m.id === pendingScrollMessageId)) return;
+    const el = document.querySelector<HTMLDivElement>(`[data-message-id="${pendingScrollMessageId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("ring-2", "ring-[#0050A0]");
+      window.setTimeout(() => el.classList.remove("ring-2", "ring-[#0050A0]"), 2200);
+    }
+    setPendingScrollMessageId(null);
+  }, [messages, pendingScrollMessageId]);
 
   useEffect(() => {
     setShowAppSidebar(!focusMode);
@@ -907,7 +940,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
       {projectTab === "insights" && <InsightsTab projectId={id} />}
       {projectTab === "cost" && <CostTab projectId={id} />}
-      {projectTab === "roadmap" && <RoadmapTab projectId={id} />}
+      {projectTab === "roadmap" && <RoadmapTab projectId={id} onOpenSource={openSourceMessage} />}
 
       {projectTab === "workspace" && (
       <div className="flex min-h-0 flex-1 bg-[#F8FAFC]">
@@ -1217,7 +1250,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 {messages.map((msg) => (
                   <div
                     key={msg.id}
+                    data-message-id={msg.id}
                     style={{ contentVisibility: "auto", containIntrinsicSize: "0 200px" }}
+                    className="rounded-[24px] transition-shadow"
                   >
                     <ChatMessage message={msg} projectId={id} />
                   </div>
@@ -1853,10 +1888,29 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
     if (adding || added) return;
     setAdding(true);
     try {
-      const parsed = parseTaskFromMessage(visibleContent);
-      await tasksApi.create(projectId, { ...parsed, source_message_id: message.id });
-      setAdded(true);
-      pushToast({ tone: "success", title: "Added to Roadmap", description: parsed.title });
+      const parsedList = parseTasksFromMessage(visibleContent);
+      let createdCount = 0;
+      let firstTitle = "";
+      for (const parsed of parsedList) {
+        try {
+          await tasksApi.create(projectId, { ...parsed, source_message_id: message.id });
+          createdCount += 1;
+          if (!firstTitle) firstTitle = parsed.title;
+        } catch (e) {
+          // continue with the rest of the batch even if one fails
+          console.warn("Failed to create roadmap task:", e);
+        }
+      }
+      if (createdCount > 0) {
+        setAdded(true);
+        pushToast({
+          tone: "success",
+          title: createdCount === 1 ? "Added to Roadmap" : `Added ${createdCount} tasks to Roadmap`,
+          description: createdCount === 1 ? firstTitle : `${firstTitle} +${createdCount - 1} more`,
+        });
+      } else {
+        pushToast({ tone: "error", title: "Failed to add to Roadmap", description: "No tasks were created" });
+      }
     } catch (e) {
       pushToast({ tone: "error", title: "Failed to add to Roadmap", description: e instanceof Error ? e.message : "" });
     } finally {
@@ -2036,55 +2090,157 @@ function FileNodeItem({
 }
 
 
-/**
- * Pull a roadmap task from an agent reply. Heuristic — title is the first
- * non-empty line, why is the rest, affected_files are regex-extracted code paths.
- */
-function parseTaskFromMessage(content: string): {
+type ParsedTask = {
   title: string;
   why?: string;
   affected_files?: string[];
+  acceptance_criteria?: string;
+  estimated_effort?: string;
   priority?: "low" | "medium" | "high" | "critical";
-} {
-  const lines = content
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+};
 
+const PRIORITY_VALUES = ["low", "medium", "high", "critical"] as const;
+
+function classifyPriority(text: string): ParsedTask["priority"] {
+  const lower = text.toLowerCase();
+  if (/critical|嚴重|安全漏洞/.test(lower)) return "critical";
+  if (/high priority|high\b|高優先|高風險/.test(lower)) return "high";
+  if (/low priority|low\b|nice to have|錦上添花/.test(lower)) return "low";
+  return "medium";
+}
+
+function extractFiles(text: string, limit = 8): string[] {
+  const fileRe = /(?:[\w./-]+)\.(?:rs|ts|tsx|js|jsx|py|md|sql|toml|json|yaml|yml|swift|kt|java|go|html|css)\b/g;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of text.matchAll(fileRe)) {
+    const path = m[0].replace(/^[`"\x27]+|[`"\x27]+$/g, "");
+    if (path.length > 120 || path.includes(" ")) continue;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function normalizeParsed(raw: Partial<ParsedTask> & { title?: unknown }): ParsedTask | null {
+  const titleRaw = typeof raw.title === "string" ? raw.title : "";
+  const title = titleRaw
+    .replace(/^[#*\-•·\d.\s]+/, "")
+    .replace(/[*_`]+/g, "")
+    .slice(0, 120)
+    .trim();
+  if (!title) return null;
+  return {
+    title,
+    why: typeof raw.why === "string" && raw.why.trim() ? raw.why.trim().slice(0, 1500) : undefined,
+    affected_files: Array.isArray(raw.affected_files) && raw.affected_files.length > 0
+      ? raw.affected_files.map(String).filter(Boolean).slice(0, 12)
+      : undefined,
+    acceptance_criteria: typeof raw.acceptance_criteria === "string" && raw.acceptance_criteria.trim()
+      ? raw.acceptance_criteria.trim().slice(0, 1500)
+      : undefined,
+    estimated_effort: typeof raw.estimated_effort === "string" && raw.estimated_effort.trim()
+      ? raw.estimated_effort.trim().slice(0, 40)
+      : undefined,
+    priority: PRIORITY_VALUES.includes(raw.priority as never)
+      ? (raw.priority as ParsedTask["priority"])
+      : "medium",
+  };
+}
+
+function tryParseJsonTasks(content: string): ParsedTask[] | null {
+  // Look for ```json ... ``` or ``` ... ``` fences containing a JSON array of tasks.
+  const fenceMatch = content.match(/```(?:json|JSON)?\s*([\s\S]+?)```/);
+  const candidates: string[] = [];
+  if (fenceMatch) candidates.push(fenceMatch[1]);
+  // Bare JSON array fallback (only if message looks like one).
+  const trimmed = content.trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) candidates.push(trimmed);
+  for (const raw of candidates) {
+    try {
+      const parsed = JSON.parse(raw.trim());
+      if (Array.isArray(parsed)) {
+        const tasks = parsed
+          .map((item) => (typeof item === "object" && item ? normalizeParsed(item) : null))
+          .filter((task): task is ParsedTask => task !== null);
+        if (tasks.length > 0) return tasks;
+      }
+    } catch { /* not valid JSON, fall through */ }
+  }
+  return null;
+}
+
+function tryParseNumberedList(content: string): ParsedTask[] | null {
+  // Look for numbered headings like "1) Title" / "1. Title" / "### 1. Title"
+  // followed by indented or unindented lines until the next number or end.
+  const lines = content.split(/\r?\n/);
+  const blocks: { title: string; body: string[] }[] = [];
+  const startRe = /^\s*(?:#{1,6}\s+)?(\d+)\s*[).、:：]\s*(.+)$/;
+  let current: { title: string; body: string[] } | null = null;
+  for (const line of lines) {
+    const m = line.match(startRe);
+    if (m) {
+      if (current && current.title) blocks.push(current);
+      current = { title: m[2].trim(), body: [] };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (current && current.title) blocks.push(current);
+  if (blocks.length < 2) return null;
+
+  return blocks.map((b) => {
+    const body = b.body.join("\n").trim();
+    const acMatch = body.match(/(?:acceptance(?:\s*criteria)?|驗收(?:條件)?|verification|tests?)[:：]?\s*([\s\S]+?)(?:\n\s*\n|$)/i);
+    const effortMatch = body.match(/(?:effort|工作量|estimated\s*effort)[:：]?\s*([SMLXxlsmh\d./\s大中小]+)/i);
+    const filesMatch = body.match(/(?:affected\s*files?|影響檔案|files?)[:：]?\s*([^\n]+)/i);
+    let files: string[] | undefined = undefined;
+    if (filesMatch) {
+      files = filesMatch[1].split(/[,，\s]+/).map((s) => s.replace(/^[`"\x27]+|[`"\x27]+$/g, "")).filter(Boolean);
+    }
+    if (!files || files.length === 0) {
+      const fromBody = extractFiles(body);
+      if (fromBody.length > 0) files = fromBody;
+    }
+    return normalizeParsed({
+      title: b.title,
+      why: body || undefined,
+      affected_files: files,
+      acceptance_criteria: acMatch?.[1].trim(),
+      estimated_effort: effortMatch?.[1].trim(),
+      priority: classifyPriority(b.title + "\n" + body),
+    });
+  }).filter((task): task is ParsedTask => task !== null);
+}
+
+/**
+ * Parse one or more roadmap tasks from an agent reply. Tries JSON fence
+ * first (most precise), then numbered list (multi-task), and finally
+ * falls back to a single-task heuristic so existing behavior is preserved.
+ */
+function parseTasksFromMessage(content: string): ParsedTask[] {
+  const json = tryParseJsonTasks(content);
+  if (json && json.length > 0) return json;
+
+  const numbered = tryParseNumberedList(content);
+  if (numbered && numbered.length > 1) return numbered;
+
+  // Single-task heuristic (legacy behavior)
+  const lines = content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
   const titleLine = lines[0] ?? "(untitled)";
   const title = titleLine
     .replace(/^[#*\-•·\d.\s]+/, "")
     .replace(/[*_`]+/g, "")
     .slice(0, 100)
     .trim() || "(untitled)";
-
   const why = lines.slice(1).join("\n").slice(0, 800).trim() || undefined;
-
-  const fileRe = /(?:[\w./-]+)\.(?:rs|ts|tsx|js|jsx|py|md|sql|toml|json|yaml|yml|swift|kt|java|go|html|css)\b/g;
-  const seen = new Set<string>();
-  const affected_files: string[] = [];
-  for (const m of content.matchAll(fileRe)) {
-    const path = m[0].replace(/^[`"\x27]+|[`"\x27]+$/g, "");
-    if (path.length > 120 || path.includes(" ")) continue;
-    if (seen.has(path)) continue;
-    seen.add(path);
-    affected_files.push(path);
-    if (affected_files.length >= 8) break;
-  }
-
-  const lower = content.toLowerCase();
-  const priority: "low" | "medium" | "high" | "critical" = lower.match(/critical|嚴重|安全漏洞/)
-    ? "critical"
-    : lower.match(/high priority|high\s|高優先|高風險/)
-    ? "high"
-    : lower.match(/low priority|low\s|nice to have|錦上添花/)
-    ? "low"
-    : "medium";
-
-  return {
+  const files = extractFiles(content);
+  return [{
     title,
     why,
-    affected_files: affected_files.length > 0 ? affected_files : undefined,
-    priority,
-  };
+    affected_files: files.length > 0 ? files : undefined,
+    priority: classifyPriority(content),
+  }];
 }

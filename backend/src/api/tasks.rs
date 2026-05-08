@@ -27,9 +27,19 @@ pub struct ProjectTask {
     pub priority: String,
     pub status: String,
     pub source_message_id: Option<Uuid>,
+    /// Conversation that contains source_message_id. Resolved via LEFT JOIN
+    /// so the frontend can deep-link from a Roadmap card back to the chat.
+    pub source_conversation_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+const TASK_SELECT: &str = "SELECT t.id, t.project_id, t.title, t.why, t.affected_files,
+        t.acceptance_criteria, t.estimated_effort, t.priority, t.status,
+        t.source_message_id, m.conversation_id AS source_conversation_id,
+        t.created_at, t.updated_at
+     FROM project_tasks t
+     LEFT JOIN messages m ON m.id = t.source_message_id";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTask {
@@ -81,15 +91,17 @@ async fn list_tasks(
     Path(project_id): Path<Uuid>,
 ) -> AppResult<Json<Vec<ProjectTask>>> {
     verify_access(&state, project_id, auth_user.id).await?;
-    let tasks: Vec<ProjectTask> = sqlx::query_as(
-        "SELECT * FROM project_tasks WHERE project_id = $1
+    let sql = format!(
+        "{TASK_SELECT}
+         WHERE t.project_id = $1
          ORDER BY
-            CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
-            created_at DESC",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
+            CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+            t.created_at DESC"
+    );
+    let tasks: Vec<ProjectTask> = sqlx::query_as(&sql)
+        .bind(project_id)
+        .fetch_all(&state.db)
+        .await?;
     Ok(Json(tasks))
 }
 
@@ -109,12 +121,12 @@ async fn create_task(
         _ => "medium".to_string(),
     };
 
-    let task: ProjectTask = sqlx::query_as(
+    let new_id: (Uuid,) = sqlx::query_as(
         "INSERT INTO project_tasks
          (project_id, title, why, affected_files, acceptance_criteria,
           estimated_effort, priority, source_message_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING *",
+         RETURNING id",
     )
     .bind(project_id)
     .bind(req.title.trim())
@@ -126,6 +138,12 @@ async fn create_task(
     .bind(req.source_message_id)
     .fetch_one(&state.db)
     .await?;
+
+    let sql = format!("{TASK_SELECT} WHERE t.id = $1");
+    let task: ProjectTask = sqlx::query_as(&sql)
+        .bind(new_id.0)
+        .fetch_one(&state.db)
+        .await?;
 
     Ok((StatusCode::CREATED, Json(task)))
 }
@@ -149,7 +167,7 @@ async fn update_task(
         }
     }
 
-    let task: Option<ProjectTask> = sqlx::query_as(
+    let updated: Option<(Uuid,)> = sqlx::query_as(
         "UPDATE project_tasks SET
             title = COALESCE($1, title),
             why = COALESCE($2, why),
@@ -160,7 +178,7 @@ async fn update_task(
             status = COALESCE($7, status),
             updated_at = NOW()
          WHERE id = $8 AND project_id = $9
-         RETURNING *",
+         RETURNING id",
     )
     .bind(req.title.as_deref().map(str::trim))
     .bind(req.why.as_deref())
@@ -174,8 +192,13 @@ async fn update_task(
     .fetch_optional(&state.db)
     .await?;
 
-    task.map(Json)
-        .ok_or_else(|| AppError::NotFound("Task not found".into()))
+    let id = updated.ok_or_else(|| AppError::NotFound("Task not found".into()))?.0;
+    let sql = format!("{TASK_SELECT} WHERE t.id = $1");
+    let task: ProjectTask = sqlx::query_as(&sql)
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(task))
 }
 
 async fn delete_task(

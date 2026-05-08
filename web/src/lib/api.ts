@@ -307,6 +307,7 @@ export interface ProjectTask {
   priority: TaskPriority;
   status: TaskStatus;
   source_message_id?: string | null;
+  source_conversation_id?: string | null;
   created_at: string;
   updated_at: string;
 }
