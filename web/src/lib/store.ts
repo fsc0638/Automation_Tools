@@ -10,6 +10,11 @@ interface AuthStore {
   logout: () => void;
 }
 
+interface WorkspaceChromeStore {
+  showAppSidebar: boolean;
+  setShowAppSidebar: (show: boolean) => void;
+}
+
 export const useAuthStore = create<AuthStore>()(
   persist(
     (set) => ({
@@ -27,3 +32,8 @@ export const useAuthStore = create<AuthStore>()(
     { name: "kway-auth" }
   )
 );
+
+export const useWorkspaceChromeStore = create<WorkspaceChromeStore>((set) => ({
+  showAppSidebar: true,
+  setShowAppSidebar: (show) => set({ showAppSidebar: show }),
+}));

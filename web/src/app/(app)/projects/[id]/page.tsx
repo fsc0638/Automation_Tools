@@ -53,6 +53,7 @@ import { Button } from "@/components/ui/button";
 import { InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
 import { cn, formatDate } from "@/lib/utils";
 import { useToastStore } from "@/lib/toast-store";
+import { useWorkspaceChromeStore } from "@/lib/store";
 import { InsightsTab } from "@/components/InsightsTab";
 import { CostTab } from "@/components/CostTab";
 import { RoadmapTab } from "@/components/RoadmapTab";
@@ -170,6 +171,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const { id } = use(params);
   const router = useRouter();
   const pushToast = useToastStore((state) => state.pushToast);
+  const setShowAppSidebar = useWorkspaceChromeStore((state) => state.setShowAppSidebar);
 
   const [project, setProject] = useState<Project | null>(null);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
@@ -197,6 +199,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [selectedFileContent, setSelectedFileContent] = useState("");
   const [filePreviewLoading, setFilePreviewLoading] = useState(false);
   const [filePreviewError, setFilePreviewError] = useState("");
+  const [showConversationRail, setShowConversationRail] = useState(true);
+  const [showContextRail, setShowContextRail] = useState(false);
+  const [showWorkspaceOverview, setShowWorkspaceOverview] = useState(false);
+  const [showConversationSummary, setShowConversationSummary] = useState(false);
+  const [showDebateWorkflow, setShowDebateWorkflow] = useState(false);
+  const [showComposerTools, setShowComposerTools] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
 
   const streamBuffersRef = useRef<Record<string, string>>({});
   const streamStatusesRef = useRef<Record<string, StreamStatus>>({});
@@ -324,6 +333,20 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     });
   }
 
+  function toggleFocusMode() {
+    setFocusMode((current) => {
+      const next = !current;
+      if (next) {
+        setShowConversationRail(false);
+        setShowContextRail(false);
+        setShowWorkspaceOverview(false);
+        setShowConversationSummary(false);
+        setShowDebateWorkflow(false);
+      }
+      return next;
+    });
+  }
+
   const scheduleStreamFlush = useCallback(() => {
     if (flushRafRef.current !== null) return;
     flushRafRef.current = requestAnimationFrame(() => {
@@ -355,6 +378,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const data = await convsApi.get(id, conv.id);
     setMessages(data.messages);
   }, [id]);
+
+  useEffect(() => {
+    setShowAppSidebar(!focusMode);
+    return () => {
+      setShowAppSidebar(true);
+    };
+  }, [focusMode, setShowAppSidebar]);
 
   useEffect(() => {
     let cancelled = false;
@@ -723,9 +753,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   }
 
   return (
-    <div className="flex h-full flex-col bg-[#F5F7FB]">
-      <div className="border-b border-[#E2E8F0] bg-white px-6 py-4">
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+    <div className="flex h-full flex-col bg-[radial-gradient(circle_at_top,_#F8FBFF_0%,_#F5F7FB_38%,_#EEF3F8_100%)]">
+      <div className="border-b border-[#E2E8F0] bg-white px-5 py-4">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="flex items-start gap-3">
             <button
               onClick={() => router.push("/projects")}
@@ -739,30 +769,51 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 <h1 className="text-xl font-semibold text-[#1A1A2E]">{project?.name ?? "Project workspace"}</h1>
                 {project && <StatusPill>{project.source_type === "git" ? "Git repository" : "Local folder"}</StatusPill>}
                 <StatusPill className={MODE_STYLES[mode]}>{MODE_LABELS[mode]}</StatusPill>
+                {focusMode && <StatusPill className="bg-[#EAF2FF] text-[#0050A0]">Focus mode</StatusPill>}
               </div>
               <p className="mt-1 text-sm text-[#64748B]">
-                Repo-aware multi-agent workspace with files, branch status, and conversation history in one place.
+                Repo-aware multi-agent workspace with a reading-first chat layout.
               </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
+                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Branch: {project?.default_branch ?? "—"}</span>
+                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Conversations: {convs.length}</span>
+                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Dirty files: {dirtyCount}</span>
+                {selectedFilePath && <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Focused file: {selectedFilePath.split("/").pop() ?? selectedFilePath}</span>}
+              </div>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" onClick={newConv}>
+          <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+            <Button variant="secondary" size="sm" onClick={() => setShowConversationRail((value) => !value)}>
+              {showConversationRail ? "Hide history" : "Show history"}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setShowContextRail((value) => !value)}>
+              {showContextRail ? "Hide context" : "Show context"}
+            </Button>
+            <Button variant="subtle" size="sm" onClick={() => setShowWorkspaceOverview((value) => !value)}>
+              {showWorkspaceOverview ? "Hide details" : "Show details"}
+            </Button>
+            <Button variant={focusMode ? "tonal" : "subtle"} size="sm" onClick={toggleFocusMode}>
+              {focusMode ? "Exit focus mode" : "Focus mode"}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={newConv}>
               <Plus size={14} /> New Conversation
             </Button>
-            <Button variant="secondary" onClick={refreshProject} loading={refreshing}>
+            <Button variant="secondary" size="sm" onClick={refreshProject} loading={refreshing}>
               <RefreshCw size={14} /> Refresh Workspace
             </Button>
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-6">
-          <OverviewCard label="Current branch" value={project?.default_branch ?? "—"} icon={<GitBranch size={14} />} />
-          <OverviewCard label="Conversations" value={String(convs.length)} icon={<MessageSquarePlus size={14} />} />
-          <OverviewCard label="Dirty files" value={String(dirtyCount)} icon={<File size={14} />} tone={dirtyCount > 0 ? "warning" : "default"} />
-          <OverviewCard label="Mode" value={MODE_LABELS[mode]} icon={<Sparkles size={14} />} />
-          <OverviewCard label="Selected file" value={selectedFilePath ? selectedFilePath.split("/").pop() ?? selectedFilePath : "None"} icon={<FolderOpen size={14} />} />
-          <OverviewCard label="Last update" value={project ? formatDate(project.updated_at) : "—"} icon={<Clock3 size={14} />} />
-        </div>
+        {showWorkspaceOverview && (
+          <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-6">
+            <OverviewCard label="Current branch" value={project?.default_branch ?? "—"} icon={<GitBranch size={14} />} />
+            <OverviewCard label="Conversations" value={String(convs.length)} icon={<MessageSquarePlus size={14} />} />
+            <OverviewCard label="Dirty files" value={String(dirtyCount)} icon={<File size={14} />} tone={dirtyCount > 0 ? "warning" : "default"} />
+            <OverviewCard label="Mode" value={MODE_LABELS[mode]} icon={<Sparkles size={14} />} />
+            <OverviewCard label="Selected file" value={selectedFilePath ? selectedFilePath.split("/").pop() ?? selectedFilePath : "None"} icon={<FolderOpen size={14} />} />
+            <OverviewCard label="Last update" value={project ? formatDate(project.updated_at) : "—"} icon={<Clock3 size={14} />} />
+          </div>
+        )}
 
         {refreshStatus && (
           <div className="mt-3">
@@ -805,17 +856,28 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       {projectTab === "roadmap" && <RoadmapTab projectId={id} />}
 
       {projectTab === "workspace" && (
-      <div className="flex min-h-0 flex-1">
-        <aside className="w-[320px] flex-shrink-0 border-r border-[#E2E8F0] bg-white">
+      <div className="flex min-h-0 flex-1 bg-[#F8FAFC]">
+        {showConversationRail && !focusMode && (
+        <aside className="w-[280px] flex-shrink-0 border-r border-[#E2E8F0] bg-white">
           <div className="border-b border-[#E2E8F0] px-4 py-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Conversations</p>
                 <p className="mt-1 text-sm text-[#64748B]">Shared project history across agents</p>
               </div>
-              <button onClick={newConv} className="rounded-lg border border-[#E2E8F0] p-2 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0]">
-                <Plus size={14} />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setShowConversationRail(false)}
+                  className="rounded-lg border border-[#E2E8F0] p-2 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0]"
+                  title="Collapse history"
+                >
+                  <ChevronRight size={14} className="rotate-180" />
+                </button>
+                <button onClick={newConv} className="rounded-lg border border-[#E2E8F0] p-2 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0]">
+                  <Plus size={14} />
+                </button>
+              </div>
             </div>
             <div className="mt-4 grid grid-cols-3 gap-2">
               <MiniStat label="All" value={String(conversationHealth.total)} tone="blue" />
@@ -896,14 +958,20 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             )}
           </div>
         </aside>
+        )}
 
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="border-b border-[#E2E8F0] bg-white px-6 py-3">
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-              <div className="space-y-3">
+          <div className="border-b border-[#E2E8F0] bg-white/85 px-5 py-3 backdrop-blur-sm">
+            <div className="mx-auto flex w-full max-w-5xl flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+              <div className="min-w-0 space-y-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-sm font-semibold text-[#1A1A2E]">{activeConv?.title ?? "No conversation selected"}</h2>
+                    {!showConversationRail && !focusMode && (
+                      <Button variant="secondary" size="sm" onClick={() => setShowConversationRail(true)}>
+                        <ChevronRight size={14} /> History
+                      </Button>
+                    )}
+                    <h2 className="truncate text-sm font-semibold text-[#1A1A2E]">{activeConv?.title ?? "No conversation selected"}</h2>
                     {activeConv && <StatusPill className={MODE_STYLES[activeConv.mode]}>{MODE_LABELS[activeConv.mode]}</StatusPill>}
                     {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">Streaming live</StatusPill>}
                   </div>
@@ -912,23 +980,39 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       ? "Choose the response strategy for the next turn. Conversation history remains shared at project scope."
                       : "Create a conversation to start working with the agents."}
                   </p>
-                  {activeConv && (
-                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Thread size</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
-                      </div>
-                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last agent</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E] truncate">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
-                      </div>
-                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last user turn</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
-                      </div>
-                    </div>
-                  )}
                 </div>
+
+                {activeConv && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
+                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Thread: {activeThreadSummary.messageCount} messages</span>
+                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Last agent: {activeThreadSummary.lastAgent ?? "Waiting for first reply"}</span>
+                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Last user: {activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowConversationSummary((value) => !value)}
+                      className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
+                    >
+                      {showConversationSummary ? "Hide details" : "Show details"}
+                    </button>
+                  </div>
+                )}
+
+                {showConversationSummary && activeConv && (
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Thread size</div>
+                      <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                    </div>
+                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last agent</div>
+                      <div className="mt-1 truncate text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
+                    </div>
+                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last user turn</div>
+                      <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center gap-2">
                   {(["openclaw", "hermes", "debate"] as AgentMode[]).map((candidate) => (
@@ -953,29 +1037,37 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 </div>
               </div>
 
-              <div className="grid w-full max-w-[360px] grid-cols-2 gap-2 xl:grid-cols-1">
-                <button
-                  type="button"
+              <div className="flex flex-wrap items-center gap-2 xl:max-w-[360px] xl:justify-end">
+                <Button
+                  variant="subtle"
+                  size="sm"
                   onClick={() => selectedFilePath && appendPrompt(`Please analyze file: ${selectedFilePath}\nFocus on architecture, risks, and recommended edits.`)}
                   disabled={!selectedFilePath || streaming}
-                  className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-3 text-left transition hover:border-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <div className="text-xs font-semibold text-[#1A1A2E]">Use focused file</div>
-                  <div className="mt-1 text-xs text-[#64748B]">{focusedFileName || "Pick a file from the context panel first."}</div>
-                </button>
-                <button
-                  type="button"
+                  Use focused file
+                </Button>
+                <Button
+                  variant="subtle"
+                  size="sm"
                   onClick={() => appendPrompt(`Review the current branch state for ${project?.default_branch ?? "this workspace"}. Summarize changed files, risks, and the best next step.`)}
                   disabled={streaming}
-                  className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-3 text-left transition hover:border-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <div className="text-xs font-semibold text-[#1A1A2E]">Review branch state</div>
-                  <div className="mt-1 text-xs text-[#64748B]">Turn current Git context into an actionable next step.</div>
-                </button>
+                  Review branch state
+                </Button>
+                {!showContextRail && !focusMode && (
+                  <Button variant="secondary" size="sm" onClick={() => setShowContextRail(true)}>
+                    <ChevronRight size={14} /> Context
+                  </Button>
+                )}
+                {mode === "debate" && (
+                  <Button variant="subtle" size="sm" onClick={() => setShowDebateWorkflow((value) => !value)}>
+                    {showDebateWorkflow ? "Hide debate flow" : "Show debate flow"}
+                  </Button>
+                )}
               </div>
             </div>
 
-            {mode === "debate" && (
+            {mode === "debate" && showDebateWorkflow && (
               <div className="mt-4 rounded-3xl border border-[#FDE68A] bg-[linear-gradient(180deg,#FFFDF5_0%,#FFFBEB_100%)] p-4 text-sm text-[#92400E] shadow-sm">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div>
@@ -996,7 +1088,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           <div
             ref={messagesScrollRef}
             onScroll={handleMessagesScroll}
-            className="relative flex-1 overflow-auto px-6 py-6"
+            className="relative flex-1 overflow-auto px-4 py-6 sm:px-5"
           >
             {!activeConv ? (
               <div className="flex h-full items-center justify-center">
@@ -1008,13 +1100,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 />
               </div>
             ) : (
-              <div className="space-y-4">
+              <div className="mx-auto w-full max-w-5xl space-y-5">
                 {streaming && (
-                  <div className="rounded-2xl border border-[#DBEAFE] bg-[linear-gradient(180deg,#F8FBFF_0%,#EFF6FF_100%)] px-4 py-3 shadow-sm">
+                  <div className="rounded-3xl border border-[#DBEAFE] bg-[linear-gradient(180deg,#FFFFFF_0%,#F8FBFF_42%,#EFF6FF_100%)] px-5 py-4 shadow-[0_16px_40px_rgba(59,130,246,0.08)]">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <div className="text-sm font-semibold text-[#1D4ED8]">Live agent activity</div>
-                        <div className="mt-1 text-xs text-[#64748B]">
+                        <div className="mt-1 text-xs leading-6 text-[#64748B]">
                           {mode === "debate"
                             ? "Debate mode streams partial reasoning from each side before synthesis."
                             : "The active model is streaming its response into this conversation."}
@@ -1072,11 +1164,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             )}
           </div>
 
-          <div className="border-t border-[#E2E8F0] bg-white px-6 py-4">
-            <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="border-t border-[#E2E8F0] bg-white/92 px-5 py-3 shadow-[0_-10px_30px_rgba(15,23,42,0.04)] backdrop-blur-sm">
+            <form onSubmit={handleSubmit} className="mx-auto w-full max-w-5xl space-y-3">
               <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
                 <span className={cn("rounded-full px-2.5 py-1", MODE_STYLES[mode])}>{MODE_LABELS[mode]}</span>
-                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Branch: {project?.default_branch ?? "—"}</span>
                 {selectedFilePath ? (
                   <button
                     type="button"
@@ -1092,35 +1183,42 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   <span className="rounded-full border border-dashed border-[#CBD5E1] bg-white px-2.5 py-1 text-[#94A3B8]">No focused file</span>
                 )}
                 {streaming && <span className="rounded-full border border-[#BFDBFE] bg-[#EFF6FF] px-2.5 py-1 text-[#1D4ED8]">Agents are responding…</span>}
+                <button
+                  type="button"
+                  onClick={() => setShowComposerTools((value) => !value)}
+                  className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
+                >
+                  {showComposerTools ? "Hide suggestions" : "Show suggestions"}
+                </button>
               </div>
 
-              <div className="rounded-3xl border border-[#D6DFEA] bg-[#FBFCFE] p-3 shadow-[0_12px_30px_rgba(15,23,42,0.04)]">
-                <div className="mb-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => selectedFilePath && appendPrompt(`Please analyze file: ${selectedFilePath}\nExplain purpose, important logic, and likely change points.`)}
-                    disabled={!selectedFilePath || streaming}
-                    className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Analyze focused file
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => appendPrompt(`Summarize the current workspace status, including branch health, likely risks, and the next recommended action.`)}
-                    disabled={streaming}
-                    className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Summarize workspace
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => appendPrompt(`Help me plan the next implementation step for this project. Give me a concise checklist before any code edits.`)}
-                    disabled={streaming}
-                    className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Plan next step
-                  </button>
-                </div>
+              <div className="rounded-[28px] border border-[#D6DFEA] bg-[linear-gradient(180deg,#FFFFFF_0%,#FBFCFE_100%)] p-3 shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
+                {showComposerTools && (
+                  <div className="mb-3 flex flex-wrap gap-2">
+                    {QUICK_ACTIONS.map(({ key, label, icon: Icon, prompt }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => appendPrompt(prompt)}
+                        disabled={streaming || (key === "patch" && !activeConv)}
+                        className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <Icon size={12} />
+                          {label}
+                        </span>
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => selectedFilePath && appendPrompt(`Please analyze file: ${selectedFilePath}\nExplain purpose, important logic, and likely change points.`)}
+                      disabled={!selectedFilePath || streaming}
+                      className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Analyze focused file
+                    </button>
+                  </div>
+                )}
 
                 <div className="flex items-end gap-3">
                   <textarea
@@ -1135,13 +1233,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     disabled={!activeConv || streaming}
                     rows={1}
                     className={cn(
-                      "min-h-[88px] max-h-48 flex-1 resize-none overflow-auto rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-sm text-[#1A1A2E]",
+                      "min-h-[76px] max-h-44 flex-1 resize-none overflow-auto rounded-[24px] border border-[#D6DFEA] bg-white px-4 py-3.5 text-[15px] leading-7 text-[#1A1A2E]",
                       "placeholder:text-[#94A3B8] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[#0050A0]",
                       "disabled:cursor-not-allowed disabled:opacity-50"
                     )}
                     style={{ height: "auto" }}
                   />
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col items-end gap-2">
                     {streaming ? (
                       <Button type="button" variant="secondary" onClick={stopStreaming}>
                         <Square size={14} /> Stop
@@ -1151,10 +1249,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         <Send size={15} /> Send
                       </Button>
                     )}
-                    <div className="rounded-2xl border border-[#E2E8F0] bg-white px-3 py-2 text-right text-xs text-[#64748B]">
-                      <div>{input.trim().length} chars</div>
-                      <div>{selectedFilePath ? "File context on" : "No file context"}</div>
-                    </div>
+                    <div className="text-[11px] text-[#94A3B8]">{input.trim().length} chars</div>
                   </div>
                 </div>
               </div>
@@ -1162,9 +1257,22 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           </div>
         </main>
 
-        <aside className="hidden w-[360px] flex-shrink-0 border-l border-[#E2E8F0] bg-white xl:flex xl:flex-col">
+        {showContextRail && !focusMode && (
+        <aside className="w-[320px] flex-shrink-0 border-l border-[#E2E8F0] bg-white xl:flex xl:flex-col">
           <div className="border-b border-[#E2E8F0] px-4 py-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Context panel</p>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Context panel</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowContextRail(false)}
+                className="rounded-lg border border-[#E2E8F0] p-2 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0]"
+                title="Collapse context panel"
+              >
+                <ChevronRight size={14} />
+              </button>
+            </div>
             <div className="mt-3 flex gap-2">
               {([
                 ["files", "Files"],
@@ -1426,6 +1534,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             )}
           </div>
         </aside>
+        )}
       </div>
       )}
     </div>
@@ -1584,7 +1693,7 @@ function StatusMessage({ label, status, now }: { label: string; status: StreamSt
       )}>
         {isHermes ? <Bot size={14} /> : <Cpu size={14} />}
       </div>
-      <div className="max-w-[75%] min-w-0">
+      <div className="max-w-[52rem] min-w-0">
         <div className="mb-1 flex flex-wrap items-center gap-2">
           <span className={cn(
             "block text-xs font-semibold",
@@ -1680,7 +1789,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
         {isUser ? <User size={14} /> : isHermes ? <Bot size={14} /> : <Cpu size={14} />}
       </div>
 
-      <div className={cn("max-w-[75%]", isUser && "flex flex-col items-end")}>
+      <div className={cn(isUser ? "min-w-0 max-w-[42rem] flex flex-col items-end" : "min-w-0 max-w-[52rem]")}>
         <div className={cn("mb-1 flex flex-wrap items-center gap-2", isUser && "justify-end")}>
           {!isUser && (
             <span className={cn(
@@ -1695,17 +1804,17 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
           {timestamp && <span className="text-[11px] text-[#94A3B8]">{timestamp}</span>}
         </div>
         <div className={cn(
-          "rounded-2xl px-4 py-3 text-sm shadow-sm",
+          "rounded-[24px] px-5 py-4 text-[15px] leading-7 shadow-[0_10px_30px_rgba(15,23,42,0.05)]",
           isUser
-            ? "rounded-tr-sm bg-[#002D62] text-white"
+            ? "rounded-tr-md bg-[#002D62] text-white"
             : isHermes
-              ? "rounded-tl-sm border border-[#E9D5FF] bg-[#F5F3FF] text-[#1A1A2E]"
-              : "rounded-tl-sm border border-[#BFDBFE] bg-[#EFF6FF] text-[#1A1A2E]"
+              ? "rounded-tl-md border border-[#E9D5FF] bg-[linear-gradient(180deg,#FFFFFF_0%,#F5F3FF_100%)] text-[#1A1A2E]"
+              : "rounded-tl-md border border-[#BFDBFE] bg-[linear-gradient(180deg,#FFFFFF_0%,#EFF6FF_100%)] text-[#1A1A2E]"
         )}>
           {isUser || streaming ? (
             <p className="whitespace-pre-wrap">{visibleContent}</p>
           ) : (
-            <div className="prose prose-sm max-w-none">
+            <div className="prose prose-sm max-w-none leading-7 prose-headings:text-[#1A1A2E] prose-p:text-[#1A1A2E] prose-li:text-[#334155] prose-strong:text-[#0F172A] prose-code:text-[#1E293B] prose-pre:rounded-2xl prose-pre:border prose-pre:border-[#E2E8F0] prose-pre:bg-[#F8FAFC] prose-pre:text-[#0F172A]">
               <ReactMarkdown
                 components={{
                   code({ className, children, ...props }) {
