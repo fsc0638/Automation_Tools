@@ -816,16 +816,16 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           <div className="border-b border-[#E2E8F0] px-4 py-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Conversations</p>
-                <p className="mt-1 text-sm text-[#64748B]">Shared project history across agents</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">{t("convList.title")}</p>
+                <p className="mt-1 text-sm text-[#64748B]">{t("convList.subtitle")}</p>
               </div>
               <button onClick={newConv} className="rounded-lg border border-[#E2E8F0] p-2 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0]">
                 <Plus size={14} />
               </button>
             </div>
             <div className="mt-4 grid grid-cols-3 gap-2">
-              <MiniStat label="All" value={String(conversationHealth.total)} tone="blue" />
-              <MiniStat label="Recent" value={String(conversationHealth.recent)} tone="green" />
+              <MiniStat label={t("convList.all")} value={String(conversationHealth.total)} tone="blue" />
+              <MiniStat label={t("convList.recent")} value={String(conversationHealth.recent)} tone="green" />
               <MiniStat label="Debate" value={String(conversationHealth.debate)} tone="amber" />
             </div>
             <div className="mt-4 flex items-center gap-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
@@ -833,7 +833,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               <input
                 value={conversationQuery}
                 onChange={(e) => setConversationQuery(e.target.value)}
-                placeholder="Search title or mode"
+                placeholder={t("convList.searchPlaceholder")}
                 className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
               />
             </div>
@@ -871,7 +871,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       <div className="flex items-center gap-2">
                         <MessageSquarePlus size={14} className={activeConv?.id === conv.id ? "text-[#0050A0]" : "text-[#94A3B8]"} />
                         <span className="truncate text-sm font-medium text-[#1A1A2E]">{conv.title}</span>
-                        {activeConv?.id === conv.id && <span className="rounded-full bg-white/90 px-2 py-0.5 text-[11px] font-semibold text-[#0050A0]">Active</span>}
+                        {activeConv?.id === conv.id && <span className="rounded-full bg-white/90 px-2 py-0.5 text-[11px] font-semibold text-[#0050A0]">{t("convList.active")}</span>}
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
                         <span className={cn("rounded-full px-2 py-0.5", MODE_STYLES[conv.mode])}>{MODE_LABELS[conv.mode]}</span>
@@ -910,27 +910,25 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="text-sm font-semibold text-[#1A1A2E]">{activeConv?.title ?? "No conversation selected"}</h2>
-                    {activeConv && <StatusPill className={MODE_STYLES[activeConv.mode]}>{MODE_LABELS[activeConv.mode]}</StatusPill>}
-                    {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">Streaming live</StatusPill>}
+                    {activeConv && <StatusPill className={MODE_STYLES[activeConv.mode]}>{modeLabel(activeConv.mode)}</StatusPill>}
+                    {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">{t("chat.streaming")}</StatusPill>}
                   </div>
                   <p className="mt-1 text-xs text-[#64748B]">
-                    {activeConv
-                      ? "Choose the response strategy for the next turn. Conversation history remains shared at project scope."
-                      : "Create a conversation to start working with the agents."}
+                    {activeConv ? t("chat.chooseStrategy") : t("convList.emptyDesc")}
                   </p>
                   {activeConv && (
                     <div className="mt-3 grid gap-2 sm:grid-cols-3">
                       <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Thread size</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("chat.threadSize")}</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} {t("chat.messages")}</div>
                       </div>
                       <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last agent</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E] truncate">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("chat.lastAgent")}</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E] truncate">{activeThreadSummary.lastAgent ?? "—"}</div>
                       </div>
                       <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last user turn</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("chat.lastUserTurn")}</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "—"}</div>
                       </div>
                     </div>
                   )}
@@ -966,8 +964,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   disabled={!selectedFilePath || streaming}
                   className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-3 text-left transition hover:border-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <div className="text-xs font-semibold text-[#1A1A2E]">Use focused file</div>
-                  <div className="mt-1 text-xs text-[#64748B]">{focusedFileName || "Pick a file from the context panel first."}</div>
+                  <div className="text-xs font-semibold text-[#1A1A2E]">{t("chat.useFocusedFile")}</div>
+                  <div className="mt-1 text-xs text-[#64748B]">{focusedFileName || t("chat.pickFileFirst")}</div>
                 </button>
                 <button
                   type="button"
@@ -975,8 +973,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   disabled={streaming}
                   className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-3 text-left transition hover:border-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <div className="text-xs font-semibold text-[#1A1A2E]">Review branch state</div>
-                  <div className="mt-1 text-xs text-[#64748B]">Turn current Git context into an actionable next step.</div>
+                  <div className="text-xs font-semibold text-[#1A1A2E]">{t("chat.reviewBranch")}</div>
+                  <div className="mt-1 text-xs text-[#64748B]">{t("chat.reviewBranchDesc")}</div>
                 </button>
               </div>
             </div>
@@ -1095,7 +1093,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     Focused file: {focusedFileName} ×
                   </button>
                 ) : (
-                  <span className="rounded-full border border-dashed border-[#CBD5E1] bg-white px-2.5 py-1 text-[#94A3B8]">No focused file</span>
+                  <span className="rounded-full border border-dashed border-[#CBD5E1] bg-white px-2.5 py-1 text-[#94A3B8]">{t("chat.noFocusedFile")}</span>
                 )}
                 {streaming && <span className="rounded-full border border-[#BFDBFE] bg-[#EFF6FF] px-2.5 py-1 text-[#1D4ED8]">Agents are responding…</span>}
               </div>
@@ -1108,7 +1106,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     disabled={!selectedFilePath || streaming}
                     className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    Analyze focused file
+                    {t("chat.analyzeFocused")}
                   </button>
                   <button
                     type="button"
@@ -1116,7 +1114,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     disabled={streaming}
                     className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    Summarize workspace
+                    {t("chat.summarizeWorkspace")}
                   </button>
                   <button
                     type="button"
@@ -1124,7 +1122,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     disabled={streaming}
                     className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    Plan next step
+                    {t("chat.planNextStep")}
                   </button>
                 </div>
 
@@ -1150,16 +1148,16 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   <div className="flex flex-col gap-2">
                     {streaming ? (
                       <Button type="button" variant="secondary" onClick={stopStreaming}>
-                        <Square size={14} /> Stop
+                        <Square size={14} /> {t("chat.stop")}
                       </Button>
                     ) : (
                       <Button type="submit" disabled={!activeConv || !input.trim()}>
-                        <Send size={15} /> Send
+                        <Send size={15} /> {t("chat.send")}
                       </Button>
                     )}
                     <div className="rounded-2xl border border-[#E2E8F0] bg-white px-3 py-2 text-right text-xs text-[#64748B]">
-                      <div>{input.trim().length} chars</div>
-                      <div>{selectedFilePath ? "File context on" : "No file context"}</div>
+                      <div>{input.trim().length} {t("chat.chars")}</div>
+                      <div>{selectedFilePath ? t("chat.fileContextOn") : t("chat.noFileContext")}</div>
                     </div>
                   </div>
                 </div>
@@ -1170,7 +1168,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
         <aside className="hidden w-[360px] flex-shrink-0 border-l border-[#E2E8F0] bg-white xl:flex xl:flex-col">
           <div className="border-b border-[#E2E8F0] px-4 py-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Context panel</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">{t("context.title")}</p>
             <div className="mt-3 flex gap-2">
               {([
                 ["files", t("project.tabFiles")],
@@ -1199,17 +1197,17 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-sm">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Quick file lookup</h3>
-                      <p className="mt-1 text-xs text-[#64748B]">Search by path and jump straight into a relevant file before prompting the agents.</p>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("context.quickLookup")}</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">{t("context.lookupDesc")}</p>
                     </div>
-                    <StatusPill>{allFilePaths.length} files</StatusPill>
+                    <StatusPill>{allFilePaths.length} {t("context.files")}</StatusPill>
                   </div>
                   <div className="mt-3 flex items-center gap-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
                     <Search size={14} className="text-[#94A3B8]" />
                     <input
                       value={fileQuery}
                       onChange={(e) => setFileQuery(e.target.value)}
-                      placeholder="Find by filename or path"
+                      placeholder={t("context.findPlaceholder")}
                       className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
                     />
                   </div>
@@ -1229,7 +1227,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         )}
                       >
                         <span className="truncate">{path}</span>
-                        <span className="ml-3 text-[11px] text-[#94A3B8]">Open</span>
+                        <span className="ml-3 text-[11px] text-[#94A3B8]">{t("context.open")}</span>
                       </button>
                     ))}
                   </div>
