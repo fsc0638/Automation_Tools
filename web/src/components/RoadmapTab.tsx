@@ -1,7 +1,14 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLink, Plus, Trash2, X } from "lucide-react";
-import { tasks as tasksApi, type ProjectTask, type TaskPriority, type TaskStatus, type UpdateTaskInput } from "@/lib/api";
+import { ExternalLink, Filter, History, Plus, Search, Tag, Trash2, X } from "lucide-react";
+import {
+  tasks as tasksApi,
+  type ProjectTask,
+  type TaskPriority,
+  type TaskStatus,
+  type TaskStatusEvent,
+  type UpdateTaskInput,
+} from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
 const PRIORITY_BADGE: Record<TaskPriority, string> = {
@@ -17,6 +24,12 @@ const STATUS_NEXT: Record<TaskStatus, TaskStatus | null> = {
   done: null,
   cancelled: null,
 };
+
+const PRIORITY_RANK: Record<TaskPriority, number> = {
+  critical: 0, high: 1, medium: 2, low: 3,
+};
+
+type SortKey = "priority" | "due" | "newest" | "oldest" | "updated";
 
 export interface RoadmapTabProps {
   projectId: string;
@@ -37,9 +50,21 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
     affected_files: "",
     acceptance_criteria: "",
     estimated_effort: "",
+    assignee: "",
+    due_date: "",
+    labels: "",
   });
   const [hoverCol, setHoverCol] = useState<TaskStatus | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
+
+  // Filter / sort state
+  const [search, setSearch] = useState("");
+  const [filterPriority, setFilterPriority] = useState<TaskPriority | "all">("all");
+  const [filterAssignee, setFilterAssignee] = useState<string>("all");
+  const [filterLabel, setFilterLabel] = useState<string>("all");
+  const [filterOverdue, setFilterOverdue] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>("priority");
+
   const t = useT();
   const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
     { key: "todo", label: t("roadmap.colTodo") },
@@ -68,10 +93,8 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
   async function createTask(e: React.FormEvent) {
     e.preventDefault();
     if (!draft.title.trim()) return;
-    const filesArr = draft.affected_files
-      .split(/[\s,]+/)
-      .map((f) => f.trim())
-      .filter(Boolean);
+    const filesArr = draft.affected_files.split(/[\s,]+/).map((f) => f.trim()).filter(Boolean);
+    const labelsArr = draft.labels.split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
     const created = await tasksApi.create(projectId, {
       title: draft.title.trim(),
       why: draft.why.trim() || undefined,
@@ -79,9 +102,12 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
       affected_files: filesArr.length > 0 ? filesArr : undefined,
       acceptance_criteria: draft.acceptance_criteria.trim() || undefined,
       estimated_effort: draft.estimated_effort.trim() || undefined,
+      assignee: draft.assignee.trim() || undefined,
+      due_date: draft.due_date || undefined,
+      labels: labelsArr.length > 0 ? labelsArr : undefined,
     });
     setItems((prev) => [created, ...prev]);
-    setDraft({ title: "", why: "", priority: "medium", affected_files: "", acceptance_criteria: "", estimated_effort: "" });
+    setDraft({ title: "", why: "", priority: "medium", affected_files: "", acceptance_criteria: "", estimated_effort: "", assignee: "", due_date: "", labels: "" });
     setShowNew(false);
   }
 
@@ -93,7 +119,6 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
       setItems((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
       return updated;
     } catch (e) {
-      // revert
       if (previous) setItems((prev) => prev.map((t) => (t.id === taskId ? previous : t)));
       throw e;
     }
@@ -137,6 +162,56 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
     if (activeId === task.id) setActiveId(null);
   }
 
+  const knownAssignees = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of items) if (t.assignee && t.assignee.trim()) set.add(t.assignee.trim());
+    return Array.from(set).sort();
+  }, [items]);
+
+  const knownLabels = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of items) for (const l of t.labels ?? []) if (l) set.add(l);
+    return Array.from(set).sort();
+  }, [items]);
+
+  const filteredItems = useMemo(() => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const q = search.trim().toLowerCase();
+    let arr = items.filter((t) => {
+      if (filterPriority !== "all" && t.priority !== filterPriority) return false;
+      if (filterAssignee !== "all" && (t.assignee ?? "") !== filterAssignee) return false;
+      if (filterLabel !== "all" && !(t.labels ?? []).includes(filterLabel)) return false;
+      if (filterOverdue) {
+        if (!t.due_date) return false;
+        if (t.status === "done" || t.status === "cancelled") return false;
+        const due = new Date(t.due_date); due.setHours(0, 0, 0, 0);
+        if (due >= today) return false;
+      }
+      if (q) {
+        const hay = [t.title, t.why ?? "", t.acceptance_criteria ?? "", (t.affected_files ?? []).join(" "), (t.labels ?? []).join(" "), t.assignee ?? ""].join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    arr = arr.slice().sort((a, b) => {
+      switch (sortKey) {
+        case "priority":
+          return (PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]) ||
+            (b.created_at.localeCompare(a.created_at));
+        case "due": {
+          const ad = a.due_date ? new Date(a.due_date).getTime() : Number.POSITIVE_INFINITY;
+          const bd = b.due_date ? new Date(b.due_date).getTime() : Number.POSITIVE_INFINITY;
+          return ad - bd;
+        }
+        case "newest": return b.created_at.localeCompare(a.created_at);
+        case "oldest": return a.created_at.localeCompare(b.created_at);
+        case "updated": return b.updated_at.localeCompare(a.updated_at);
+        default: return 0;
+      }
+    });
+    return arr;
+  }, [items, search, filterPriority, filterAssignee, filterLabel, filterOverdue, sortKey]);
+
   const activeTask = useMemo(() => items.find((t) => t.id === activeId) ?? null, [items, activeId]);
 
   if (loading && items.length === 0) {
@@ -147,7 +222,9 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
   const grouped: Record<TaskStatus, ProjectTask[]> = {
     todo: [], "in-progress": [], done: [], cancelled: [],
   };
-  for (const tk of items) grouped[tk.status]?.push(tk);
+  for (const tk of filteredItems) grouped[tk.status]?.push(tk);
+
+  const filtersActive = filterPriority !== "all" || filterAssignee !== "all" || filterLabel !== "all" || filterOverdue || search.trim().length > 0;
 
   return (
     <div className="p-6 space-y-4 overflow-auto">
@@ -164,6 +241,92 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
           >
             <Plus size={12} /> {t("roadmap.newTask")}
           </button>
+        </div>
+      </div>
+
+      {/* Toolbar: search + filters + sort */}
+      <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-1 min-w-[220px] items-center gap-2 rounded-md border border-[#E2E8F0] px-2 py-1.5">
+            <Search size={13} className="text-[#94A3B8]" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t("roadmap.searchPlaceholder")}
+              className="flex-1 bg-transparent text-xs outline-none placeholder:text-[#94A3B8]"
+            />
+            {search && (
+              <button onClick={() => setSearch("")} className="text-[#94A3B8] hover:text-[#1A1A2E]">
+                <X size={12} />
+              </button>
+            )}
+          </div>
+          <select
+            value={sortKey}
+            onChange={(e) => setSortKey(e.target.value as SortKey)}
+            className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs"
+            title={t("roadmap.sortBy")}
+          >
+            <option value="priority">{t("roadmap.sortPriority")}</option>
+            <option value="due">{t("roadmap.sortDue")}</option>
+            <option value="newest">{t("roadmap.sortNewest")}</option>
+            <option value="oldest">{t("roadmap.sortOldest")}</option>
+            <option value="updated">{t("roadmap.sortUpdated")}</option>
+          </select>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          <Filter size={11} className="text-[#94A3B8]" />
+          <select
+            value={filterPriority}
+            onChange={(e) => setFilterPriority(e.target.value as TaskPriority | "all")}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+          >
+            <option value="all">{t("roadmap.priority")}: {t("roadmap.allPriorities")}</option>
+            <option value="critical">{t("roadmap.priority")}: {t("roadmap.priorityCritical")}</option>
+            <option value="high">{t("roadmap.priority")}: {t("roadmap.priorityHigh")}</option>
+            <option value="medium">{t("roadmap.priority")}: {t("roadmap.priorityMedium")}</option>
+            <option value="low">{t("roadmap.priority")}: {t("roadmap.priorityLow")}</option>
+          </select>
+          <select
+            value={filterAssignee}
+            onChange={(e) => setFilterAssignee(e.target.value)}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+          >
+            <option value="all">{t("roadmap.assignee")}: {t("roadmap.allAssignees")}</option>
+            <option value="">{t("roadmap.unassigned")}</option>
+            {knownAssignees.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <select
+            value={filterLabel}
+            onChange={(e) => setFilterLabel(e.target.value)}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+            disabled={knownLabels.length === 0}
+          >
+            <option value="all">{t("roadmap.labels")}: {t("roadmap.allLabels")}</option>
+            {knownLabels.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+          <label className="flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1">
+            <input
+              type="checkbox"
+              checked={filterOverdue}
+              onChange={(e) => setFilterOverdue(e.target.checked)}
+              className="h-3 w-3"
+            />
+            {t("roadmap.onlyOverdue")}
+          </label>
+          {filtersActive && (
+            <button
+              onClick={() => {
+                setSearch(""); setFilterPriority("all"); setFilterAssignee("all"); setFilterLabel("all"); setFilterOverdue(false);
+              }}
+              className="text-[11px] text-[#0050A0] hover:underline"
+            >
+              {t("roadmap.clearFilters")}
+            </button>
+          )}
+          <span className="ml-auto text-[#94A3B8]">
+            {filteredItems.length} / {items.length}
+          </span>
         </div>
       </div>
 
@@ -196,6 +359,26 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
             placeholder={t("roadmap.filesHint")}
             className="w-full h-10 px-3 rounded-md border border-[#E2E8F0] text-sm font-mono"
           />
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+            <input
+              value={draft.assignee}
+              onChange={(e) => setDraft({ ...draft, assignee: e.target.value })}
+              placeholder={t("roadmap.assigneeHint")}
+              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+            />
+            <input
+              type="date"
+              value={draft.due_date}
+              onChange={(e) => setDraft({ ...draft, due_date: e.target.value })}
+              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+            />
+            <input
+              value={draft.labels}
+              onChange={(e) => setDraft({ ...draft, labels: e.target.value })}
+              placeholder={t("roadmap.labelsHint")}
+              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+            />
+          </div>
           <div className="flex items-center gap-3">
             <label className="text-xs text-[#64748B]">{t("roadmap.priority")}:</label>
             <select
@@ -222,9 +405,9 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
         </form>
       )}
 
-      {items.length === 0 ? (
+      {filteredItems.length === 0 ? (
         <div className="text-sm text-[#94A3B8] text-center py-12 border border-dashed border-[#E2E8F0] rounded-lg">
-          {t("roadmap.empty")}
+          {items.length === 0 ? t("roadmap.empty") : t("roadmap.noMatch")}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -263,6 +446,7 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
         <TaskDetailDrawer
           key={activeTask.id}
           task={activeTask}
+          projectId={projectId}
           onClose={() => setActiveId(null)}
           onUpdate={updateTask}
           onDelete={deleteTask}
@@ -271,6 +455,25 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
       )}
     </div>
   );
+}
+
+function isOverdue(task: ProjectTask): boolean {
+  if (!task.due_date) return false;
+  if (task.status === "done" || task.status === "cancelled") return false;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const due = new Date(task.due_date); due.setHours(0, 0, 0, 0);
+  return due < today;
+}
+
+function formatDueRel(due: string): string {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = new Date(due); d.setHours(0, 0, 0, 0);
+  const diff = Math.round((d.getTime() - today.getTime()) / 86400000);
+  if (diff === 0) return "today";
+  if (diff === -1) return "1d overdue";
+  if (diff < 0) return `${-diff}d overdue`;
+  if (diff === 1) return "tomorrow";
+  return `${diff}d`;
 }
 
 function TaskCard({
@@ -287,12 +490,13 @@ function TaskCard({
   onOpen: () => void;
 }) {
   const next = STATUS_NEXT[task.status];
+  const overdue = isOverdue(task);
   return (
     <div
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onOpen}
-      className="bg-white border border-[#E2E8F0] rounded-md p-3 group hover:border-[#0050A0] cursor-pointer"
+      className={`bg-white border rounded-md p-3 group hover:border-[#0050A0] cursor-pointer ${overdue ? "border-red-300" : "border-[#E2E8F0]"}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="text-sm font-medium text-[#1A1A2E] flex-1 leading-snug">{task.title}</div>
@@ -316,12 +520,34 @@ function TaskCard({
           {task.affected_files.length > 3 && ` +${task.affected_files.length - 3}`}
         </div>
       )}
-      <div className="flex items-center gap-2 mt-2">
+      {task.labels && task.labels.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {task.labels.slice(0, 4).map((l) => (
+            <span key={l} className="inline-flex items-center gap-0.5 rounded-full bg-[#EEF2FF] px-1.5 py-0.5 text-[10px] text-[#3730A3]">
+              <Tag size={9} /> {l}
+            </span>
+          ))}
+          {task.labels.length > 4 && (
+            <span className="text-[10px] text-[#94A3B8]">+{task.labels.length - 4}</span>
+          )}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5 mt-2">
         <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>
           {task.priority}
         </span>
         {task.estimated_effort && (
           <span className="text-[10px] text-[#94A3B8]">{task.estimated_effort}</span>
+        )}
+        {task.assignee && (
+          <span className="text-[10px] rounded-full bg-slate-100 px-1.5 py-0.5 text-slate-700">
+            @{task.assignee}
+          </span>
+        )}
+        {task.due_date && (
+          <span className={`text-[10px] rounded-full px-1.5 py-0.5 ${overdue ? "bg-red-100 text-red-700" : "bg-blue-50 text-blue-700"}`}>
+            ⏱ {formatDueRel(task.due_date)}
+          </span>
         )}
         {task.source_message_id && (
           <span className="text-[10px] text-[#0EA5E9]" title="Has source message">↩</span>
@@ -351,12 +577,14 @@ function TaskCard({
 
 function TaskDetailDrawer({
   task,
+  projectId,
   onClose,
   onUpdate,
   onDelete,
   onOpenSource,
 }: {
   task: ProjectTask;
+  projectId: string;
   onClose: () => void;
   onUpdate: (taskId: string, patch: UpdateTaskInput) => Promise<ProjectTask>;
   onDelete: (t: ProjectTask) => void | Promise<void>;
@@ -367,28 +595,55 @@ function TaskDetailDrawer({
     title: task.title,
     why: task.why ?? "",
     acceptance_criteria: task.acceptance_criteria ?? "",
+    test_plan: task.test_plan ?? "",
+    rollback_plan: task.rollback_plan ?? "",
+    definition_of_done: task.definition_of_done ?? "",
     estimated_effort: task.estimated_effort ?? "",
     affected_files: (task.affected_files ?? []).join(", "),
     priority: task.priority,
     status: task.status,
+    assignee: task.assignee ?? "",
+    due_date: task.due_date ?? "",
+    labels: (task.labels ?? []).join(", "),
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [history, setHistory] = useState<TaskStatusEvent[] | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
   const dirty = useMemo(() => {
     const filesArr = form.affected_files.split(/[\s,]+/).map((f) => f.trim()).filter(Boolean);
+    const labelsArr = form.labels.split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
     const currentFiles = task.affected_files ?? [];
+    const currentLabels = task.labels ?? [];
     const filesChanged = filesArr.length !== currentFiles.length || filesArr.some((f, i) => f !== currentFiles[i]);
+    const labelsChanged = labelsArr.length !== currentLabels.length || labelsArr.some((l, i) => l !== currentLabels[i]);
     return (
       form.title !== task.title ||
       form.why !== (task.why ?? "") ||
       form.acceptance_criteria !== (task.acceptance_criteria ?? "") ||
+      form.test_plan !== (task.test_plan ?? "") ||
+      form.rollback_plan !== (task.rollback_plan ?? "") ||
+      form.definition_of_done !== (task.definition_of_done ?? "") ||
       form.estimated_effort !== (task.estimated_effort ?? "") ||
       form.priority !== task.priority ||
       form.status !== task.status ||
-      filesChanged
+      form.assignee !== (task.assignee ?? "") ||
+      form.due_date !== (task.due_date ?? "") ||
+      filesChanged || labelsChanged
     );
   }, [form, task]);
+
+  async function loadHistory() {
+    if (history !== null) { setShowHistory(true); return; }
+    try {
+      const events = await tasksApi.history(projectId, task.id);
+      setHistory(events);
+      setShowHistory(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load history");
+    }
+  }
 
   async function save() {
     if (!form.title.trim()) {
@@ -399,15 +654,32 @@ function TaskDetailDrawer({
     setError("");
     try {
       const filesArr = form.affected_files.split(/[\s,]+/).map((f) => f.trim()).filter(Boolean);
-      await onUpdate(task.id, {
+      const labelsArr = form.labels.split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
+      const patch: UpdateTaskInput = {
         title: form.title.trim(),
         why: form.why.trim(),
         acceptance_criteria: form.acceptance_criteria.trim(),
+        test_plan: form.test_plan.trim(),
+        rollback_plan: form.rollback_plan.trim(),
+        definition_of_done: form.definition_of_done.trim(),
         estimated_effort: form.estimated_effort.trim(),
         affected_files: filesArr,
         priority: form.priority,
         status: form.status,
-      });
+        assignee: form.assignee.trim(),
+        labels: labelsArr,
+      };
+      // Send due_date only when set; null clears it.
+      if (form.due_date) patch.due_date = form.due_date;
+      else if (task.due_date) patch.due_date = null;
+      await onUpdate(task.id, patch);
+      // If status changed, refresh history so user sees the new entry.
+      if (form.status !== task.status) {
+        try {
+          const events = await tasksApi.history(projectId, task.id);
+          setHistory(events);
+        } catch { /* best-effort */ }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -418,7 +690,7 @@ function TaskDetailDrawer({
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/30" onClick={onClose}>
       <div
-        className="h-full w-full max-w-[560px] overflow-y-auto bg-white shadow-2xl"
+        className="h-full w-full max-w-[640px] overflow-y-auto bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[#E2E8F0] bg-white/95 px-5 py-3 backdrop-blur">
@@ -485,6 +757,37 @@ function TaskDetailDrawer({
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.assignee")}</label>
+              <input
+                value={form.assignee}
+                onChange={(e) => setForm({ ...form, assignee: e.target.value })}
+                placeholder={t("roadmap.assigneeHint")}
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.dueDate")}</label>
+              <input
+                type="date"
+                value={form.due_date ?? ""}
+                onChange={(e) => setForm({ ...form, due_date: e.target.value })}
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-sm"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.labels")}</label>
+            <input
+              value={form.labels}
+              onChange={(e) => setForm({ ...form, labels: e.target.value })}
+              placeholder={t("roadmap.labelsHint")}
+              className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-sm"
+            />
+          </div>
+
           <div>
             <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.why")}</label>
             <textarea
@@ -504,6 +807,40 @@ function TaskDetailDrawer({
               rows={4}
               className="mt-1 w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-sm leading-6"
               placeholder={t("roadmap.acHint")}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.testPlan")}</label>
+              <textarea
+                value={form.test_plan}
+                onChange={(e) => setForm({ ...form, test_plan: e.target.value })}
+                rows={3}
+                className="mt-1 w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-sm leading-6"
+                placeholder={t("roadmap.testPlanHint")}
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.rollback")}</label>
+              <textarea
+                value={form.rollback_plan}
+                onChange={(e) => setForm({ ...form, rollback_plan: e.target.value })}
+                rows={3}
+                className="mt-1 w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-sm leading-6"
+                placeholder={t("roadmap.rollbackHint")}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.dod")}</label>
+            <textarea
+              value={form.definition_of_done}
+              onChange={(e) => setForm({ ...form, definition_of_done: e.target.value })}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-sm leading-6"
+              placeholder={t("roadmap.dodHint")}
             />
           </div>
 
@@ -539,6 +876,48 @@ function TaskDetailDrawer({
               </div>
             </div>
           )}
+
+          {/* Status history */}
+          <div className="rounded-md border border-[#E2E8F0] bg-white">
+            <button
+              type="button"
+              onClick={() => { if (!showHistory) void loadHistory(); else setShowHistory(false); }}
+              className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC]"
+            >
+              <span className="inline-flex items-center gap-2">
+                <History size={12} /> {t("roadmap.history")}
+              </span>
+              <span className="text-[#94A3B8]">{showHistory ? "−" : "+"}</span>
+            </button>
+            {showHistory && (
+              <div className="px-3 py-2">
+                {history === null ? (
+                  <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                ) : history.length === 0 ? (
+                  <div className="text-xs text-[#94A3B8]">{t("roadmap.historyEmpty")}</div>
+                ) : (
+                  <ul className="space-y-1 text-xs">
+                    {history.map((h) => (
+                      <li key={h.id} className="flex items-start gap-2">
+                        <span className="font-mono text-[10px] text-[#94A3B8]">
+                          {new Date(h.changed_at).toLocaleString()}
+                        </span>
+                        <span className="text-[#475569]">
+                          {h.from_status ? (
+                            <><span className="text-[#94A3B8]">{h.from_status}</span> → <span className="font-medium text-[#1A1A2E]">{h.to_status}</span></>
+                          ) : (
+                            <span className="font-medium text-[#1A1A2E]">{h.to_status}</span>
+                          )}
+                          {h.changed_by_name && <span className="ml-1 text-[#94A3B8]">by {h.changed_by_name}</span>}
+                          {h.note && <span className="ml-1 italic text-[#64748B]">— {h.note}</span>}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
 
           {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
         </div>

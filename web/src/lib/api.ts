@@ -129,6 +129,8 @@ export const tasks = {
     }),
   delete: (projectId: string, taskId: string) =>
     request<void>(`/projects/${projectId}/tasks/${taskId}`, { method: "DELETE" }),
+  history: (projectId: string, taskId: string) =>
+    request<TaskStatusEvent[]>(`/projects/${projectId}/tasks/${taskId}/history`),
 };
 
 export const gitIdentities = {
@@ -308,6 +310,13 @@ export interface ProjectTask {
   status: TaskStatus;
   source_message_id?: string | null;
   source_conversation_id?: string | null;
+  // P1 fields
+  assignee?: string | null;
+  due_date?: string | null;             // ISO date "YYYY-MM-DD"
+  test_plan?: string | null;
+  rollback_plan?: string | null;
+  definition_of_done?: string | null;
+  labels: string[];                     // always present, possibly empty
   created_at: string;
   updated_at: string;
 }
@@ -320,6 +329,12 @@ export interface CreateTaskInput {
   estimated_effort?: string;
   priority?: TaskPriority;
   source_message_id?: string;
+  assignee?: string;
+  due_date?: string;
+  test_plan?: string;
+  rollback_plan?: string;
+  definition_of_done?: string;
+  labels?: string[];
 }
 
 export interface UpdateTaskInput {
@@ -330,6 +345,24 @@ export interface UpdateTaskInput {
   estimated_effort?: string;
   priority?: TaskPriority;
   status?: TaskStatus;
+  assignee?: string;
+  due_date?: string | null;
+  test_plan?: string;
+  rollback_plan?: string;
+  definition_of_done?: string;
+  labels?: string[];
+  status_note?: string;
+}
+
+export interface TaskStatusEvent {
+  id: string;
+  task_id: string;
+  from_status: TaskStatus | null;
+  to_status: TaskStatus;
+  changed_by?: string | null;
+  changed_by_name?: string | null;
+  note?: string | null;
+  changed_at: string;
 }
 
 export interface MetricsHealth {
