@@ -248,8 +248,8 @@ async fn metrics_cost(
     let cfg = &state.config;
 
     // Per-agent token totals over the past 30 days.
-    let agent_rows: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT agent, SUM(tokens_out)::bigint, COUNT(*)
+    let agent_rows: Vec<(String, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT agent, SUM(tokens_in)::bigint, SUM(tokens_out)::bigint, COUNT(*)
          FROM agent_usage_events
          WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
          GROUP BY agent",
@@ -259,8 +259,8 @@ async fn metrics_cost(
     .await?;
 
     // Per-mode token totals over the past 30 days.
-    let mode_rows: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT mode, SUM(tokens_out)::bigint, COUNT(*)
+    let mode_rows: Vec<(String, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT mode, SUM(tokens_in)::bigint, SUM(tokens_out)::bigint, COUNT(*)
          FROM agent_usage_events
          WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
          GROUP BY mode",
@@ -269,9 +269,10 @@ async fn metrics_cost(
     .fetch_all(db)
     .await?;
 
-    // Daily breakdown for trend chart.
-    let daily_rows: Vec<(chrono::DateTime<chrono::Utc>, String, Option<i64>)> = sqlx::query_as(
-        "SELECT date_trunc('day', created_at) AS day, agent, SUM(tokens_out)::bigint
+    // Daily breakdown for trend chart — includes input + output cost per agent.
+    let daily_rows: Vec<(chrono::DateTime<chrono::Utc>, String, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT date_trunc('day', created_at) AS day, agent,
+                SUM(tokens_in)::bigint, SUM(tokens_out)::bigint
          FROM agent_usage_events
          WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
          GROUP BY day, agent
@@ -281,9 +282,6 @@ async fn metrics_cost(
     .fetch_all(db)
     .await?;
 
-    // Estimate cost: tokens_in is currently NULL (Phase 2 doesn't record input
-    // tokens accurately yet), so we use output-token pricing only and surface
-    // the limitation to the client.
     let price_for = |agent: &str| -> (f64, f64) {
         if agent == "hermes" {
             (cfg.hermes_price_per_1k_in, cfg.hermes_price_per_1k_out)
@@ -295,14 +293,16 @@ async fn metrics_cost(
     let mut total_cost = 0.0_f64;
     let by_agent: Vec<serde_json::Value> = agent_rows
         .into_iter()
-        .map(|(agent, tokens_out, calls)| {
-            let tokens = tokens_out.unwrap_or(0);
-            let (_in_p, out_p) = price_for(&agent);
-            let cost = (tokens as f64 / 1000.0) * out_p;
+        .map(|(agent, tokens_in, tokens_out, calls)| {
+            let t_in = tokens_in.unwrap_or(0);
+            let t_out = tokens_out.unwrap_or(0);
+            let (in_p, out_p) = price_for(&agent);
+            let cost = (t_in as f64 / 1000.0) * in_p + (t_out as f64 / 1000.0) * out_p;
             total_cost += cost;
             json!({
                 "agent": agent,
-                "tokens_out": tokens,
+                "tokens_in": t_in,
+                "tokens_out": t_out,
                 "calls": calls,
                 "cost_usd": cost,
             })
@@ -311,14 +311,16 @@ async fn metrics_cost(
 
     let by_mode: Vec<serde_json::Value> = mode_rows
         .into_iter()
-        .map(|(mode, tokens_out, calls)| {
-            let tokens = tokens_out.unwrap_or(0);
-            // Mode rows mix agents, so use OpenClaw price as a proxy. Replace
-            // with per-row breakdown in Phase 6 if needed.
-            let cost = (tokens as f64 / 1000.0) * cfg.openclaw_price_per_1k_out;
+        .map(|(mode, tokens_in, tokens_out, calls)| {
+            let t_in = tokens_in.unwrap_or(0);
+            let t_out = tokens_out.unwrap_or(0);
+            // Mode rows mix agents, so use OpenClaw pricing as a proxy.
+            let cost = (t_in as f64 / 1000.0) * cfg.openclaw_price_per_1k_in
+                + (t_out as f64 / 1000.0) * cfg.openclaw_price_per_1k_out;
             json!({
                 "mode": mode,
-                "tokens_out": tokens,
+                "tokens_in": t_in,
+                "tokens_out": t_out,
                 "calls": calls,
                 "cost_usd": cost,
             })
@@ -327,14 +329,16 @@ async fn metrics_cost(
 
     let daily: Vec<serde_json::Value> = daily_rows
         .into_iter()
-        .map(|(day, agent, tokens_out)| {
-            let tokens = tokens_out.unwrap_or(0);
-            let (_in_p, out_p) = price_for(&agent);
-            let cost = (tokens as f64 / 1000.0) * out_p;
+        .map(|(day, agent, tokens_in, tokens_out)| {
+            let t_in = tokens_in.unwrap_or(0);
+            let t_out = tokens_out.unwrap_or(0);
+            let (in_p, out_p) = price_for(&agent);
+            let cost = (t_in as f64 / 1000.0) * in_p + (t_out as f64 / 1000.0) * out_p;
             json!({
                 "day": day.format("%Y-%m-%d").to_string(),
                 "agent": agent,
-                "tokens_out": tokens,
+                "tokens_in": t_in,
+                "tokens_out": t_out,
                 "cost_usd": cost,
             })
         })
@@ -351,7 +355,7 @@ async fn metrics_cost(
             "hermes_per_1k_in": cfg.hermes_price_per_1k_in,
             "hermes_per_1k_out": cfg.hermes_price_per_1k_out,
         },
-        "note": "Output tokens only; input token billing not yet recorded.",
+        "note": "Tokens estimated locally (CJK ≈ 1 tok, ASCII ≈ 1/4 tok). Wire gateway-reported usage in a future phase for exact billing.",
     })))
 }
 

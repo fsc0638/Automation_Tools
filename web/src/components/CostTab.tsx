@@ -49,7 +49,8 @@ export function CostTab({ projectId }: { projectId: string }) {
   }
   const dailySorted = Array.from(dailyMap.values()).sort((a, b) => a.day.localeCompare(b.day));
 
-  const totalTokens = data.by_agent.reduce((s, r) => s + r.tokens_out, 0);
+  const totalIn = data.by_agent.reduce((s, r) => s + r.tokens_in, 0);
+  const totalOut = data.by_agent.reduce((s, r) => s + r.tokens_out, 0);
   const totalCalls = data.by_agent.reduce((s, r) => s + r.calls, 0);
 
   return (
@@ -59,9 +60,10 @@ export function CostTab({ projectId }: { projectId: string }) {
         <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">Refresh</button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <Kpi label="Total cost (30d)" value={`$${data.total_cost_usd.toFixed(2)}`} />
-        <Kpi label="Output tokens" value={totalTokens.toLocaleString()} />
+        <Kpi label="Input tokens" value={totalIn.toLocaleString()} />
+        <Kpi label="Output tokens" value={totalOut.toLocaleString()} />
         <Kpi label="Agent calls" value={totalCalls.toLocaleString()} />
         <Kpi label="Avg $/call" value={totalCalls > 0 ? `$${(data.total_cost_usd / totalCalls).toFixed(4)}` : "—"} />
       </div>

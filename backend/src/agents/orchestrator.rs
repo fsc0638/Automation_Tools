@@ -41,6 +41,11 @@ pub enum ServerEvent {
         round: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
+        /// Estimated input tokens for the call about to start. Phase 6 telemetry
+        /// — gives the dashboard a usable input-cost number even though we
+        /// don't yet ingest exact `usage` from the gateway.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u32>,
     },
     #[serde(rename = "chunk")]
     Chunk {
@@ -497,6 +502,24 @@ fn stream_chunk_timeout(config: &Config) -> Duration {
     } else {
         Duration::from_secs(secs.clamp(30, 900))
     }
+}
+
+/// Rough token estimate for a chat array. CJK characters ~1 token each,
+/// other characters ~1/4 token. Mirrors the output-side estimator in ws.rs
+/// so input + output billing comparisons stay consistent.
+fn estimate_chat_tokens(chat: &[ChatMessage]) -> u32 {
+    let mut cjk: usize = 0;
+    let mut other: usize = 0;
+    for msg in chat {
+        for c in msg.content.chars() {
+            if (c as u32) > 0x2E80 {
+                cjk += 1;
+            } else {
+                other += 1;
+            }
+        }
+    }
+    (cjk + other / 4) as u32
 }
 
 /// Wrap an LLM token stream so it emits coalesced chunks of at least
@@ -1145,11 +1168,13 @@ pub fn run_agent_stream(
 
         match mode {
             AgentMode::OpenClawOnly => {
+                let input_tokens = Some(estimate_chat_tokens(&chat));
                 yield ServerEvent::Status {
                     agent: "OpenClaw".into(),
                     message: "OpenClaw 正在整理問題與專案脈絡...".into(),
                     round: None,
                     phase: Some("thinking".into()),
+                    input_tokens,
                 };
                 let mut stream = batch_chunks(openclaw.chat_stream(chat));
                 loop {
@@ -1167,11 +1192,13 @@ pub fn run_agent_stream(
                 yield ServerEvent::Done { agent: "OpenClaw".into(), round: None, phase: None };
             }
             AgentMode::HermesOnly => {
+                let input_tokens = Some(estimate_chat_tokens(&chat));
                 yield ServerEvent::Status {
                     agent: "Hermes".into(),
                     message: "Hermes 正在整理問題與專案脈絡...".into(),
                     round: None,
                     phase: Some("thinking".into()),
+                    input_tokens,
                 };
                 let mut stream = batch_chunks(hermes.chat_stream(chat));
                 loop {
@@ -1205,11 +1232,13 @@ pub fn run_agent_stream(
                             &turns,
                             lightweight_debate_instruction(agent, intent, &current_topic),
                         );
+                        let input_tokens = Some(estimate_chat_tokens(&ctx));
                         yield ServerEvent::Status {
                             agent: agent_name.clone(),
                             message: format!("{} 正在整理回覆...", agent_name),
                             round: None,
                             phase: Some(phase.into()),
+                            input_tokens,
                         };
                         let mut buffer = String::new();
                         let mut stream = batch_chunks(match agent {
@@ -1261,6 +1290,7 @@ pub fn run_agent_stream(
                 while let Some(round) = runner.next_round() {
                     let agent_name = round.agent.name().to_string();
                     let round_num = round.round_number;
+                    let input_tokens = Some(estimate_chat_tokens(&round.context));
                     yield ServerEvent::Status {
                         agent: agent_name.clone(),
                         message: format!(
@@ -1270,6 +1300,7 @@ pub fn run_agent_stream(
                         ),
                         round: round_num,
                         phase: Some("round".into()),
+                        input_tokens,
                     };
                     let mut buffer = String::new();
                     let mut stream = batch_chunks(match round.agent {
@@ -1321,11 +1352,13 @@ pub fn run_agent_stream(
                 let final_round = runner.final_round();
                 let final_agent_name = final_round.agent.name().to_string();
                 let final_agent = final_round.agent;
+                let input_tokens = Some(estimate_chat_tokens(&final_round.context));
                 yield ServerEvent::Status {
                     agent: final_agent_name.clone(),
                     message: format!("{} · Final 正在彙整最終結論...", final_agent_name),
                     round: None,
                     phase: Some("final".into()),
+                    input_tokens,
                 };
                 let mut final_buffer = String::new();
                 let mut stream = batch_chunks(match final_round.agent {

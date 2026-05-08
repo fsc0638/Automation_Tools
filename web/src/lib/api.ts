@@ -301,9 +301,9 @@ export interface MetricsHealth {
 }
 
 export interface MetricsCost {
-  by_agent: Array<{ agent: string; tokens_out: number; calls: number; cost_usd: number }>;
-  by_mode: Array<{ mode: string; tokens_out: number; calls: number; cost_usd: number }>;
-  daily: Array<{ day: string; agent: string; tokens_out: number; cost_usd: number }>;
+  by_agent: Array<{ agent: string; tokens_in: number; tokens_out: number; calls: number; cost_usd: number }>;
+  by_mode: Array<{ mode: string; tokens_in: number; tokens_out: number; calls: number; cost_usd: number }>;
+  daily: Array<{ day: string; agent: string; tokens_in: number; tokens_out: number; cost_usd: number }>;
   total_cost_usd: number;
   pricing: {
     openclaw_per_1k_in: number;

@@ -176,11 +176,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                     agent,
                     round,
                     phase,
+                    input_tokens,
                     ..
                 } => {
-                    // Status fires before chunks; treat it as the call's start.
+                    // Status fires before chunks; treat it as the call's start
+                    // and remember the orchestrator's input-token estimate.
                     let key = event_key(agent, *round, phase.as_deref());
-                    timing.entry(key).or_insert_with(AgentCallTiming::new);
+                    let entry = timing.entry(key).or_insert_with(AgentCallTiming::new);
+                    if let Some(it) = input_tokens {
+                        entry.input_tokens = Some(*it);
+                    }
                 }
                 ServerEvent::Chunk {
                     agent,
@@ -311,6 +316,7 @@ fn mode_label(mode: &AgentMode) -> &'static str {
 struct AgentCallTiming {
     started_at: Instant,
     first_chunk_at: Option<Instant>,
+    input_tokens: Option<u32>,
 }
 
 impl AgentCallTiming {
@@ -318,6 +324,7 @@ impl AgentCallTiming {
         Self {
             started_at: Instant::now(),
             first_chunk_at: None,
+            input_tokens: None,
         }
     }
 }
@@ -366,16 +373,17 @@ async fn record_usage_event(
     timing: Option<&AgentCallTiming>,
     content: &str,
 ) {
-    let (ttft_ms, total_ms) = match timing {
+    let (ttft_ms, total_ms, tokens_in) = match timing {
         Some(t) => {
             let now = Instant::now();
             let ttft = t
                 .first_chunk_at
                 .map(|c| c.duration_since(t.started_at).as_millis() as i32);
             let total = now.duration_since(t.started_at).as_millis() as i32;
-            (ttft, Some(total))
+            let in_tokens = t.input_tokens.map(|v| v as i32);
+            (ttft, Some(total), in_tokens)
         }
-        None => (None, None),
+        None => (None, None, None),
     };
 
     let chars_out = content.chars().count() as i32;
@@ -384,9 +392,9 @@ async fn record_usage_event(
     let _ = sqlx::query(
         "INSERT INTO agent_usage_events (
              project_id, conversation_id, message_id, agent, mode, phase,
-             round_number, ttft_ms, total_ms, tokens_out, chars_out,
+             round_number, ttft_ms, total_ms, tokens_in, tokens_out, chars_out,
              has_consensus_marker, has_file_citation
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
     )
     .bind(project_id)
     .bind(conversation_id)
@@ -397,6 +405,7 @@ async fn record_usage_event(
     .bind(round.map(|r| r as i32))
     .bind(ttft_ms)
     .bind(total_ms)
+    .bind(tokens_in)
     .bind(tokens_out)
     .bind(chars_out)
     .bind(detect_consensus_marker(content))

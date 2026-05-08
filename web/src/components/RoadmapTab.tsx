@@ -30,6 +30,7 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
   const [err, setErr] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [draft, setDraft] = useState({ title: "", why: "", priority: "medium" as TaskPriority });
+  const [hoverCol, setHoverCol] = useState<TaskStatus | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -59,8 +60,40 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
   }
 
   async function moveTask(task: ProjectTask, status: TaskStatus) {
-    const updated = await tasksApi.update(projectId, task.id, { status });
-    setItems((prev) => prev.map((t) => (t.id === task.id ? updated : t)));
+    if (task.status === status) return;
+    // Optimistic update so the card snaps to the new column immediately;
+    // revert if the server rejects the change.
+    const previous = task.status;
+    setItems((prev) => prev.map((t) => (t.id === task.id ? { ...t, status } : t)));
+    try {
+      const updated = await tasksApi.update(projectId, task.id, { status });
+      setItems((prev) => prev.map((t) => (t.id === task.id ? updated : t)));
+    } catch (e) {
+      setItems((prev) => prev.map((t) => (t.id === task.id ? { ...t, status: previous } : t)));
+      alert(e instanceof Error ? e.message : "Failed to move task");
+    }
+  }
+
+  function onCardDragStart(e: React.DragEvent<HTMLDivElement>, task: ProjectTask) {
+    e.dataTransfer.setData("text/task-id", task.id);
+    e.dataTransfer.effectAllowed = "move";
+  }
+  function onColumnDragOver(e: React.DragEvent<HTMLDivElement>, col: TaskStatus) {
+    if (e.dataTransfer.types.includes("text/task-id")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      if (hoverCol !== col) setHoverCol(col);
+    }
+  }
+  function onColumnDragLeave(col: TaskStatus) {
+    if (hoverCol === col) setHoverCol(null);
+  }
+  function onColumnDrop(e: React.DragEvent<HTMLDivElement>, col: TaskStatus) {
+    e.preventDefault();
+    setHoverCol(null);
+    const id = e.dataTransfer.getData("text/task-id");
+    const task = items.find((t) => t.id === id);
+    if (task) void moveTask(task, col);
   }
 
   async function deleteTask(task: ProjectTask) {
@@ -139,14 +172,28 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           {STATUS_COLUMNS.map((col) => (
-            <div key={col.key} className="bg-[#F8FAFC] rounded-lg p-3 min-h-[200px]">
+            <div
+              key={col.key}
+              onDragOver={(e) => onColumnDragOver(e, col.key)}
+              onDragLeave={() => onColumnDragLeave(col.key)}
+              onDrop={(e) => onColumnDrop(e, col.key)}
+              className={`bg-[#F8FAFC] rounded-lg p-3 min-h-[200px] border-2 transition-colors ${
+                hoverCol === col.key ? "border-[#0050A0] bg-blue-50" : "border-transparent"
+              }`}
+            >
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">{col.label}</span>
                 <span className="text-xs text-[#94A3B8]">{grouped[col.key].length}</span>
               </div>
               <div className="space-y-2">
                 {grouped[col.key].map((t) => (
-                  <TaskCard key={t.id} task={t} onMove={moveTask} onDelete={deleteTask} />
+                  <TaskCard
+                    key={t.id}
+                    task={t}
+                    onMove={moveTask}
+                    onDelete={deleteTask}
+                    onDragStart={onCardDragStart}
+                  />
                 ))}
               </div>
             </div>
@@ -161,14 +208,20 @@ function TaskCard({
   task,
   onMove,
   onDelete,
+  onDragStart,
 }: {
   task: ProjectTask;
   onMove: (t: ProjectTask, s: TaskStatus) => void | Promise<void>;
   onDelete: (t: ProjectTask) => void | Promise<void>;
+  onDragStart: (e: React.DragEvent<HTMLDivElement>, t: ProjectTask) => void;
 }) {
   const next = STATUS_NEXT[task.status];
   return (
-    <div className="bg-white border border-[#E2E8F0] rounded-md p-3 group hover:border-[#94A3B8]">
+    <div
+      draggable
+      onDragStart={(e) => onDragStart(e, task)}
+      className="bg-white border border-[#E2E8F0] rounded-md p-3 group hover:border-[#94A3B8] cursor-grab active:cursor-grabbing"
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="text-sm font-medium text-[#1A1A2E] flex-1 leading-snug">{task.title}</div>
         <button

@@ -7,11 +7,11 @@ import {
   MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
   Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, AlertCircle, ArrowDown,
   RefreshCw, Trash2, Activity, Lightbulb, ListChecks, Code2,
-  ThumbsUp, ThumbsDown,
+  ThumbsUp, ThumbsDown, ClipboardList,
 } from "lucide-react";
 import {
   projects as projectsApi, conversations as convsApi,
-  feedback as feedbackApi,
+  feedback as feedbackApi, tasks as tasksApi,
   createWsConnection, type Project, type Conversation,
   type Message, type FileNode, type AgentMode,
 } from "@/lib/api";
@@ -684,7 +684,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     containIntrinsicSize: "0 200px",
                   }}
                 >
-                  <ChatMessage message={msg} />
+                  <ChatMessage message={msg} projectId={id} />
                 </div>
               ))}
 
@@ -696,7 +696,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               {/* Streaming buffers */}
               {Object.entries(streamBuffers).map(([agentLabel, content]) =>
                 content ? (
-                  <ChatMessage key={`streaming-buffer-${agentLabel}`} message={{
+                  <ChatMessage key={`streaming-buffer-${agentLabel}`} projectId={id} message={{
                     id: `streaming-buffer-${agentLabel}`, conversation_id: "", role: agentLabel.startsWith("Hermes") ? "hermes" : "openclaw",
                     content, agent_name: agentLabel, created_at: new Date().toISOString(),
                   }} streaming />
@@ -794,13 +794,15 @@ function StatusMessage({ label, status, now }: { label: string; status: StreamSt
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ message, streaming }: { message: Message; streaming?: boolean }) {
+const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }: { message: Message; projectId: string; streaming?: boolean }) {
   const isUser = message.role === "user";
   const isHermes = message.role === "hermes";
   const isOpenClaw = message.role === "openclaw";
   const isSystem = message.role === "system";
   const visibleContent = message.content.replace(/<!--\s*consensus:reached\s*-->/gi, "").trim();
   const [rating, setRating] = useState<1 | -1 | 0>(0);
+  const [adding, setAdding] = useState(false);
+  const [added, setAdded] = useState(false);
 
   async function rate(value: 1 | -1) {
     // Optimistic toggle: clicking the same vote unsets it locally; the
@@ -815,7 +817,30 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
       }
     }
   }
-  const canRate = (isHermes || isOpenClaw) && !streaming && !message.id.startsWith("streaming-buffer-");
+
+  async function addToRoadmap() {
+    if (adding || added) return;
+    setAdding(true);
+    try {
+      const parsed = parseTaskFromMessage(visibleContent);
+      await tasksApi.create(projectId, {
+        ...parsed,
+        source_message_id: message.id,
+      });
+      setAdded(true);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to add to Roadmap");
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  const isStreamingBuffer = message.id.startsWith("streaming-buffer-");
+  const canRate = (isHermes || isOpenClaw) && !streaming && !isStreamingBuffer;
+  // Roadmap rule: in Debate mode, only the Final synthesis is "consensus";
+  // intermediate rounds are analysis. agent_name has " · Round N" for those.
+  const isDebateRound = message.agent_name?.includes("Round") ?? false;
+  const canAddToRoadmap = (isHermes || isOpenClaw) && !streaming && !isStreamingBuffer && !isDebateRound;
 
   if (isSystem) {
     return (
@@ -884,34 +909,107 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
             </div>
           )}
         </div>
-        {canRate && (
+        {(canRate || canAddToRoadmap) && (
           <div className="flex items-center gap-1 mt-1.5 opacity-50 hover:opacity-100 transition-opacity">
-            <button
-              onClick={() => void rate(1)}
-              title="Helpful"
-              className={cn(
-                "p-1 rounded hover:bg-[#F1F5F9]",
-                rating === 1 && "text-[#10B981] bg-[#ECFDF5]"
-              )}
-            >
-              <ThumbsUp size={12} />
-            </button>
-            <button
-              onClick={() => void rate(-1)}
-              title="Not helpful"
-              className={cn(
-                "p-1 rounded hover:bg-[#F1F5F9]",
-                rating === -1 && "text-[#C8102E] bg-[#FEF2F2]"
-              )}
-            >
-              <ThumbsDown size={12} />
-            </button>
+            {canRate && (
+              <>
+                <button
+                  onClick={() => void rate(1)}
+                  title="Helpful"
+                  className={cn(
+                    "p-1 rounded hover:bg-[#F1F5F9]",
+                    rating === 1 && "text-[#10B981] bg-[#ECFDF5]"
+                  )}
+                >
+                  <ThumbsUp size={12} />
+                </button>
+                <button
+                  onClick={() => void rate(-1)}
+                  title="Not helpful"
+                  className={cn(
+                    "p-1 rounded hover:bg-[#F1F5F9]",
+                    rating === -1 && "text-[#C8102E] bg-[#FEF2F2]"
+                  )}
+                >
+                  <ThumbsDown size={12} />
+                </button>
+              </>
+            )}
+            {canAddToRoadmap && (
+              <button
+                onClick={() => void addToRoadmap()}
+                disabled={adding || added}
+                title={added ? "Added" : "Add to Roadmap"}
+                className={cn(
+                  "ml-1 flex items-center gap-1 text-[11px] px-2 py-1 rounded hover:bg-[#F1F5F9]",
+                  added && "text-[#10B981]"
+                )}
+              >
+                <ClipboardList size={12} /> {added ? "Added" : adding ? "…" : "Add to Roadmap"}
+              </button>
+            )}
           </div>
         )}
       </div>
     </div>
   );
 });
+
+/**
+ * Pull a roadmap task from an agent's freeform reply. Heuristic — not perfect:
+ * - Title: first non-empty line, with markdown markers stripped, capped at 100 chars.
+ * - Why: the rest of the body, capped at 800 chars.
+ * - affected_files: any token that looks like a project file path (a known
+ *   extension, no spaces, ≤ 120 chars). Deduped, capped at 8.
+ */
+function parseTaskFromMessage(content: string): {
+  title: string;
+  why?: string;
+  affected_files?: string[];
+  priority?: "low" | "medium" | "high" | "critical";
+} {
+  const lines = content
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const titleLine = lines[0] ?? "(untitled)";
+  const title = titleLine
+    .replace(/^[#*\-•·\d.\s]+/, "")
+    .replace(/[*_`]+/g, "")
+    .slice(0, 100)
+    .trim() || "(untitled)";
+
+  const why = lines.slice(1).join("\n").slice(0, 800).trim() || undefined;
+
+  const fileRe = /(?:[\w./-]+)\.(?:rs|ts|tsx|js|jsx|py|md|sql|toml|json|yaml|yml|swift|kt|java|go|html|css)\b/g;
+  const seen = new Set<string>();
+  const affected_files: string[] = [];
+  for (const m of content.matchAll(fileRe)) {
+    const path = m[0].replace(/^[`'"]+|[`'"]+$/g, "");
+    if (path.length > 120 || path.includes(" ")) continue;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    affected_files.push(path);
+    if (affected_files.length >= 8) break;
+  }
+
+  const lower = content.toLowerCase();
+  const priority: "low" | "medium" | "high" | "critical" = lower.match(/critical|嚴重|安全漏洞/)
+    ? "critical"
+    : lower.match(/high priority|high\s|高優先|高風險/)
+    ? "high"
+    : lower.match(/low priority|low\s|nice to have|錦上添花/)
+    ? "low"
+    : "medium";
+
+  return {
+    title,
+    why,
+    affected_files: affected_files.length > 0 ? affected_files : undefined,
+    priority,
+  };
+}
 
 function FileNodeItem({ node, depth }: { node: FileNode; depth: number }) {
   const [open, setOpen] = useState(depth === 0);
