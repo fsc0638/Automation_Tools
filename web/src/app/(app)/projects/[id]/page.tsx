@@ -729,7 +729,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   }
 
   return (
-    <div className="flex h-full flex-col bg-[#F5F7FB]">
+    <div className="flex min-h-screen flex-col bg-[#F5F7FB]">
       <div className="border-b border-[#E2E8F0] bg-white px-6 py-4">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex items-start gap-3">
@@ -880,12 +880,15 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </div>
                       <div className="mt-2 line-clamp-2 text-xs text-[#64748B]">
                         {activeConv?.id === conv.id
-                          ? `${activeThreadSummary.messageCount} message(s) in this thread${activeThreadSummary.lastAgent ? ` · last agent: ${activeThreadSummary.lastAgent}` : ""}`
+                          ? t("convDesc.threadSummary").replace("{count}", String(activeThreadSummary.messageCount))
+                            + (activeThreadSummary.lastAgent
+                              ? t("convDesc.lastAgentSuffix").replace("{agent}", activeThreadSummary.lastAgent)
+                              : "")
                           : conv.mode === "debate"
-                            ? "Debate timeline available for trade-off analysis and synthesis."
+                            ? t("convDesc.debate")
                             : conv.mode === "hermes"
-                              ? "Deeper reasoning lane for architecture, planning, and careful review."
-                              : "Fast execution lane for focused implementation and direct answers."}
+                              ? t("convDesc.hermes")
+                              : t("convDesc.openclaw")}
                       </div>
                     </button>
                     <button
@@ -1213,7 +1216,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   </div>
                   <div className="mt-3 space-y-2">
                     {fileHits.length === 0 ? (
-                      <SectionEmpty title="No file matches" description="Try a different filename fragment or refresh the workspace tree." />
+                      <SectionEmpty title={t("contextFiles.noMatches")} description={t("contextFiles.noMatchesDesc")} />
                     ) : fileHits.map((path) => (
                       <button
                         key={path}
@@ -1237,8 +1240,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   <div className="border-b border-[#E2E8F0] px-4 py-3">
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <h3 className="text-sm font-semibold text-[#1A1A2E]">Project files</h3>
-                        <p className="mt-1 text-xs text-[#64748B]">Click a file to preview and use it as prompt context.</p>
+                        <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("contextFiles.projectFiles")}</h3>
+                        <p className="mt-1 text-xs text-[#64748B]">{t("contextFiles.projectFilesDesc")}</p>
                       </div>
                       <button
                         type="button"
@@ -1254,8 +1257,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     {fileTree.length === 0 ? (
                       <SectionEmpty
                         className="mx-4 my-4"
-                        title="No files available"
-                        description="Refresh the workspace or switch branches to reload repository contents."
+                        title={t("contextFiles.noFilesAvailable")}
+                        description={t("contextFiles.noFilesAvailableDesc")}
                       />
                     ) : fileTree.map((node) => (
                       <FileNodeItem
@@ -1272,16 +1275,16 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
                   <div className="flex items-center justify-between gap-2">
                     <div>
-                      <h3 className="text-sm font-semibold text-[#1A1A2E]">File preview</h3>
-                      <p className="mt-1 text-xs text-[#64748B] truncate">{selectedFilePath || "No file selected"}</p>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("contextFiles.filePreview")}</h3>
+                      <p className="mt-1 text-xs text-[#64748B] truncate">{selectedFilePath || t("contextFiles.noFileSelected")}</p>
                     </div>
                     {selectedFilePath && (
                       <button
                         type="button"
-                        onClick={() => appendPrompt(`Please analyze file: ${selectedFilePath}\nFocus on purpose, logic hotspots, and recommended changes.`)}
+                        onClick={() => appendPrompt(t("contextFiles.askAboutFilePrompt").replace("{path}", selectedFilePath))}
                         className="rounded-lg border border-[#E2E8F0] px-2.5 py-1.5 text-xs font-medium text-[#0050A0] hover:border-[#0050A0]"
                       >
-                        Ask about file
+                        {t("contextFiles.askAboutFile")}
                       </button>
                     )}
                   </div>
@@ -1292,7 +1295,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       <SkeletonBlock className="h-56 w-full rounded-xl" />
                     </div>
                   ) : filePreviewError ? (
-                    <InlineBanner title="File preview failed" description={filePreviewError} tone="error" />
+                    <InlineBanner title={t("contextFiles.previewFailed")} description={filePreviewError} tone="error" />
                   ) : selectedFilePath ? (
                     <div className="mt-4 overflow-hidden rounded-xl border border-[#E2E8F0]">
                       <SyntaxHighlighter language={detectLanguage(selectedFilePath)}>{selectedFileContent}</SyntaxHighlighter>
@@ -1300,8 +1303,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   ) : (
                     <SectionEmpty
                       className="mt-4"
-                      title="No file selected"
-                      description="Pick a file from the tree to preview its contents here and feed it into the next prompt."
+                      title={t("contextFiles.noFileSelected")}
+                      description={t("contextFiles.previewDesc")}
                     />
                   )}
                 </section>
@@ -1311,28 +1314,28 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             {contextTab === "git" && (
               <div className="space-y-4">
                 <section className="grid grid-cols-3 gap-3">
-                  <MiniStat label="Changed" value={String(gitStatus?.changed.length ?? 0)} tone="blue" />
-                  <MiniStat label="Staged" value={String(gitStatus?.staged.length ?? 0)} tone="green" />
-                  <MiniStat label="Untracked" value={String(gitStatus?.untracked.length ?? 0)} tone="amber" />
+                  <MiniStat label={t("gitStatus.changed")} value={String(gitStatus?.changed.length ?? 0)} tone="blue" />
+                  <MiniStat label={t("gitStatus.staged")} value={String(gitStatus?.staged.length ?? 0)} tone="green" />
+                  <MiniStat label={t("gitStatus.untracked")} value={String(gitStatus?.untracked.length ?? 0)} tone="amber" />
                 </section>
 
                 <section className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] p-4 shadow-sm">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Hotspots</h3>
-                      <p className="mt-1 text-xs text-[#64748B]">The files most likely to matter in the next conversation.</p>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("gitStatus.hotspots")}</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">{t("gitStatus.hotspotsDesc")}</p>
                     </div>
                     <button
                       type="button"
-                      onClick={() => appendPrompt("Review the changed, staged, and untracked files. Rank the most important files to inspect next and explain why.")}
+                      onClick={() => appendPrompt(t("gitStatus.askAgentsPrompt"))}
                       className="rounded-lg border border-[#E2E8F0] px-2.5 py-1.5 text-xs font-medium text-[#0050A0] hover:border-[#0050A0]"
                     >
-                      Ask agents
+                      {t("gitStatus.askAgents")}
                     </button>
                   </div>
                   <div className="mt-3 space-y-2">
                     {gitHotspots.length === 0 ? (
-                      <SectionEmpty title="No Git hotspots" description="This branch looks clean right now. Refresh or switch branches to inspect a different state." />
+                      <SectionEmpty title={t("gitStatus.noHotspots")} description={t("gitStatus.noHotspotsDesc")} />
                     ) : gitHotspots.map((path, index) => (
                       <button
                         key={path}
@@ -1344,7 +1347,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                           <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#EFF6FF] text-[11px] font-semibold text-[#1D4ED8]">{index + 1}</span>
                           <span className="truncate">{path}</span>
                         </span>
-                        <span className="text-[11px] text-[#94A3B8]">Preview</span>
+                        <span className="text-[11px] text-[#94A3B8]">{t("gitStatus.preview")}</span>
                       </button>
                     ))}
                   </div>
@@ -1353,8 +1356,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Branch control</h3>
-                      <p className="mt-1 text-xs text-[#64748B]">Switch branches from the active repository state.</p>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("gitStatus.branchControl")}</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">{t("gitStatus.branchControlDesc")}</p>
                     </div>
                     {project?.source_type === "git" && (
                       <select
@@ -1369,40 +1372,40 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </select>
                     )}
                   </div>
-                  {switchingBranch && <p className="mt-2 text-xs text-[#64748B]">Switching branch…</p>}
+                  {switchingBranch && <p className="mt-2 text-xs text-[#64748B]">{t("gitStatus.switching")}</p>}
                 </section>
 
-                <GitStatusSection title="Changed files" items={gitStatus?.changed ?? []} onOpen={loadFilePreview} />
-                <GitStatusSection title="Staged files" items={gitStatus?.staged ?? []} onOpen={loadFilePreview} />
-                <GitStatusSection title="Untracked files" items={gitStatus?.untracked ?? []} onOpen={loadFilePreview} />
+                <GitStatusSection title={t("gitStatus.changedFiles")} items={gitStatus?.changed ?? []} onOpen={loadFilePreview} />
+                <GitStatusSection title={t("gitStatus.stagedFiles")} items={gitStatus?.staged ?? []} onOpen={loadFilePreview} />
+                <GitStatusSection title={t("gitStatus.untrackedFiles")} items={gitStatus?.untracked ?? []} onOpen={loadFilePreview} />
               </div>
             )}
 
             {contextTab === "project" && project && (
               <div className="space-y-4">
                 <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
-                  <h3 className="text-sm font-semibold text-[#1A1A2E]">Workspace summary</h3>
+                  <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("projectInfo.workspaceSummary")}</h3>
                   <dl className="mt-4 space-y-3 text-sm">
-                    <InfoRow label="Project name" value={project.name} />
-                    <InfoRow label="Source type" value={project.source_type} />
-                    <InfoRow label="Source path" value={project.source_path} />
-                    <InfoRow label="Local path" value={project.local_path ?? "—"} />
-                    <InfoRow label="Default branch" value={project.default_branch ?? "—"} />
-                    <InfoRow label="Updated" value={formatDate(project.updated_at)} />
+                    <InfoRow label={t("projectInfo.projectName")} value={project.name} />
+                    <InfoRow label={t("projectInfo.sourceType")} value={project.source_type} />
+                    <InfoRow label={t("projectInfo.sourcePath")} value={project.source_path} />
+                    <InfoRow label={t("projectInfo.localPath")} value={project.local_path ?? "—"} />
+                    <InfoRow label={t("projectInfo.defaultBranch")} value={project.default_branch ?? "—"} />
+                    <InfoRow label={t("projectInfo.updated")} value={formatDate(project.updated_at)} />
                   </dl>
                 </section>
 
                 <section className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] p-4 shadow-sm">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Project intelligence</h3>
-                      <p className="mt-1 text-xs text-[#64748B]">Turn current repo context into the next best question or action.</p>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("projectInfo.intelligence")}</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">{t("projectInfo.intelligenceDesc")}</p>
                     </div>
-                    <StatusPill>{workspaceInsights.length} insight{workspaceInsights.length === 1 ? "" : "s"}</StatusPill>
+                    <StatusPill>{workspaceInsights.length === 1 ? t("projectInfo.insightOne") : t("projectInfo.insightMany").replace("{n}", String(workspaceInsights.length))}</StatusPill>
                   </div>
                   <div className="mt-3 space-y-3">
                     {workspaceInsights.length === 0 ? (
-                      <SectionEmpty title="No insights yet" description="Start a conversation, select a file, or refresh Git state to surface recommended actions here." />
+                      <SectionEmpty title={t("projectInfo.noInsights")} description={t("projectInfo.noInsightsDesc")} />
                     ) : workspaceInsights.map((insight) => (
                       <button
                         key={insight.title}
@@ -1412,18 +1415,18 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       >
                         <div className="text-sm font-semibold text-[#1A1A2E]">{insight.title}</div>
                         <div className="mt-1 text-xs text-[#64748B]">{insight.detail}</div>
-                        <div className="mt-3 text-xs font-medium text-[#0050A0]">Use as next prompt</div>
+                        <div className="mt-3 text-xs font-medium text-[#0050A0]">{t("projectInfo.useAsPrompt")}</div>
                       </button>
                     ))}
                   </div>
                 </section>
 
                 <section className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
-                  <h3 className="text-sm font-semibold text-[#1A1A2E]">How to use this workspace well</h3>
+                  <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("projectInfo.howToUse")}</h3>
                   <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-[#64748B]">
-                    <li>Use the right panel to preview files before asking the agents for changes.</li>
-                    <li>Switch mode based on task: OpenClaw for speed, Hermes for deeper reasoning, Debate for trade-off analysis.</li>
-                    <li>Keep an eye on branch and dirty file counts before asking for implementation advice.</li>
+                    <li>{t("projectInfo.bullet1")}</li>
+                    <li>{t("projectInfo.bullet2")}</li>
+                    <li>{t("projectInfo.bullet3")}</li>
                   </ul>
                 </section>
               </div>
@@ -1532,6 +1535,7 @@ function MiniStat({ label, value, tone }: { label: string; value: string; tone: 
 }
 
 function GitStatusSection({ title, items, onOpen }: { title: string; items: string[]; onOpen: (path: string) => void }) {
+  const t = useT();
   return (
     <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
       <div className="flex items-center justify-between gap-3">
@@ -1541,8 +1545,8 @@ function GitStatusSection({ title, items, onOpen }: { title: string; items: stri
       {items.length === 0 ? (
         <SectionEmpty
           className="mt-3 px-4 py-6"
-          title="No files"
-          description="This section is currently clean for the active branch state."
+          title={t("gitStatus.noFiles")}
+          description={t("gitStatus.noFilesDesc")}
         />
       ) : (
         <div className="mt-3 space-y-2">
