@@ -363,6 +363,30 @@ fn level(score: i32) -> &'static str {
     if score >= 80 { "Low" } else if score >= 50 { "Medium" } else { "High" }
 }
 
+fn clamp_score(value: i32) -> i32 {
+    value.clamp(0, 100)
+}
+
+fn ratio_pct(part: i64, total: i64) -> f64 {
+    if total <= 0 { 0.0 } else { (part as f64 / total as f64) * 100.0 }
+}
+
+fn confidence_from_inventory(total_files: i64, source_files: i64) -> i32 {
+    if total_files <= 0 {
+        0
+    } else if total_files >= 2000 {
+        // The index currently caps at 2,000 files, so broad repos need an
+        // explicit full scan before we should claim near-certainty.
+        82
+    } else if source_files >= 10 {
+        92
+    } else if source_files > 0 {
+        85
+    } else {
+        70
+    }
+}
+
 async fn metrics_health(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -371,130 +395,306 @@ async fn metrics_health(
     verify_project_access(&state.db, project_id, auth_user.id).await?;
     let db = &state.db;
 
-    // --- 1. Test coverage gap ---
-    let file_stats: (i64, i64, Option<i64>, Option<f64>) = sqlx::query_as(
-        "SELECT
-            COUNT(*),
-            COUNT(*) FILTER (
-                WHERE path ILIKE '%test%' OR path ILIKE '%spec%'
-                   OR path ILIKE '%__tests__%' OR path ILIKE '%.test.%'
-            ),
-            MAX(size_bytes),
-            AVG(size_bytes)::float8
-         FROM project_files WHERE project_id = $1",
+    let files: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT path, language, size_bytes FROM project_files WHERE project_id = $1",
     )
     .bind(project_id)
-    .fetch_one(db)
+    .fetch_all(db)
     .await?;
-    let total_files = file_stats.0;
-    let test_files = file_stats.1;
-    let max_size = file_stats.2.unwrap_or(0);
-    let avg_size = file_stats.3.unwrap_or(0.0);
 
-    let test_score: i32 = if total_files == 0 {
-        50 // unknown — neutral
+    let total_files = files.len() as i64;
+    let source_exts = [
+        "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "kt", "swift", "php", "rb",
+        "cs", "cpp", "c", "h", "hpp",
+    ];
+    let source_files = files
+        .iter()
+        .filter(|(path, lang, _)| {
+            let lang = lang.as_deref().unwrap_or_default();
+            source_exts.contains(&lang) || source_exts.iter().any(|ext| path.ends_with(&format!(".{ext}")))
+        })
+        .count() as i64;
+    let test_files = files
+        .iter()
+        .filter(|(path, _, _)| {
+            let p = path.to_lowercase();
+            p.contains("test") || p.contains("spec") || p.contains("__tests__") || p.contains(".test.")
+        })
+        .count() as i64;
+    let readme_count = files
+        .iter()
+        .filter(|(path, _, _)| {
+            let p = path.to_lowercase();
+            p == "readme.md" || p.starts_with("readme") || p.contains("/readme")
+        })
+        .count() as i64;
+    let docs_count = files
+        .iter()
+        .filter(|(path, _, _)| {
+            let p = path.to_lowercase();
+            p.starts_with("docs/") || p.contains("/docs/")
+        })
+        .count() as i64;
+    let markdown_count = files
+        .iter()
+        .filter(|(path, lang, _)| lang.as_deref() == Some("md") || path.to_lowercase().ends_with(".md"))
+        .count() as i64;
+    let config_count = files
+        .iter()
+        .filter(|(path, _, _)| {
+            matches!(
+                path.as_str(),
+                "package.json" | "Cargo.toml" | "pyproject.toml" | "requirements.txt" | "go.mod" |
+                "pom.xml" | "build.gradle" | "docker-compose.yml" | "Dockerfile"
+            ) || path.ends_with("/package.json") || path.ends_with("/Cargo.toml") || path.ends_with("/go.mod")
+        })
+        .count() as i64;
+    let ci_count = files
+        .iter()
+        .filter(|(path, _, _)| {
+            let p = path.to_lowercase();
+            p.starts_with(".github/workflows/") || p.contains("/workflows/") || p.contains("gitlab-ci")
+                || p.contains("azure-pipelines") || p.contains("circleci")
+        })
+        .count() as i64;
+    let env_example_count = files
+        .iter()
+        .filter(|(path, _, _)| {
+            let p = path.to_lowercase();
+            p.ends_with(".env.example") || p.ends_with(".env.sample") || p.contains("env.example")
+        })
+        .count() as i64;
+    let lockfile_count = files
+        .iter()
+        .filter(|(path, _, _)| {
+            matches!(
+                path.as_str(),
+                "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "Cargo.lock" | "poetry.lock" | "Gemfile.lock" | "go.sum"
+            ) || path.ends_with("/package-lock.json") || path.ends_with("/Cargo.lock") || path.ends_with("/go.sum")
+        })
+        .count() as i64;
+    let max_size = files.iter().map(|(_, _, size)| *size).max().unwrap_or(0);
+    let avg_size = if total_files > 0 {
+        files.iter().map(|(_, _, size)| *size as f64).sum::<f64>() / total_files as f64
     } else {
-        let ratio = test_files as f64 / total_files as f64;
-        // 20% coverage = 100 score, 0% = 0
-        ((ratio * 500.0).min(100.0)) as i32
+        0.0
     };
+    let large_files = files.iter().filter(|(_, _, size)| *size > 100_000).count() as i64;
+    let huge_files = files.iter().filter(|(_, _, size)| *size > 500_000).count() as i64;
+    let top_dirs = files
+        .iter()
+        .filter_map(|(path, _, _)| path.split('/').next())
+        .filter(|part| !part.is_empty())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as i64;
 
-    // --- 2. Documentation ---
-    let docs_row: (i64, i64, i64) = sqlx::query_as(
-        "SELECT
-            COUNT(*) FILTER (WHERE path ILIKE 'README%' OR path ILIKE '%/README%'),
-            COUNT(*) FILTER (WHERE path ILIKE 'docs/%' OR path ILIKE '%/docs/%'),
-            COUNT(*) FILTER (WHERE language = 'markdown' OR path ILIKE '%.md')
-         FROM project_files WHERE project_id = $1",
+    let secret_hits: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM project_file_chunks
+         WHERE project_id = $1
+           AND path !~* '(^|/)\\.env\\.example$|(^|/)\\.env\\.sample$|example|sample|readme|docs/'
+           AND content ~ '(AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?i)(password|api[_-]?key|secret|token)\\s*[:=]\\s*[\"''][^\"'']{8,})'",
     )
     .bind(project_id)
     .fetch_one(db)
     .await?;
-    let has_readme = docs_row.0 > 0;
-    let has_docs_dir = docs_row.1 > 0;
-    let md_count = docs_row.2;
-
-    let mut doc_score = 0i32;
-    if has_readme { doc_score += 40; }
-    if has_docs_dir { doc_score += 30; }
-    if md_count >= 5 { doc_score += 30; } else if md_count >= 1 { doc_score += 15; }
-    if total_files == 0 { doc_score = 50; } // unknown
-
-    // --- 3. Maintenance ---
-    // Penalise huge max files / many files / fat average files.
-    let mut maint = 100i32;
-    if max_size > 100_000 { maint -= 20; }
-    if max_size > 500_000 { maint -= 20; }
-    if avg_size > 10_000.0 { maint -= 15; }
-    if total_files > 500 { maint -= 15; }
-    if total_files > 2000 { maint -= 15; }
-    let maint_score = maint.max(0);
-
-    // --- 4 & 5. Architecture & security risk via agent message scan ---
-    // Higher mention count = lower score (more risk).
-    let risk_row: (i64, i64) = sqlx::query_as(
-        "SELECT
-            COUNT(*) FILTER (WHERE m.role IN ('openclaw','hermes')
-                AND (LOWER(m.content) ~ '(race condition|deadlock|tight coupling|circular dependency|architectural risk|架構風險)')),
-            COUNT(*) FILTER (WHERE m.role IN ('openclaw','hermes')
-                AND (LOWER(m.content) ~ '(vulnerability|injection|secret|credential leak|安全風險|資安)'))
-         FROM messages m
-         JOIN conversations c ON c.id = m.conversation_id
-         WHERE c.project_id = $1",
+    let dependency_risk_hits: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM project_file_chunks
+         WHERE project_id = $1
+           AND path ~* '(package\\.json|cargo\\.toml|requirements\\.txt|pyproject\\.toml|go\\.mod|pom\\.xml)'
+           AND LOWER(content) ~ '(deprecated|unmaintained|vulnerab|audit|override|resolution)'",
     )
     .bind(project_id)
     .fetch_one(db)
     .await?;
-    let arch_mentions = risk_row.0;
-    let sec_mentions = risk_row.1;
+    let test_script_hits: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM project_file_chunks
+         WHERE project_id = $1
+           AND path ~* '(package\\.json|cargo\\.toml|pyproject\\.toml|makefile|justfile)'
+           AND LOWER(content) ~ '(\"test\"|cargo test|pytest|vitest|jest|go test|npm test)'",
+    )
+    .bind(project_id)
+    .fetch_one(db)
+    .await?;
+    let doc_run_hits: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM project_file_chunks
+         WHERE project_id = $1
+           AND path ~* '(readme|docs/|\\.md$)'
+           AND LOWER(content) ~ '(install|setup|getting started|quickstart|run|build|test|deploy|configuration|environment|??|??|??|??|??)'",
+    )
+    .bind(project_id)
+    .fetch_one(db)
+    .await?;
 
-    let arch_score: i32 = (100 - (arch_mentions as i32 * 8)).max(0);
-    let sec_score: i32 = (100 - (sec_mentions as i32 * 12)).max(0);
+    let inventory_confidence = confidence_from_inventory(total_files, source_files);
 
-    // Composite — equal-weight average for now.
-    let composite = (test_score + doc_score + maint_score + arch_score + sec_score) / 5;
+    // Architecture: structural proxy based only on indexed file inventory.
+    // It intentionally does not reward silence from agents. Unknown evidence lowers confidence.
+    let large_ratio = ratio_pct(large_files, total_files);
+    let mut arch_score = 100;
+    if total_files == 0 { arch_score = 0; }
+    if config_count == 0 { arch_score -= 18; }
+    if top_dirs <= 1 && source_files > 20 { arch_score -= 12; }
+    if large_ratio > 2.0 { arch_score -= 12; }
+    if large_ratio > 5.0 { arch_score -= 12; }
+    if huge_files > 0 { arch_score -= 16; }
+    if source_files > 300 && top_dirs < 4 { arch_score -= 12; }
+    let arch_score = clamp_score(arch_score);
+    let arch_confidence = if total_files == 0 { 0 } else { inventory_confidence.min(92) };
+
+    // Maintenance: file count, size distribution, dependency/CI evidence.
+    let mut maint_score = 100;
+    if total_files == 0 { maint_score = 0; }
+    if total_files > 500 { maint_score -= 10; }
+    if total_files > 2000 { maint_score -= 18; }
+    if avg_size > 10_000.0 { maint_score -= 10; }
+    if max_size > 100_000 { maint_score -= 12; }
+    if max_size > 500_000 { maint_score -= 18; }
+    if ci_count == 0 && source_files > 20 { maint_score -= 10; }
+    if lockfile_count == 0 && config_count > 0 { maint_score -= 8; }
+    let maint_score = clamp_score(maint_score);
+    let maint_confidence = if total_files == 0 { 0 } else { inventory_confidence.max(90).min(96) };
+
+    // Tests: test readiness, not exact code coverage. Exact coverage requires executing project test tooling.
+    let test_ratio = if source_files > 0 { test_files as f64 / source_files as f64 } else { 0.0 };
+    let mut test_score = ((test_ratio * 400.0).min(70.0)) as i32;
+    if test_script_hits.0 > 0 { test_score += 20; }
+    if ci_count > 0 && test_files > 0 { test_score += 10; }
+    if source_files == 0 { test_score = 0; }
+    let test_score = clamp_score(test_score);
+    let test_confidence = if total_files == 0 { 0 } else if test_script_hits.0 > 0 { 93 } else { 88 };
+
+    // Documentation: existence + actionable run/build/test/deploy instructions.
+    let mut doc_score = 0;
+    if readme_count > 0 { doc_score += 30; }
+    if docs_count > 0 { doc_score += 20; }
+    if markdown_count >= 5 { doc_score += 15; } else if markdown_count > 0 { doc_score += 8; }
+    if doc_run_hits.0 > 0 { doc_score += 25; }
+    if env_example_count > 0 { doc_score += 10; }
+    if total_files == 0 { doc_score = 0; }
+    let doc_score = clamp_score(doc_score);
+    let doc_confidence = if total_files == 0 { 0 } else { 94 };
+
+    // Security: concrete secret-pattern and dependency-risk evidence only. This is not a full SAST scan.
+    let mut sec_score = 100;
+    if total_files == 0 { sec_score = 0; }
+    if secret_hits.0 > 0 { sec_score -= (secret_hits.0 as i32 * 25).min(75); }
+    if dependency_risk_hits.0 > 0 { sec_score -= (dependency_risk_hits.0 as i32 * 8).min(24); }
+    if env_example_count == 0 && source_files > 20 { sec_score -= 8; }
+    let sec_score = clamp_score(sec_score);
+    let sec_confidence = if total_files == 0 { 0 } else { 91 };
+
+    let dimension_scores = [arch_score, maint_score, test_score, doc_score, sec_score];
+    let dimension_confidences = [arch_confidence, maint_confidence, test_confidence, doc_confidence, sec_confidence];
+    let composite = dimension_scores.iter().sum::<i32>() / dimension_scores.len() as i32;
+    let confidence = dimension_confidences.iter().sum::<i32>() / dimension_confidences.len() as i32;
 
     let dimensions = json!([
         {
             "key": "architecture",
-            "label": "架構風險",
+            "label": "????",
             "score": arch_score,
             "level": level(arch_score),
-            "evidence": format!("{} mention(s) of architectural risk in agent replies", arch_mentions),
+            "confidence": arch_confidence,
+            "measured_by": "Indexed file inventory: source/config distribution, top-level module spread, large-file and huge-file ratios.",
+            "formula": "100 - missing_config(18) - single_top_dir_with_many_sources(12) - large_file_ratio_penalties(12/24) - huge_file_penalty(16) - large_repo_low_module_spread(12)",
+            "evidence": format!("{} indexed files, {} source files, {} config/entry files, {} top-level dirs, {} large files, {} huge files", total_files, source_files, config_count, top_dirs, large_files, huge_files),
+            "evidence_items": [
+                format!("config_or_entry_files={}", config_count),
+                format!("top_level_dirs={}", top_dirs),
+                format!("large_file_ratio={:.1}%", large_ratio),
+                format!("huge_files_gt_500kb={}", huge_files)
+            ]
         },
         {
             "key": "maintenance",
-            "label": "維護成本",
+            "label": "????",
             "score": maint_score,
             "level": level(maint_score),
-            "evidence": format!("{} files, avg {} bytes, max {} bytes", total_files, avg_size as i64, max_size),
+            "confidence": maint_confidence,
+            "measured_by": "Indexed file count, average/max file size, CI workflow evidence, dependency lockfile evidence.",
+            "formula": "100 - file_count_penalties - avg/max_size_penalties - missing_ci(10 when source_files>20) - missing_lockfile(8 when dependency manifest exists)",
+            "evidence": format!("{} files, avg {} bytes, max {} bytes, CI files {}, lockfiles {}", total_files, avg_size as i64, max_size, ci_count, lockfile_count),
+            "evidence_items": [
+                format!("total_files={}", total_files),
+                format!("avg_size_bytes={}", avg_size as i64),
+                format!("max_size_bytes={}", max_size),
+                format!("ci_workflows={}", ci_count),
+                format!("lockfiles={}", lockfile_count)
+            ]
         },
         {
             "key": "tests",
-            "label": "測試缺口",
+            "label": "????",
             "score": test_score,
             "level": level(test_score),
-            "evidence": format!("{}/{} files look test-related", test_files, total_files),
+            "confidence": test_confidence,
+            "measured_by": "Test file naming evidence, test command evidence in manifests, and CI test-readiness signal. This is not executed coverage.",
+            "formula": "min(test_files/source_files*400, 70) + test_script_present(20) + ci_with_tests(10)",
+            "evidence": format!("{} test-like files / {} source files, test scripts {}, CI files {}", test_files, source_files, test_script_hits.0, ci_count),
+            "evidence_items": [
+                format!("test_files={}", test_files),
+                format!("source_files={}", source_files),
+                format!("test_script_hits={}", test_script_hits.0),
+                format!("ci_workflows={}", ci_count)
+            ]
         },
         {
             "key": "docs",
-            "label": "文件完整度",
+            "label": "?????",
             "score": doc_score,
             "level": level(doc_score),
-            "evidence": format!("README: {}, docs/: {}, .md count: {}", has_readme, has_docs_dir, md_count),
+            "confidence": doc_confidence,
+            "measured_by": "README/docs/Markdown inventory plus actionable setup/run/test/deploy/configuration wording in documentation chunks.",
+            "formula": "README(30) + docs_dir(20) + markdown_volume(8/15) + actionable_docs(25) + env_example(10)",
+            "evidence": format!("README {}, docs files {}, markdown files {}, actionable doc hits {}, env examples {}", readme_count, docs_count, markdown_count, doc_run_hits.0, env_example_count),
+            "evidence_items": [
+                format!("readme_count={}", readme_count),
+                format!("docs_count={}", docs_count),
+                format!("markdown_count={}", markdown_count),
+                format!("actionable_doc_hits={}", doc_run_hits.0),
+                format!("env_examples={}", env_example_count)
+            ]
         },
         {
             "key": "security",
-            "label": "安全風險",
+            "label": "????",
             "score": sec_score,
             "level": level(sec_score),
-            "evidence": format!("{} mention(s) of security risk in agent replies", sec_mentions),
+            "confidence": sec_confidence,
+            "measured_by": "Concrete secret-pattern scan over indexed chunks, dependency-risk wording in manifests, and env-example presence. This is not full SAST/DAST.",
+            "formula": "100 - secret_pattern_hits*25 capped at 75 - dependency_risk_hits*8 capped at 24 - missing_env_example(8 when source_files>20)",
+            "evidence": format!("{} possible secret pattern hits, {} dependency risk hints, env examples {}", secret_hits.0, dependency_risk_hits.0, env_example_count),
+            "evidence_items": [
+                format!("possible_secret_hits={}", secret_hits.0),
+                format!("dependency_risk_hits={}", dependency_risk_hits.0),
+                format!("env_examples={}", env_example_count)
+            ]
         },
     ]);
 
     Ok(Json(json!({
         "score": composite,
+        "confidence": confidence,
+        "methodology": "Evidence-based MVP: scores are calculated from indexed repository files/chunks and do not use agent opinion as health evidence. Unknown evidence lowers confidence instead of being treated as healthy.",
+        "limitations": [
+            "Architecture score is a structural proxy until AST dependency graph and circular dependency detection are added.",
+            "Test score measures test readiness, not executed line/branch coverage.",
+            "Security score scans indexed text for high-signal patterns, not a complete SAST/dependency audit.",
+            "The current file index caps at 2,000 files and 1MB per indexed file. Very large repos need a full scanner for 90+ confidence."
+        ],
         "dimensions": dimensions,
         "indexed_files": total_files,
+        "signals": {
+            "source_files": source_files,
+            "test_files": test_files,
+            "config_files": config_count,
+            "ci_files": ci_count,
+            "lockfiles": lockfile_count,
+            "readme_files": readme_count,
+            "docs_files": docs_count,
+            "markdown_files": markdown_count,
+            "possible_secret_hits": secret_hits.0,
+            "dependency_risk_hits": dependency_risk_hits.0
+        }
     })))
 }

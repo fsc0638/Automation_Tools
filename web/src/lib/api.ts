@@ -333,13 +333,21 @@ export interface UpdateTaskInput {
 
 export interface MetricsHealth {
   score: number;
+  confidence?: number;
+  methodology?: string;
+  limitations?: string[];
   indexed_files: number;
+  signals?: Record<string, number>;
   dimensions: Array<{
     key: string;
     label: string;
     score: number;
     level: "Low" | "Medium" | "High";
+    confidence?: number;
+    measured_by?: string;
+    formula?: string;
     evidence: string;
+    evidence_items?: string[];
   }>;
 }
 
