@@ -1,0 +1,4 @@
+# Lock SQL migrations to LF — sqlx stores SHA-384 checksums of the raw file
+# bytes; line-ending conversion (autocrlf) breaks "previously applied" check
+# on Windows machines that re-checkout the repo.
+backend/migrations/*.sql text eol=lf
