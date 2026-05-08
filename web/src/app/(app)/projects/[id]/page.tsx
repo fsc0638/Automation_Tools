@@ -39,9 +39,12 @@ import {
 import {
   conversations as convsApi,
   createWsConnection,
+  agentProfiles as agentProfilesApi,
   feedback as feedbackApi,
   projects as projectsApi,
   tasks as tasksApi,
+  type AgentProfile,
+  type ChatMode,
   type AgentMode,
   type Conversation,
   type FileNode,
@@ -94,6 +97,7 @@ const QUICK_ACTIONS: Array<{ key: QuickAction; labelKey: string; icon: typeof Ac
   },
 ];
 
+
 const MODE_LABELS: Record<AgentMode, string> = {
   openclaw: "OpenClaw",
   hermes: "Hermes",
@@ -105,6 +109,30 @@ const MODE_STYLES: Record<AgentMode, string> = {
   hermes: "bg-violet-50 text-[#7C3AED] border border-[#DDD6FE]",
   debate: "bg-amber-50 text-[#B45309] border border-[#FDE68A]",
 };
+
+function isCoreAgentMode(value: ChatMode): value is AgentMode {
+  return value === "openclaw" || value === "hermes" || value === "debate";
+}
+
+function modeLabel(value: ChatMode, profiles: AgentProfile[] = [], t?: (key: string) => string) {
+  if (isCoreAgentMode(value)) {
+    if (t) {
+      if (value === "openclaw") return t("chat.modeOpenClaw");
+      if (value === "hermes") return t("chat.modeHermes");
+      return t("chat.modeDebate");
+    }
+    return MODE_LABELS[value];
+  }
+  if (value.startsWith("agents:")) return t ? t("chat.modeCustomDebate") : "Custom Debate";
+  const id = value.startsWith("agent:") ? value.slice("agent:".length) : "";
+  return profiles.find((profile) => profile.id === id)?.name ?? (t ? t("chat.modeCustomAgent") : "Custom Agent");
+}
+
+function modeStyle(value: ChatMode) {
+  if (isCoreAgentMode(value)) return MODE_STYLES[value];
+  if (value.startsWith("agents:")) return "bg-teal-50 text-teal-700 border border-teal-200";
+  return "bg-emerald-50 text-emerald-700 border border-emerald-200";
+}
 
 type StreamStatus = {
   agent: string;
@@ -173,10 +201,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const router = useRouter();
   const pushToast = useToastStore((state) => state.pushToast);
   const t = useT();
-  const modeLabel = (m: AgentMode): string =>
-    m === "openclaw" ? t("chat.modeOpenClaw")
-    : m === "hermes" ? t("chat.modeHermes")
-    : t("chat.modeDebate");
   const setShowAppSidebar = useWorkspaceChromeStore((state) => state.setShowAppSidebar);
 
   const [project, setProject] = useState<Project | null>(null);
@@ -185,10 +209,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [switchingBranch, setSwitchingBranch] = useState(false);
   const [convs, setConvs] = useState<Conversation[]>([]);
+  const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [mode, setMode] = useState<AgentMode>("openclaw");
+  const [mode, setMode] = useState<ChatMode>("openclaw");
   const [streaming, setStreaming] = useState(false);
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
   const [streamStatuses, setStreamStatuses] = useState<Record<string, StreamStatus>>({});
@@ -396,7 +421,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     let cancelled = false;
     (async () => {
       const p = await projectsApi.get(id);
-      const [files, branchData, status] = await Promise.all([
+      const [files, branchData, status, profiles] = await Promise.all([
         projectsApi.fileTree(id).catch(() => []),
         p.source_type === "git"
           ? projectsApi.gitBranches(id).catch(() => ({ branches: [] }))
@@ -404,12 +429,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         p.source_type === "git"
           ? projectsApi.gitStatus(id).catch(() => null)
           : Promise.resolve(null),
+        agentProfilesApi.list().catch(() => []),
       ]);
       if (cancelled) return;
       setProject(p);
       setFileTree(files);
       setBranches(branchData.branches);
       setGitStatus(status);
+      setAgentProfiles(profiles.filter((profile) => profile.enabled));
     })();
     return () => { cancelled = true; };
   }, [id]);
@@ -601,12 +628,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   }
 
   async function newConv() {
-    const conv = await convsApi.create(id, `${MODE_LABELS[mode]} Conversation ${convs.length + 1}`, mode);
+    const selectedMode = mode;
+    const createMode = isCoreAgentMode(selectedMode) ? selectedMode : "openclaw";
+    const conv = await convsApi.create(id, `${modeLabel(selectedMode, agentProfiles, t)} Conversation ${convs.length + 1}`, createMode);
     setConvs((cs) => [conv, ...cs]);
     setMessages([]);
     setActiveConv(conv);
-    setMode(conv.mode);
-    pushToast({ tone: "success", title: "Conversation created", description: `${MODE_LABELS[conv.mode]} is ready for the next turn.` });
+    setMode(selectedMode);
+    pushToast({ tone: "success", title: "Conversation created", description: `${modeLabel(selectedMode, agentProfiles, t)} is ready for the next turn.` });
   }
 
   async function refreshProject() {
@@ -780,7 +809,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-xl font-semibold text-[#1A1A2E]">{project?.name ?? t("project.workspace")}</h1>
                 {project && <StatusPill>{project.source_type === "git" ? t("project.gitRepository") : project.source_type === "upload" ? t("project.uploadProject") : t("project.localFolder")}</StatusPill>}
-                <StatusPill className={MODE_STYLES[mode]}>{modeLabel(mode)}</StatusPill>
+                <StatusPill className={modeStyle(mode)}>{modeLabel(mode, agentProfiles, t)}</StatusPill>
                 {focusMode && <StatusPill className="bg-[#EAF2FF] text-[#0050A0]">{t("chat.focusMode")}</StatusPill>}
               </div>
               <p className="mt-1 text-sm text-[#64748B]">
@@ -821,7 +850,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             <OverviewCard label={t("project.currentBranch")} value={project?.default_branch ?? "—"} icon={<GitBranch size={14} />} />
             <OverviewCard label={t("project.conversations")} value={String(convs.length)} icon={<MessageSquarePlus size={14} />} />
             <OverviewCard label={t("project.dirtyFiles")} value={String(dirtyCount)} icon={<File size={14} />} tone={dirtyCount > 0 ? "warning" : "default"} />
-            <OverviewCard label={t("project.mode")} value={modeLabel(mode)} icon={<Sparkles size={14} />} />
+            <OverviewCard label={t("project.mode")} value={modeLabel(mode, agentProfiles, t)} icon={<Sparkles size={14} />} />
             <OverviewCard label={t("project.selectedFile")} value={selectedFilePath ? selectedFilePath.split("/").pop() ?? selectedFilePath : "—"} icon={<FolderOpen size={14} />} />
             <OverviewCard label={t("project.lastUpdate")} value={project ? formatDate(project.updated_at) : "—"} icon={<Clock3 size={14} />} />
           </div>
@@ -987,7 +1016,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </Button>
                     )}
                     <h2 className="truncate text-sm font-semibold text-[#1A1A2E]">{activeConv?.title ?? t("chat.placeholderEmpty")}</h2>
-                    {activeConv && <StatusPill className={MODE_STYLES[activeConv.mode]}>{modeLabel(activeConv.mode)}</StatusPill>}
+                    {activeConv && <StatusPill className={modeStyle(activeConv.mode)}>{modeLabel(activeConv.mode, agentProfiles, t)}</StatusPill>}
                     {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">{t("chat.streaming")}</StatusPill>}
                   </div>
                   <p className="mt-1 text-xs text-[#64748B]">
@@ -1047,6 +1076,48 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </span>
                     </button>
                   ))}
+                  {agentProfiles.map((profile) => {
+                    const candidate = `agent:${profile.id}` as ChatMode;
+                    return (
+                      <button
+                        key={profile.id}
+                        onClick={() => setMode(candidate)}
+                        className={cn(
+                          "rounded-xl px-3 py-2 text-xs font-medium transition",
+                          mode === candidate
+                            ? modeStyle(candidate)
+                            : "border border-[#E2E8F0] bg-white text-[#64748B] hover:border-emerald-200 hover:text-emerald-700"
+                        )}
+                        title={`${profile.provider} / ${profile.model}`}
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <Sparkles size={12} />
+                          {profile.name}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {agentProfiles.length >= 2 && (() => {
+                    const candidate = `agents:${agentProfiles.slice(0, 4).map((profile) => profile.id).join(",")}` as ChatMode;
+                    return (
+                      <button
+                        key="custom-debate"
+                        onClick={() => setMode(candidate)}
+                        className={cn(
+                          "rounded-xl px-3 py-2 text-xs font-medium transition",
+                          mode === candidate
+                            ? modeStyle(candidate)
+                            : "border border-[#E2E8F0] bg-white text-[#64748B] hover:border-teal-200 hover:text-teal-700"
+                        )}
+                        title="Run the first 2–4 enabled custom agents as a debate"
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <Zap size={12} />
+                          Custom Debate
+                        </span>
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -1180,7 +1251,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           <div className="border-t border-[#E2E8F0] bg-white/92 px-5 py-3 shadow-[0_-10px_30px_rgba(15,23,42,0.04)] backdrop-blur-sm">
             <form onSubmit={handleSubmit} className="mx-auto w-full max-w-5xl space-y-3">
               <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
-                <span className={cn("rounded-full px-2.5 py-1", MODE_STYLES[mode])}>{MODE_LABELS[mode]}</span>
+                <span className={cn("rounded-full px-2.5 py-1", modeStyle(mode))}>{modeLabel(mode, agentProfiles, t)}</span>
                 {selectedFilePath ? (
                   <button
                     type="button"

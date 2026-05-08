@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Bot, FolderOpen, LogOut, Sparkles } from "lucide-react";
+import { Bot, FolderOpen, LogOut, Sparkles, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { useT } from "@/lib/i18n";
@@ -19,6 +19,12 @@ export function Sidebar() {
       label: t("sidebar.projects"),
       description: t("sidebar.projectsDesc"),
       icon: FolderOpen,
+    },
+    {
+      href: "/agents",
+      label: t("sidebar.agents"),
+      description: t("sidebar.agentsDesc"),
+      icon: UserCog,
     },
   ];
 

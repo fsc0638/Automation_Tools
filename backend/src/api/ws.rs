@@ -14,14 +14,17 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::{
-    agents::orchestrator::{build_project_scope, run_agent_stream, AgentMode, ServerEvent},
+    agents::{
+        generic::AgentProfileRuntime,
+        orchestrator::{build_project_scope, run_agent_stream, AgentMode, ServerEvent},
+    },
     api::{
         auth::verify_token,
         conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
         project_index::relevant_file_context,
         AppState,
     },
-    db::models::Project,
+    db::models::{AgentProfile, Project},
     error::AppError,
 };
 
@@ -69,10 +72,10 @@ async fn ws_handler(
         return Err(AppError::NotFound("Conversation not found".into()));
     }
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, query)))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, query, user_id)))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
+async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
 
     let project: Project = match sqlx::query_as("SELECT * FROM projects WHERE id = $1")
@@ -150,7 +153,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             .execute(&state.db)
             .await;
 
-        let agent_mode = agent_mode_from_str(mode.as_deref());
+        let agent_mode = match agent_mode_from_str(&state, user_id, mode.as_deref()).await {
+            Ok(mode) => mode,
+            Err(error) => {
+                let error = ServerEvent::Error { message: error.to_string() };
+                let _ = sender
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&error).unwrap_or_default().into(),
+                    ))
+                    .await;
+                continue;
+            }
+        };
         let mut project_scope = base_project_scope.clone();
         project_scope.relevant_file_context =
             relevant_file_context(&state.db, query.project_id, &content)
@@ -272,12 +286,63 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     }
 }
 
-fn agent_mode_from_str(mode: Option<&str>) -> AgentMode {
-    match mode {
+async fn agent_mode_from_str(state: &AppState, user_id: Uuid, mode: Option<&str>) -> Result<AgentMode, AppError> {
+    let mode = match mode {
         Some("hermes") => AgentMode::HermesOnly,
         Some("debate") => AgentMode::Debate,
+        Some(value) if value.starts_with("agents:") => {
+            let ids = value
+                .trim_start_matches("agents:")
+                .split(',')
+                .filter_map(|raw| Uuid::parse_str(raw.trim()).ok())
+                .take(4)
+                .collect::<Vec<_>>();
+            if ids.len() < 2 {
+                return Err(AppError::BadRequest("Custom debate requires at least 2 agent profiles".into()));
+            }
+            let mut profiles = Vec::new();
+            for id in ids {
+                profiles.push(load_agent_profile_runtime(state, user_id, id).await?);
+            }
+            AgentMode::CustomDebate(profiles)
+        }
+        Some(value) if value.starts_with("agent:") => {
+            let id = value.trim_start_matches("agent:");
+            let profile_id = Uuid::parse_str(id)
+                .map_err(|_| AppError::BadRequest("Invalid agent profile id".into()))?;
+            AgentMode::Custom(load_agent_profile_runtime(state, user_id, profile_id).await?)
+        }
         _ => AgentMode::OpenClawOnly,
-    }
+    };
+    Ok(mode)
+}
+
+async fn load_agent_profile_runtime(
+    state: &AppState,
+    user_id: Uuid,
+    profile_id: Uuid,
+) -> Result<AgentProfileRuntime, AppError> {
+    let profile: AgentProfile = sqlx::query_as(
+        "SELECT * FROM agent_profiles WHERE id = $1 AND user_id = $2 AND enabled = TRUE",
+    )
+    .bind(profile_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Agent profile not found or disabled".into()))?;
+    let api_key = state
+        .cipher
+        .decrypt(&profile.api_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("agent key decrypt failed: {}", e)))?;
+    Ok(AgentProfileRuntime {
+        id: profile.id.to_string(),
+        name: profile.name,
+        provider: profile.provider,
+        model: profile.model,
+        base_url: profile.base_url,
+        role_prompt: profile.role_prompt,
+        api_key,
+    })
 }
 
 fn agent_role(agent: &str) -> &'static str {
@@ -310,6 +375,8 @@ fn mode_label(mode: &AgentMode) -> &'static str {
         AgentMode::OpenClawOnly => "openclaw",
         AgentMode::HermesOnly => "hermes",
         AgentMode::Debate => "debate",
+        AgentMode::Custom(_) => "custom_agent",
+        AgentMode::CustomDebate(_) => "custom_debate",
     }
 }
 

@@ -23,6 +23,7 @@ const STREAM_BATCH_BYTES: usize = 80;
 
 use crate::{
     agents::{
+        generic::{AgentProfileRuntime, GenericAgentClient},
         hermes::HermesClient,
         openclaw::{ChatMessage, OpenClawClient},
     },
@@ -73,6 +74,8 @@ pub enum AgentMode {
     HermesOnly,
     OpenClawOnly,
     Debate,
+    Custom(AgentProfileRuntime),
+    CustomDebate(Vec<AgentProfileRuntime>),
 }
 
 #[derive(Debug, Clone)]
@@ -1074,6 +1077,34 @@ pub async fn run_agent_turn(
             let reply = run_agent(&openclaw, &hermes, DebateAgent::Hermes, chat).await?;
             results.push(("hermes".into(), reply, Some("Hermes".into())));
         }
+        AgentMode::Custom(profile) => {
+            let display_name = profile.name.clone();
+            let reply = GenericAgentClient::new(profile).chat(chat).await?;
+            results.push(("openclaw".into(), reply, Some(display_name)));
+        }
+        AgentMode::CustomDebate(profiles) => {
+            let mut turns: Vec<(String, String)> = Vec::new();
+            for profile in profiles.iter().take(4).cloned() {
+                let mut ctx = chat.clone();
+                for (name, reply) in &turns {
+                    ctx.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: format!("[{name}]: {reply}"),
+                    });
+                }
+                ctx.push(ChatMessage {
+                    role: "user".into(),
+                    content: format!(
+                        "{}: 這是多 Agent Debate。請針對目前使用者問題提出獨立觀點，必要時挑戰前面 Agent，引用檔案證據，不要硬製造分歧。",
+                        profile.name
+                    ),
+                });
+                let display_name = profile.name.clone();
+                let reply = GenericAgentClient::new(profile).chat(ctx).await?;
+                turns.push((display_name.clone(), reply.clone()));
+                results.push(("openclaw".into(), reply, Some(display_name)));
+            }
+        }
         AgentMode::Debate => {
             let intent = classify_debate_intent(user_message);
             match intent {
@@ -1214,6 +1245,126 @@ pub fn run_agent_stream(
                     }
                 }
                 yield ServerEvent::Done { agent: "Hermes".into(), round: None, phase: None };
+            }
+            AgentMode::Custom(profile) => {
+                let agent_name = profile.name.clone();
+                let input_tokens = Some(estimate_chat_tokens(&chat));
+                yield ServerEvent::Status {
+                    agent: agent_name.clone(),
+                    message: format!("{} 正在整理問題與專案脈絡...", agent_name),
+                    round: None,
+                    phase: Some("thinking".into()),
+                    input_tokens,
+                };
+                let custom = GenericAgentClient::new(profile);
+                let mut stream = batch_chunks(custom.chat_stream(chat));
+                loop {
+                    match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                            agent: agent_name.clone(), content: chunk, round: None, phase: None,
+                        },
+                        Ok(None) => break,
+                        Err(_) => {
+                            yield ServerEvent::Error { message: format!("{} stream timed out", agent_name) };
+                            return;
+                        }
+                    }
+                }
+                yield ServerEvent::Done { agent: agent_name, round: None, phase: None };
+            }
+            AgentMode::CustomDebate(profiles) => {
+                let mut turns: Vec<(String, String)> = Vec::new();
+                let profiles = profiles.into_iter().take(4).collect::<Vec<_>>();
+                for (idx, profile) in profiles.iter().cloned().enumerate() {
+                    let agent_name = profile.name.clone();
+                    let mut ctx = chat.clone();
+                    for (name, reply) in &turns {
+                        ctx.push(ChatMessage {
+                            role: "assistant".into(),
+                            content: format!("[{name}]: {reply}"),
+                        });
+                    }
+                    ctx.push(ChatMessage {
+                        role: "user".into(),
+                        content: format!(
+                            "{}: 這是多 Agent Debate 第 {} 位發言。請針對目前使用者問題提出獨立觀點，必要時挑戰前面 Agent，引用檔案證據，不要硬製造分歧。",
+                            agent_name,
+                            idx + 1
+                        ),
+                    });
+                    let input_tokens = Some(estimate_chat_tokens(&ctx));
+                    yield ServerEvent::Status {
+                        agent: agent_name.clone(),
+                        message: format!("{} 正在分析前面觀點並整理回覆...", agent_name),
+                        round: Some(idx + 1),
+                        phase: Some("round".into()),
+                        input_tokens,
+                    };
+                    let mut buffer = String::new();
+                    let custom = GenericAgentClient::new(profile);
+                    let mut stream = batch_chunks(custom.chat_stream(ctx));
+                    loop {
+                        match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                            Ok(Some(chunk)) => {
+                                buffer.push_str(&chunk);
+                                yield ServerEvent::Chunk {
+                                    agent: agent_name.clone(),
+                                    content: chunk,
+                                    round: Some(idx + 1),
+                                    phase: Some("round".into()),
+                                };
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                if buffer.trim().is_empty() {
+                                    yield ServerEvent::Error { message: format!("{} stream timed out", agent_name) };
+                                    return;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    yield ServerEvent::Done { agent: agent_name.clone(), round: Some(idx + 1), phase: Some("round".into()) };
+                    turns.push((agent_name, buffer));
+                }
+
+                if let Some(profile) = profiles.first().cloned() {
+                    let agent_name = profile.name.clone();
+                    let mut ctx = chat.clone();
+                    for (name, reply) in &turns {
+                        ctx.push(ChatMessage {
+                            role: "assistant".into(),
+                            content: format!("[{name}]: {reply}"),
+                        });
+                    }
+                    ctx.push(ChatMessage {
+                        role: "user".into(),
+                        content: "請綜合所有自訂 Agent 的觀點，產出最終結論：共識、分歧、建議方案、風險、下一步。不要假裝已修改程式。".into(),
+                    });
+                    let input_tokens = Some(estimate_chat_tokens(&ctx));
+                    yield ServerEvent::Status {
+                        agent: agent_name.clone(),
+                        message: format!("{} 正在彙整多 Agent 最終結論...", profile.name),
+                        round: None,
+                        phase: Some("final".into()),
+                        input_tokens,
+                    };
+                    let custom = GenericAgentClient::new(profile);
+                    let mut stream = batch_chunks(custom.chat_stream(ctx));
+                    loop {
+                        match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                            Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                                agent: agent_name.clone(), content: chunk, round: None, phase: Some("final".into()),
+                            },
+                            Ok(None) => break,
+                            Err(_) => {
+                                yield ServerEvent::Error { message: format!("{} stream timed out", agent_name) };
+                                return;
+                            }
+                        }
+                    }
+                    yield ServerEvent::Done { agent: agent_name, round: None, phase: Some("final".into()) };
+                }
             }
             AgentMode::Debate => {
                 let intent = classify_debate_intent(&current_topic);

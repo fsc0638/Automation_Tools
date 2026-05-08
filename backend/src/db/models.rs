@@ -42,6 +42,22 @@ pub struct GitIdentity {
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct AgentProfile {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub role_prompt: String,
+    #[serde(skip_serializing)]
+    pub api_key: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct Conversation {
     pub id: Uuid,
     pub project_id: Uuid,
