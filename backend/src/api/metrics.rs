@@ -15,7 +15,9 @@ use crate::{
 };
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/projects/:id/metrics/summary", get(metrics_summary))
+    Router::new()
+        .route("/projects/:id/metrics/summary", get(metrics_summary))
+        .route("/projects/:id/metrics/cost", get(metrics_cost))
 }
 
 #[derive(Debug, Serialize)]
@@ -202,5 +204,122 @@ async fn metrics_summary(
             "with_citation": citation_with,
             "rate": citation_rate,
         },
+    })))
+}
+
+async fn metrics_cost(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    verify_project_access(&state.db, project_id, auth_user.id).await?;
+    let db = &state.db;
+    let cfg = &state.config;
+
+    // Per-agent token totals over the past 30 days.
+    let agent_rows: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT agent, SUM(tokens_out)::bigint, COUNT(*)
+         FROM agent_usage_events
+         WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
+         GROUP BY agent",
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+
+    // Per-mode token totals over the past 30 days.
+    let mode_rows: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT mode, SUM(tokens_out)::bigint, COUNT(*)
+         FROM agent_usage_events
+         WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
+         GROUP BY mode",
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+
+    // Daily breakdown for trend chart.
+    let daily_rows: Vec<(chrono::DateTime<chrono::Utc>, String, Option<i64>)> = sqlx::query_as(
+        "SELECT date_trunc('day', created_at) AS day, agent, SUM(tokens_out)::bigint
+         FROM agent_usage_events
+         WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
+         GROUP BY day, agent
+         ORDER BY day",
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+
+    // Estimate cost: tokens_in is currently NULL (Phase 2 doesn't record input
+    // tokens accurately yet), so we use output-token pricing only and surface
+    // the limitation to the client.
+    let price_for = |agent: &str| -> (f64, f64) {
+        if agent == "hermes" {
+            (cfg.hermes_price_per_1k_in, cfg.hermes_price_per_1k_out)
+        } else {
+            (cfg.openclaw_price_per_1k_in, cfg.openclaw_price_per_1k_out)
+        }
+    };
+
+    let mut total_cost = 0.0_f64;
+    let by_agent: Vec<serde_json::Value> = agent_rows
+        .into_iter()
+        .map(|(agent, tokens_out, calls)| {
+            let tokens = tokens_out.unwrap_or(0);
+            let (_in_p, out_p) = price_for(&agent);
+            let cost = (tokens as f64 / 1000.0) * out_p;
+            total_cost += cost;
+            json!({
+                "agent": agent,
+                "tokens_out": tokens,
+                "calls": calls,
+                "cost_usd": cost,
+            })
+        })
+        .collect();
+
+    let by_mode: Vec<serde_json::Value> = mode_rows
+        .into_iter()
+        .map(|(mode, tokens_out, calls)| {
+            let tokens = tokens_out.unwrap_or(0);
+            // Mode rows mix agents, so use OpenClaw price as a proxy. Replace
+            // with per-row breakdown in Phase 6 if needed.
+            let cost = (tokens as f64 / 1000.0) * cfg.openclaw_price_per_1k_out;
+            json!({
+                "mode": mode,
+                "tokens_out": tokens,
+                "calls": calls,
+                "cost_usd": cost,
+            })
+        })
+        .collect();
+
+    let daily: Vec<serde_json::Value> = daily_rows
+        .into_iter()
+        .map(|(day, agent, tokens_out)| {
+            let tokens = tokens_out.unwrap_or(0);
+            let (_in_p, out_p) = price_for(&agent);
+            let cost = (tokens as f64 / 1000.0) * out_p;
+            json!({
+                "day": day.format("%Y-%m-%d").to_string(),
+                "agent": agent,
+                "tokens_out": tokens,
+                "cost_usd": cost,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "by_agent": by_agent,
+        "by_mode": by_mode,
+        "daily": daily,
+        "total_cost_usd": total_cost,
+        "pricing": {
+            "openclaw_per_1k_in": cfg.openclaw_price_per_1k_in,
+            "openclaw_per_1k_out": cfg.openclaw_price_per_1k_out,
+            "hermes_per_1k_in": cfg.hermes_price_per_1k_in,
+            "hermes_per_1k_out": cfg.hermes_price_per_1k_out,
+        },
+        "note": "Output tokens only; input token billing not yet recorded.",
     })))
 }

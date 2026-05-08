@@ -95,6 +95,8 @@ export const projects = {
     request<{ indexed_files: number }>(`/projects/${id}/index`, { method: "POST" }),
   metricsSummary: (id: string) =>
     request<MetricsSummary>(`/projects/${id}/metrics/summary`),
+  metricsCost: (id: string) =>
+    request<MetricsCost>(`/projects/${id}/metrics/cost`),
   remoteBranches: (url: string, git_identity_id?: string) =>
     request<{ branches: string[] }>("/git/remote-branches", {
       method: "POST",
@@ -219,6 +221,20 @@ export interface Message {
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
+}
+
+export interface MetricsCost {
+  by_agent: Array<{ agent: string; tokens_out: number; calls: number; cost_usd: number }>;
+  by_mode: Array<{ mode: string; tokens_out: number; calls: number; cost_usd: number }>;
+  daily: Array<{ day: string; agent: string; tokens_out: number; cost_usd: number }>;
+  total_cost_usd: number;
+  pricing: {
+    openclaw_per_1k_in: number;
+    openclaw_per_1k_out: number;
+    hermes_per_1k_in: number;
+    hermes_per_1k_out: number;
+  };
+  note: string;
 }
 
 export interface MetricsSummary {

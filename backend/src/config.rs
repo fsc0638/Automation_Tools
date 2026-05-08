@@ -1,5 +1,9 @@
 use anyhow::Result;
 
+fn env_f64(key: &str, fallback: f64) -> f64 {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
@@ -17,6 +21,10 @@ pub struct Config {
     pub server_host: String,
     pub server_port: u16,
     pub project_data_root: String,
+    pub openclaw_price_per_1k_in: f64,
+    pub openclaw_price_per_1k_out: f64,
+    pub hermes_price_per_1k_in: f64,
+    pub hermes_price_per_1k_out: f64,
 }
 
 impl Config {
@@ -63,6 +71,12 @@ impl Config {
                 .trim_end_matches('/')
                 .trim_end_matches('\\')
                 .to_string(),
+            // Defaults reflect rough OpenAI gpt-4o-mini pricing tier; tune per
+            // your actual gateway / model in .env to get accurate Cost panels.
+            openclaw_price_per_1k_in: env_f64("OPENCLAW_PRICE_PER_1K_INPUT", 0.15),
+            openclaw_price_per_1k_out: env_f64("OPENCLAW_PRICE_PER_1K_OUTPUT", 0.60),
+            hermes_price_per_1k_in: env_f64("HERMES_PRICE_PER_1K_INPUT", 0.15),
+            hermes_price_per_1k_out: env_f64("HERMES_PRICE_PER_1K_OUTPUT", 0.60),
         })
     }
 }
