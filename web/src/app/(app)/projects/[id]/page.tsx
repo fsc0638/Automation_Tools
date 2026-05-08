@@ -562,8 +562,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     if (scrollRafRef.current !== null) return;
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
+      // Scroll only the messages region — never call scrollIntoView, which
+      // would walk up the DOM and scroll the outer <main>, pushing the
+      // project header out of view.
+      const el = messagesScrollRef.current;
+      if (!el) return;
       const behavior: ScrollBehavior = streaming ? "auto" : "smooth";
-      bottomRef.current?.scrollIntoView({ behavior });
+      el.scrollTo({ top: el.scrollHeight, behavior });
     });
     return () => {
       if (scrollRafRef.current !== null) {
@@ -591,7 +596,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   function jumpToBottom() {
     shouldAutoScrollRef.current = true;
     setShowJumpToBottom(false);
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = messagesScrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }
 
   async function newConv() {
@@ -864,8 +870,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       {projectTab === "workspace" && (
       <div className="flex min-h-0 flex-1 bg-[#F8FAFC]">
         {showConversationRail && !focusMode && (
-        <aside className="w-[280px] flex-shrink-0 border-r border-[#E2E8F0] bg-white">
-          <div className="border-b border-[#E2E8F0] px-4 py-4">
+        <aside className="flex w-[280px] flex-shrink-0 flex-col border-r border-[#E2E8F0] bg-white">
+          <div className="flex-shrink-0 border-b border-[#E2E8F0] px-4 py-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">{t("convList.title")}</p>
@@ -901,7 +907,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </div>
           </div>
 
-          <div className="h-[calc(100%-113px)] overflow-auto px-2 py-2">
+          <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
             {!project ? (
               <div className="space-y-2 px-2 py-2">
                 <SkeletonBlock className="h-[88px] w-full" />
@@ -1265,8 +1271,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         </main>
 
         {showContextRail && !focusMode && (
-        <aside className="w-[320px] flex-shrink-0 border-l border-[#E2E8F0] bg-white xl:flex xl:flex-col">
-          <div className="border-b border-[#E2E8F0] px-4 py-4">
+        <aside className="flex w-[320px] flex-shrink-0 flex-col border-l border-[#E2E8F0] bg-white">
+          <div className="flex-shrink-0 border-b border-[#E2E8F0] px-4 py-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">{t("context.title")}</p>
