@@ -10,6 +10,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::{
@@ -157,6 +158,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                 .ok()
                 .flatten();
 
+        let mode_label = mode_label(&agent_mode);
         let mut stream = run_agent_stream(
             &state.config,
             &project_scope,
@@ -166,10 +168,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             agent_mode,
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
+        let mut timing: HashMap<String, AgentCallTiming> = HashMap::new();
 
         while let Some(event) = stream.next().await {
             match &event {
-                ServerEvent::Status { .. } => {}
+                ServerEvent::Status {
+                    agent,
+                    round,
+                    phase,
+                    ..
+                } => {
+                    // Status fires before chunks; treat it as the call's start.
+                    let key = event_key(agent, *round, phase.as_deref());
+                    timing.entry(key).or_insert_with(AgentCallTiming::new);
+                }
                 ServerEvent::Chunk {
                     agent,
                     content,
@@ -177,6 +189,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                     phase,
                 } => {
                     let key = event_key(agent, *round, phase.as_deref());
+                    let entry = timing
+                        .entry(key.clone())
+                        .or_insert_with(AgentCallTiming::new);
+                    if entry.first_chunk_at.is_none() {
+                        entry.first_chunk_at = Some(Instant::now());
+                    }
                     buffers.entry(key).or_default().push_str(content);
                 }
                 ServerEvent::Done {
@@ -185,26 +203,44 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                     phase,
                 } => {
                     let key = event_key(agent, *round, phase.as_deref());
+                    let call_timing = timing.remove(&key);
                     if let Some(content) = buffers.remove(&key) {
                         if !content.trim().is_empty() {
                             let role = agent_role(agent);
                             let display_name = display_agent_name(agent, *round, phase.as_deref());
-                            let _ = sqlx::query(
+                            let saved_id: Option<(Uuid,)> = sqlx::query_as(
                                 "INSERT INTO messages (conversation_id, role, content, agent_name)
-                                 VALUES ($1, $2, $3, $4)",
+                                 VALUES ($1, $2, $3, $4) RETURNING id",
                             )
                             .bind(query.conversation_id)
                             .bind(role)
                             .bind(&content)
                             .bind(&display_name)
-                            .execute(&state.db)
-                            .await;
+                            .fetch_optional(&state.db)
+                            .await
+                            .ok()
+                            .flatten();
 
                             let _ = sqlx::query(
                                 "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
                             )
                             .bind(query.conversation_id)
                             .execute(&state.db)
+                            .await;
+
+                            // Phase 0 telemetry: record one usage event per agent call.
+                            record_usage_event(
+                                &state.db,
+                                query.project_id,
+                                query.conversation_id,
+                                saved_id.map(|(id,)| id),
+                                role,
+                                mode_label,
+                                phase.as_deref(),
+                                *round,
+                                call_timing.as_ref(),
+                                &content,
+                            )
                             .await;
                         }
                     }
@@ -262,4 +298,109 @@ fn display_agent_name(agent: &str, round: Option<usize>, phase: Option<&str>) ->
         (Some("final"), _) => format!("{agent} · Final"),
         _ => agent.to_string(),
     }
+}
+
+fn mode_label(mode: &AgentMode) -> &'static str {
+    match mode {
+        AgentMode::OpenClawOnly => "openclaw",
+        AgentMode::HermesOnly => "hermes",
+        AgentMode::Debate => "debate",
+    }
+}
+
+struct AgentCallTiming {
+    started_at: Instant,
+    first_chunk_at: Option<Instant>,
+}
+
+impl AgentCallTiming {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            first_chunk_at: None,
+        }
+    }
+}
+
+/// Rough output-token estimate. CJK characters ≈ 1 token each, ASCII ≈ 1/4 token.
+/// Replaced with tiktoken-rs in Phase 2 for accuracy.
+fn estimate_output_tokens(content: &str) -> i32 {
+    let mut cjk: usize = 0;
+    let mut other: usize = 0;
+    for c in content.chars() {
+        if (c as u32) > 0x2E80 {
+            cjk += 1;
+        } else {
+            other += 1;
+        }
+    }
+    (cjk + other / 4) as i32
+}
+
+fn detect_consensus_marker(content: &str) -> bool {
+    content.contains("<!-- consensus:reached -->")
+}
+
+/// Detects mentions of a project file path like `src/foo.rs` or `Cargo.toml`.
+/// Conservative on extensions to avoid false positives from prose.
+fn detect_file_citation(content: &str) -> bool {
+    static EXTS: &[&str] = &[
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".sql", ".toml",
+        ".json", ".yaml", ".yml", ".swift", ".kt", ".java", ".go", ".html",
+        ".css",
+    ];
+    let lower = content.to_lowercase();
+    EXTS.iter().any(|ext| lower.contains(ext))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_usage_event(
+    db: &sqlx::PgPool,
+    project_id: Uuid,
+    conversation_id: Uuid,
+    message_id: Option<Uuid>,
+    agent_role: &str,
+    mode: &str,
+    phase: Option<&str>,
+    round: Option<usize>,
+    timing: Option<&AgentCallTiming>,
+    content: &str,
+) {
+    let (ttft_ms, total_ms) = match timing {
+        Some(t) => {
+            let now = Instant::now();
+            let ttft = t
+                .first_chunk_at
+                .map(|c| c.duration_since(t.started_at).as_millis() as i32);
+            let total = now.duration_since(t.started_at).as_millis() as i32;
+            (ttft, Some(total))
+        }
+        None => (None, None),
+    };
+
+    let chars_out = content.chars().count() as i32;
+    let tokens_out = estimate_output_tokens(content);
+
+    let _ = sqlx::query(
+        "INSERT INTO agent_usage_events (
+             project_id, conversation_id, message_id, agent, mode, phase,
+             round_number, ttft_ms, total_ms, tokens_out, chars_out,
+             has_consensus_marker, has_file_citation
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+    )
+    .bind(project_id)
+    .bind(conversation_id)
+    .bind(message_id)
+    .bind(agent_role)
+    .bind(mode)
+    .bind(phase)
+    .bind(round.map(|r| r as i32))
+    .bind(ttft_ms)
+    .bind(total_ms)
+    .bind(tokens_out)
+    .bind(chars_out)
+    .bind(detect_consensus_marker(content))
+    .bind(detect_file_citation(content))
+    .execute(db)
+    .await;
 }
