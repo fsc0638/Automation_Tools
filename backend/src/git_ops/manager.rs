@@ -69,18 +69,93 @@ fn embed_credentials_in_url(url: &str, creds: &GitCredentials) -> String {
 }
 
 pub fn list_branches(repo_path: &str) -> Result<Vec<String>> {
+    use std::collections::BTreeSet;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow!("Not a git repository: {}", e))?;
 
-    let mut branches = vec![];
+    let mut names: BTreeSet<String> = BTreeSet::new();
+
     for branch in repo.branches(Some(git2::BranchType::Local))? {
-        let (branch, _) = branch?;
-        if let Some(name) = branch.name()? {
-            branches.push(name.to_string());
+        let (b, _) = branch?;
+        if let Some(name) = b.name()? {
+            names.insert(name.to_string());
         }
     }
-    branches.sort();
-    Ok(branches)
+
+    // Include remote tracking branches under origin/* so the dropdown
+    // surfaces branches that exist remotely but haven't been checked out
+    // locally yet. checkout_branch already creates the local copy on demand.
+    for branch in repo.branches(Some(git2::BranchType::Remote))? {
+        let (b, _) = branch?;
+        if let Some(full_name) = b.name()? {
+            if let Some(short) = full_name.strip_prefix("origin/") {
+                if short != "HEAD" {
+                    names.insert(short.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(names.into_iter().collect())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SyncResult {
+    AlreadyUpToDate,
+    FastForwarded,
+    NoRemoteBranch,
+}
+
+/// Fetch from origin and fast-forward the current branch to its remote
+/// tracking ref. Errors out (without modifying state) when the local branch
+/// has diverged — this is `git pull --ff-only` semantics on purpose.
+pub fn sync_current_branch(
+    repo_path: &str,
+    credentials: Option<&GitCredentials>,
+) -> Result<SyncResult> {
+    let repo = Repository::open(repo_path)
+        .map_err(|e| anyhow!("Not a git repository: {}", e))?;
+
+    fetch_remote(repo_path, credentials)?;
+
+    let head = repo.head()?;
+    let branch_name = head
+        .shorthand()
+        .ok_or_else(|| anyhow!("HEAD is detached; check out a branch first"))?
+        .to_string();
+
+    let remote_refname = format!("refs/remotes/origin/{}", branch_name);
+    let remote_ref = match repo.find_reference(&remote_refname) {
+        Ok(r) => r,
+        Err(_) => return Ok(SyncResult::NoRemoteBranch),
+    };
+    let remote_oid = remote_ref
+        .target()
+        .ok_or_else(|| anyhow!("remote ref has no target"))?;
+
+    let annotated = repo.find_annotated_commit(remote_oid)?;
+    let (analysis, _) = repo.merge_analysis(&[&annotated])?;
+
+    if analysis.is_up_to_date() {
+        return Ok(SyncResult::AlreadyUpToDate);
+    }
+
+    if analysis.is_fast_forward() {
+        let local_refname = format!("refs/heads/{}", branch_name);
+        let mut reference = repo.find_reference(&local_refname)?;
+        reference.set_target(remote_oid, "Fast-forward via sync")?;
+        repo.set_head(&local_refname)?;
+        let mut checkout = git2::build::CheckoutBuilder::default();
+        checkout.force();
+        repo.checkout_head(Some(&mut checkout))?;
+        return Ok(SyncResult::FastForwarded);
+    }
+
+    Err(anyhow!(
+        "Local branch '{}' has diverged from origin; cannot fast-forward. \
+        Resolve manually (commit, stash, or switch branches).",
+        branch_name
+    ))
 }
 
 pub fn fetch_remote(repo_path: &str, credentials: Option<&GitCredentials>) -> Result<()> {

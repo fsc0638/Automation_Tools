@@ -14,7 +14,8 @@ use crate::{
     error::{AppError, AppResult},
     git_ops::manager::{
         checkout_branch, clone_repository, git_status, list_branches, list_files,
-        list_remote_branches, read_file_content, GitCredentials,
+        list_remote_branches, read_file_content, sync_current_branch, GitCredentials,
+        SyncResult,
     },
 };
 
@@ -56,6 +57,7 @@ pub fn routes() -> Router<AppState> {
         .route("/projects/:id/git/status", get(get_git_status))
         .route("/projects/:id/git/branches", get(get_git_branches))
         .route("/projects/:id/git/checkout", post(switch_git_branch))
+        .route("/projects/:id/git/sync", post(sync_git_repo))
         .route("/git/remote-branches", post(get_remote_branches))
 }
 
@@ -243,6 +245,36 @@ async fn switch_git_branch(
     .await?;
 
     Ok(Json(updated))
+}
+
+async fn sync_git_repo(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    let project = find_project(&state, id, auth_user.id).await?;
+    require_git_project(&project)?;
+    let root = project_root_path(&project);
+
+    let identity = match project.git_identity_id {
+        Some(identity_id) => Some(find_git_identity(&state, identity_id, auth_user.id).await?),
+        None => None,
+    };
+    let credentials = match identity.as_ref() {
+        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        None => None,
+    };
+
+    let result = sync_current_branch(&root, credentials.as_ref())
+        .map_err(|e| AppError::Git(e.to_string()))?;
+
+    let status = match result {
+        SyncResult::AlreadyUpToDate => "up-to-date",
+        SyncResult::FastForwarded => "fast-forwarded",
+        SyncResult::NoRemoteBranch => "no-remote-branch",
+    };
+
+    Ok(Json(serde_json::json!({ "status": status })))
 }
 
 async fn get_remote_branches(

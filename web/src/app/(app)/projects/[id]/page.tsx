@@ -55,6 +55,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [statusNow, setStatusNow] = useState(0);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState<string>("");
   const streamBuffersRef = useRef<Record<string, string>>({});
   const streamStatusesRef = useRef<Record<string, StreamStatus>>({});
   const wsRef = useRef<WebSocket | null>(null);
@@ -296,8 +297,27 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   async function refreshProject() {
     if (refreshing) return;
     setRefreshing(true);
+    setRefreshStatus("");
     try {
       const p = await projectsApi.get(id);
+      let syncMsg = "";
+      if (p.source_type === "git") {
+        // Fetch from origin and fast-forward the current branch. Best-effort:
+        // if the local branch has diverged, surface the message but still
+        // refresh the file tree / branch list afterwards.
+        try {
+          const sync = await projectsApi.gitSync(id);
+          syncMsg = sync.status === "fast-forwarded"
+            ? "Pulled latest from origin"
+            : sync.status === "up-to-date"
+              ? "Up to date"
+              : sync.status === "no-remote-branch"
+                ? "No matching remote branch"
+                : "";
+        } catch (err) {
+          syncMsg = err instanceof Error ? err.message : "Sync failed";
+        }
+      }
       const [files, branchData] = await Promise.all([
         projectsApi.fileTree(id).catch(() => []),
         p.source_type === "git"
@@ -307,6 +327,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       setProject(p);
       setFileTree(files);
       setBranches(branchData.branches);
+      if (syncMsg) {
+        setRefreshStatus(syncMsg);
+        setTimeout(() => setRefreshStatus(""), 3000);
+      }
     } finally {
       setRefreshing(false);
     }
@@ -434,12 +458,17 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               type="button"
               onClick={refreshProject}
               disabled={refreshing}
-              title={project?.source_type === "git" ? "Refresh files & Git status" : "Refresh files"}
+              title={project?.source_type === "git" ? "Fetch from origin + refresh files" : "Refresh files"}
               className="text-[#94A3B8] hover:text-[#0050A0] disabled:opacity-50"
             >
               <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
             </button>
           </div>
+          {refreshStatus && (
+            <div className="px-4 py-1 text-[11px] text-[#0050A0] bg-blue-50 border-b border-[#E0E7FF]">
+              {refreshStatus}
+            </div>
+          )}
           <div className="py-1">
             {fileTree.map((node) => <FileNodeItem key={node.path} node={node} depth={0} />)}
           </div>

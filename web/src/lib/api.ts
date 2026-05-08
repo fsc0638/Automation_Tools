@@ -67,6 +67,11 @@ export const projects = {
   gitBranches: (id: string) => request<{ branches: string[] }>(`/projects/${id}/git/branches`),
   checkoutBranch: (id: string, branch: string) =>
     request<Project>(`/projects/${id}/git/checkout`, { method: "POST", body: JSON.stringify({ branch }) }),
+  gitSync: (id: string) =>
+    request<{ status: "up-to-date" | "fast-forwarded" | "no-remote-branch" }>(
+      `/projects/${id}/git/sync`,
+      { method: "POST" },
+    ),
   remoteBranches: (url: string, git_identity_id?: string) =>
     request<{ branches: string[] }>("/git/remote-branches", {
       method: "POST",
