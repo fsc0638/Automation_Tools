@@ -77,6 +77,7 @@ pub struct ProjectScope {
     pub source_type: String,
     pub root: Option<String>,
     pub file_snapshot: Option<String>,
+    pub relevant_file_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +118,7 @@ impl DebateAgent {
 }
 
 pub fn build_project_scope(project: &Project) -> ProjectScope {
-    let root = if project.source_type == "git" {
+    let root = if project.source_type == "git" || project.source_type == "upload" {
         project
             .local_path
             .clone()
@@ -134,6 +135,7 @@ pub fn build_project_scope(project: &Project) -> ProjectScope {
         source_type: project.source_type.clone(),
         root: absolute_root.or(Some(root)),
         file_snapshot,
+        relevant_file_context: None,
     }
 }
 
@@ -269,10 +271,12 @@ fn project_scope_message(project: &ProjectScope) -> ChatMessage {
              Use ONLY this current project's conversation history and files as project-specific memory. \
              Never import assumptions, answers, file paths, bugs, architecture, or decisions from another project. \
              Cross-project sharing is allowed only for general agent skills, coding patterns, debate habits, and broad engineering knowledge. \
-             If the file snapshot below is missing or insufficient, explicitly say the project files are unavailable/insufficient. \
-             Do not invent architecture from the project name.\n\n{}",
+             If the file snapshot and indexed excerpts below are missing or insufficient, explicitly say the project files are unavailable/insufficient. \
+             When giving concrete recommendations, cite the most relevant file paths from the snapshot or indexed excerpts. \
+             Do not invent architecture from the project name.\n\n{}\n\n{}",
             project.id, project.name, project.source_type, root,
-            project.file_snapshot.as_deref().unwrap_or("[No project file snapshot available]")
+            project.file_snapshot.as_deref().unwrap_or("[No project file snapshot available]"),
+            project.relevant_file_context.as_deref().unwrap_or("[No indexed relevant file excerpts selected for this turn]")
         ),
     }
 }
@@ -548,6 +552,7 @@ fn debate_instruction(
              Do not drift into prior conversation topics, agent behavior rules, or project memories unless the current user question explicitly asks for them. \
              {final_rule} \
              Each round should feel like critical collaboration, not forced opposition: direct, sharp, and independent, but always evidence-based. \
+             Cite concrete file paths whenever a claim depends on project code; explicitly say when evidence is insufficient. \
              Do not play devil's advocate for its own sake. Only challenge when there is concrete evidence, missing evidence, a real risk, a wrong assumption, or a conflict with the user's requirement. \
              If there is no material disagreement, say so naturally, add only useful refinement, and move toward consensus. \
              No template labels like '共識狀態', '對 Hermes 的回應', or '對 OpenClaw 的回應' in visible text. \
@@ -571,7 +576,7 @@ fn debate_turn_instruction(
     let other = agent.other().name();
     let instruction = if is_first {
         format!(
-            "{}: You are the debate lead. Current user question/topic: '{}'. Reply in Traditional Chinese and answer that topic only. Do not acknowledge or summarize these debate instructions. Think independently and argue naturally, but do not force disagreement. Ground claims in project files/history, errors, commands, or explicit user requirements. If the situation is straightforward, move toward a concrete shared plan instead of inventing a fight. Use paragraphs and readable markdown, not a fixed template. Do not write visible labels like 共識狀態 or 對某某的回應. If genuine consensus is reached, append '<!-- consensus:reached -->' at the very end only.",
+            "{}: You are the debate lead. Current user question/topic: '{}'. Reply in Traditional Chinese and answer that topic only. Do not acknowledge or summarize these debate instructions. Think independently and argue naturally, but do not force disagreement. Ground claims in project files/history, errors, commands, or explicit user requirements, and cite file paths for code-based claims. If the situation is straightforward, move toward a concrete shared plan instead of inventing a fight. Use paragraphs and readable markdown, not a fixed template. Do not write visible labels like 共識狀態 or 對某某的回應. If genuine consensus is reached, append '<!-- consensus:reached -->' at the very end only.",
             agent.name(),
             user_message
         )
@@ -638,7 +643,7 @@ fn final_instruction(
     ChatMessage {
         role: "user".into(),
         content: format!(
-            "{}: Reply in Traditional Chinese. Produce the Final synthesis for the current user question only: '{}'. {code_rule} {consensus_rule} Do not summarize unrelated prior conversation topics, agent behavior rules, project memories, or yesterday's decisions unless the current question explicitly asks for them. Keep it readable and human, not a rigid form. Use concise sections only where they help: conclusion, evidence, decision, next steps, verification. Do not hide disagreement or call compromise consensus. Do not include invisible consensus markers in the Final.",
+            "{}: Reply in Traditional Chinese. Produce the Final synthesis for the current user question only: '{}'. {code_rule} {consensus_rule} Do not summarize unrelated prior conversation topics, agent behavior rules, project memories, or yesterday's decisions unless the current question explicitly asks for them. Keep it readable and human, not a rigid form. Use concise sections only where they help: conclusion, evidence with file paths, decision, next steps, verification. Do not hide disagreement or call compromise consensus. Do not include invisible consensus markers in the Final.",
             agent.name(),
             user_message
         ),

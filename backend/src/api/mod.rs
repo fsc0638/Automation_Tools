@@ -8,6 +8,7 @@ pub mod auth;
 pub mod conversation_memory;
 pub mod conversations;
 pub mod git_identities;
+pub mod project_index;
 pub mod projects;
 pub mod ws;
 

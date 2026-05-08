@@ -17,6 +17,7 @@ use crate::{
     api::{
         auth::verify_token,
         conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
+        project_index::relevant_file_context,
         AppState,
     },
     db::models::Project,
@@ -91,7 +92,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             return;
         }
     };
-    let project_scope = build_project_scope(&project);
+    let base_project_scope = build_project_scope(&project);
 
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
@@ -149,6 +150,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             .await;
 
         let agent_mode = agent_mode_from_str(mode.as_deref());
+        let mut project_scope = base_project_scope.clone();
+        project_scope.relevant_file_context =
+            relevant_file_context(&state.db, query.project_id, &content)
+                .await
+                .ok()
+                .flatten();
 
         let mut stream = run_agent_stream(
             &state.config,

@@ -8,7 +8,7 @@ name = "kway-dev-backend"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 serde = { version = "1", features = ["derive"] }
@@ -34,3 +34,4 @@ rand = "0.8"
 aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
+zip = "2"

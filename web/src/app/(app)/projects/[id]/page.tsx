@@ -6,7 +6,7 @@ import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
   MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
   Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, AlertCircle, ArrowDown,
-  RefreshCw, Trash2
+  RefreshCw, Trash2, Activity, Lightbulb, ListChecks, Code2
 } from "lucide-react";
 import {
   projects as projectsApi, conversations as convsApi,
@@ -35,6 +35,39 @@ type StreamStatus = {
   phase?: string;
   startedAt: number;
 };
+
+type QuickAction = "health" | "explore" | "roadmap" | "patch";
+
+const QUICK_ACTIONS: Array<{ key: QuickAction; label: string; icon: typeof Activity; prompt: string }> = [
+  {
+    key: "health",
+    label: "Health Scan",
+    icon: Activity,
+    prompt:
+      "請以 Debate Mode 執行專案初診。OpenClaw 從架構、系統風險、資料流與長期維護角度分析；Hermes 從實作成本、可讀性、日常維護、測試與快速改善角度分析。請根據已索引的專案檔案提出：1. 專案摘要 2. 技術棧與入口點 3. 主要風險 4. 可立即改善項目 5. 中長期優化方向 6. 測試/文件缺口。所有具體判斷都要引用檔案路徑作為依據；如果證據不足，明確說明。最後產生優先順序清楚的結論。",
+  },
+  {
+    key: "explore",
+    label: "Explore Ideas",
+    icon: Lightbulb,
+    prompt:
+      "請進入問題探索模式。不要只回答單一問題，請讓 OpenClaw / Hermes 主動碰撞這個專案可能值得改善、重構或產品化的方向。輸出：潛在問題、可驗證假設、使用者可能真正想解決的需求、創新功能想法、風險與取捨。每個建議都要盡可能引用已索引檔案路徑，並標示信心等級與下一步驗證方式。",
+  },
+  {
+    key: "roadmap",
+    label: "Roadmap",
+    icon: ListChecks,
+    prompt:
+      "請把目前專案可優化方向整理成可執行 Roadmap。請輸出任務清單，每個任務包含：title、priority、why、affected files、acceptance criteria、estimated effort、dependencies、建議由 OpenClaw 或 Hermes 主導。任務必須根據專案檔案與目前對話，不要憑空發明。",
+  },
+  {
+    key: "patch",
+    label: "Patch Plan",
+    icon: Code2,
+    prompt:
+      "請進入 Patch / PR 規劃模式。根據目前專案狀態，挑選最高價值且風險可控的一項改善，產生 patch-ready 計畫。請輸出：目標、受影響檔案、修改步驟、預期 diff 摘要、測試指令、回滾方案、PR 標題與描述。不要實際 commit 或 push；若證據不足，先列出需要讀取或確認的檔案。",
+  },
+];
 
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -324,9 +357,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           ? projectsApi.gitBranches(id).catch(() => ({ branches: [] }))
           : Promise.resolve({ branches: [] }),
       ]);
+      const indexResult = await projectsApi.reindex(id).catch(() => null);
       setProject(p);
       setFileTree(files);
       setBranches(branchData.branches);
+      if (indexResult) {
+        syncMsg = syncMsg ? `${syncMsg}; indexed ${indexResult.indexed_files} files` : `Indexed ${indexResult.indexed_files} files`;
+      }
       if (syncMsg) {
         setRefreshStatus(syncMsg);
         setTimeout(() => setRefreshStatus(""), 3000);
@@ -354,7 +391,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     }
   }
 
-  function sendViaWs(content: string) {
+  function sendViaWs(content: string, modeOverride: AgentMode = mode) {
     if (!activeConv) return;
     const ws = wsRef.current;
     const convId = activeConv.id;
@@ -374,7 +411,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       created_at: new Date().toISOString(),
     } as Message]);
 
-    const payload = JSON.stringify({ type: "message", content, mode });
+    const payload = JSON.stringify({ type: "message", content, mode: modeOverride });
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(payload);
     } else if (ws && ws.readyState === WebSocket.CONNECTING) {
@@ -442,6 +479,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       e.preventDefault();
       handleSubmit(e as unknown as React.FormEvent);
     }
+  }
+
+  function runQuickAction(action: QuickAction) {
+    if (!activeConv || streaming) return;
+    const selected = QUICK_ACTIONS.find((item) => item.key === action);
+    if (!selected) return;
+    sendViaWs(selected.prompt, "debate");
   }
 
   return (
@@ -563,6 +607,21 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           {mode === "debate" && (
             <span className="text-xs text-[#94A3B8] ml-2">Agents will challenge each other</span>
           )}
+          <div className="ml-auto flex items-center gap-1.5 border-l border-[#E2E8F0] pl-4">
+            {QUICK_ACTIONS.map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => runQuickAction(key)}
+                disabled={!activeConv || streaming}
+                title={`${label} with Debate Mode`}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-[#64748B] hover:bg-[#F1F5F9] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Icon size={12} />
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Messages */}
