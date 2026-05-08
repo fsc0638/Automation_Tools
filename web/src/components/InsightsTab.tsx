@@ -2,9 +2,10 @@
 import { useEffect, useState } from "react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
-  PieChart, Pie, Cell, Legend,
+  PieChart, Pie, Cell,
+  RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
 } from "recharts";
-import { projects as projectsApi, type MetricsSummary } from "@/lib/api";
+import { projects as projectsApi, type MetricsSummary, type MetricsHealth } from "@/lib/api";
 
 const MODE_COLORS: Record<string, string> = {
   openclaw: "#0050A0",
@@ -19,6 +20,7 @@ const AGENT_COLORS: Record<string, string> = {
 
 export function InsightsTab({ projectId }: { projectId: string }) {
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
+  const [health, setHealth] = useState<MetricsHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
 
@@ -26,8 +28,12 @@ export function InsightsTab({ projectId }: { projectId: string }) {
     setLoading(true);
     setError("");
     try {
-      const data = await projectsApi.metricsSummary(projectId);
-      setMetrics(data);
+      const [m, h] = await Promise.all([
+        projectsApi.metricsSummary(projectId),
+        projectsApi.metricsHealth(projectId).catch(() => null),
+      ]);
+      setMetrics(m);
+      setHealth(h);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load metrics");
     } finally {
@@ -58,6 +64,46 @@ export function InsightsTab({ projectId }: { projectId: string }) {
           Refresh
         </button>
       </div>
+
+      {health && (
+        <ChartCard title="Project Health Score" subtitle={`Composite score across 5 risk dimensions · ${health.indexed_files} indexed files`}>
+          <div className="flex flex-col md:flex-row items-center gap-6 pt-2">
+            <div className="flex flex-col items-center min-w-[140px]">
+              <div className={`text-5xl font-bold ${
+                health.score >= 80 ? "text-[#10B981]" : health.score >= 50 ? "text-[#F59E0B]" : "text-[#C8102E]"
+              }`}>{health.score}</div>
+              <div className="text-xs text-[#94A3B8] mt-1">/ 100</div>
+            </div>
+            <div className="flex-1 w-full">
+              <ResponsiveContainer width="100%" height={220}>
+                <RadarChart data={health.dimensions.map(d => ({ label: d.label, score: d.score }))}>
+                  <PolarGrid />
+                  <PolarAngleAxis dataKey="label" tick={{ fontSize: 11 }} />
+                  <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
+                  <Radar name="Score" dataKey="score" stroke="#0050A0" fill="#0050A0" fillOpacity={0.4} />
+                  <Tooltip />
+                </RadarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-2 mt-3 text-xs">
+            {health.dimensions.map((d) => (
+              <div key={d.key} className="rounded-md bg-[#F8FAFC] p-2">
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="font-medium text-[#1A1A2E]">{d.label}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                    d.level === "Low" ? "bg-green-100 text-green-700"
+                    : d.level === "Medium" ? "bg-yellow-100 text-yellow-700"
+                    : "bg-red-100 text-red-700"
+                  }`}>{d.level}</span>
+                </div>
+                <div className="text-base font-semibold text-[#0050A0]">{d.score}</div>
+                <div className="text-[10px] text-[#94A3B8] mt-0.5 line-clamp-2">{d.evidence}</div>
+              </div>
+            ))}
+          </div>
+        </ChartCard>
+      )}
 
       {/* KPI cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

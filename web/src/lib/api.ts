@@ -97,6 +97,8 @@ export const projects = {
     request<MetricsSummary>(`/projects/${id}/metrics/summary`),
   metricsCost: (id: string) =>
     request<MetricsCost>(`/projects/${id}/metrics/cost`),
+  metricsHealth: (id: string) =>
+    request<MetricsHealth>(`/projects/${id}/metrics/health`),
   remoteBranches: (url: string, git_identity_id?: string) =>
     request<{ branches: string[] }>("/git/remote-branches", {
       method: "POST",
@@ -221,6 +223,18 @@ export interface Message {
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
+}
+
+export interface MetricsHealth {
+  score: number;
+  indexed_files: number;
+  dimensions: Array<{
+    key: string;
+    label: string;
+    score: number;
+    level: "Low" | "Medium" | "High";
+    evidence: string;
+  }>;
 }
 
 export interface MetricsCost {
