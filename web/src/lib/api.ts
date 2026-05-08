@@ -15,6 +15,22 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       ...options.headers,
     },
   });
+
+  // Auto-logout on expired/invalid session: when we sent a token but the
+  // server rejected it, clear local state and redirect to /login.
+  // Skipped for login/register pages so a wrong-password 401 stays as
+  // an inline form error rather than a redirect loop.
+  if (res.status === 401 && token && typeof window !== "undefined") {
+    const currentPath = window.location.pathname;
+    if (currentPath !== "/login" && currentPath !== "/register") {
+      localStorage.removeItem("kway_token");
+      window.location.replace("/login");
+      // Block this promise so callers don't surface a runtime error during
+      // the brief moment before the navigation actually happens.
+      return new Promise<T>(() => {});
+    }
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error ?? "Request failed");
