@@ -16,7 +16,7 @@ CREATE TABLE projects (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     description TEXT,
-    source_type TEXT NOT NULL CHECK (source_type IN ('local', 'git', 'upload')),
+    source_type TEXT NOT NULL CHECK (source_type IN ('local', 'git')),
     source_path TEXT NOT NULL,
     local_path TEXT,
     default_branch TEXT DEFAULT 'main',
