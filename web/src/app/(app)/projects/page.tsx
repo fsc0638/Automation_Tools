@@ -1,12 +1,22 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, GitBranch, FolderOpen, Trash2, Clock, KeyRound } from "lucide-react";
+import {
+  Clock,
+  FolderOpen,
+  GitBranch,
+  KeyRound,
+  Plus,
+  Search,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { gitIdentities, projects as projectsApi, type GitIdentity, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
+import { Card, InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
 import { formatDate } from "@/lib/utils";
+import { useToastStore } from "@/lib/toast-store";
 
 const emptyProjectForm = {
   name: "",
@@ -26,6 +36,7 @@ const emptyIdentityForm = {
 
 export default function ProjectsPage() {
   const router = useRouter();
+  const pushToast = useToastStore((state) => state.pushToast);
   const [projectList, setProjectList] = useState<Project[]>([]);
   const [identityList, setIdentityList] = useState<GitIdentity[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,6 +51,8 @@ export default function ProjectsPage() {
   const [remoteBranches, setRemoteBranches] = useState<string[]>([]);
   const [loadingBranches, setLoadingBranches] = useState(false);
   const [branchFetchError, setBranchFetchError] = useState("");
+  const [search, setSearch] = useState("");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "git" | "local">("all");
 
   useEffect(() => { void load(); }, []);
 
@@ -69,12 +82,12 @@ export default function ProjectsPage() {
       if (result.branches.length === 0) {
         setBranchFetchError("No branches found. The repo may be private or the URL/token may be incorrect.");
       } else {
-        setForm((f) => {
-          if (result.branches.includes(f.default_branch)) return f;
+        setForm((current) => {
+          if (result.branches.includes(current.default_branch)) return current;
           const best = result.branches.includes("main") ? "main"
             : result.branches.includes("master") ? "master"
             : result.branches[0];
-          return { ...f, default_branch: best };
+          return { ...current, default_branch: best };
         });
       }
     } catch (err) {
@@ -83,7 +96,7 @@ export default function ProjectsPage() {
     } finally {
       setLoadingBranches(false);
     }
-  }, [form.source_type, form.source_path, form.git_identity_id]);
+  }, [form.git_identity_id, form.source_path, form.source_type]);
 
   useEffect(() => {
     if (form.source_type !== "git" || !form.source_path.trim()) return;
@@ -91,9 +104,9 @@ export default function ProjectsPage() {
       void fetchRemoteBranches();
     }, 600);
     return () => window.clearTimeout(timer);
-  }, [form.source_type, form.source_path, form.git_identity_id, fetchRemoteBranches]);
+  }, [fetchRemoteBranches, form.git_identity_id, form.source_path, form.source_type]);
 
-  async function handleCreate(e: React.FormEvent) {
+  async function handleCreate(e: FormEvent) {
     e.preventDefault();
     setError("");
     setCreating(true);
@@ -108,23 +121,23 @@ export default function ProjectsPage() {
       });
       setShowCreate(false);
       setForm(emptyProjectForm);
+      setRemoteBranches([]);
       await load();
+      pushToast({ tone: "success", title: "Project created", description: "The new workspace is ready in your dashboard." });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create project");
+      const message = err instanceof Error ? err.message : "Failed to create project";
+      setError(message);
+      pushToast({ tone: "error", title: "Project creation failed", description: message });
     } finally {
       setCreating(false);
     }
   }
 
-  async function handleCreateIdentity(e: React.FormEvent) {
+  async function handleCreateIdentity(e: FormEvent) {
     e.preventDefault();
     setIdentityError("");
     setIdentityCreating(true);
     try {
-      // Only validate against a specific repo URL when the user is creating
-      // both forms together (project form is visible). Standalone identity
-      // creation only validates the token via the provider's /user endpoint —
-      // the identity should be reusable across multiple repos.
       const identity = await gitIdentities.create({
         ...identityForm,
         repository_url: showCreate && form.source_type === "git" && form.source_path.trim()
@@ -134,75 +147,157 @@ export default function ProjectsPage() {
       setIdentityList((items) => [identity, ...items]);
       setIdentityForm(emptyIdentityForm);
       setShowIdentityCreate(false);
-      setForm((f) => ({ ...f, git_identity_id: identity.id }));
+      setForm((current) => ({ ...current, git_identity_id: identity.id }));
+      pushToast({ tone: "success", title: "Git profile saved", description: `${identity.name} can now be reused across projects.` });
     } catch (err) {
-      setIdentityError(err instanceof Error ? err.message : "Failed to create Git identity");
+      const message = err instanceof Error ? err.message : "Failed to create Git identity";
+      setIdentityError(message);
+      pushToast({ tone: "error", title: "Git profile creation failed", description: message });
     } finally {
       setIdentityCreating(false);
     }
   }
 
-  async function handleDelete(id: string, e: React.MouseEvent) {
+  async function handleDelete(id: string, e: MouseEvent) {
     e.stopPropagation();
     if (!confirm("Delete this project?")) return;
     await projectsApi.delete(id);
     await load();
+    pushToast({ tone: "warning", title: "Project deleted", description: "The workspace has been removed from your dashboard." });
   }
 
   async function handleDeleteIdentity(id: string) {
     if (!confirm("Delete this Git identity? Existing cloned projects will remain, but future fetch/checkout may need credentials.")) return;
     await gitIdentities.delete(id);
     await load();
+    pushToast({ tone: "warning", title: "Git profile deleted", description: "Projects may need another profile for future repository access." });
   }
 
+  const filteredProjects = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return projectList.filter((project) => {
+      const sourceMatch = sourceFilter === "all" || project.source_type === sourceFilter;
+      const textMatch = !query || `${project.name} ${project.description ?? ""} ${project.default_branch ?? ""} ${project.source_path}`
+        .toLowerCase()
+        .includes(query);
+      return sourceMatch && textMatch;
+    });
+  }, [projectList, search, sourceFilter]);
+
+  const gitProjects = projectList.filter((project) => project.source_type === "git").length;
+  const localProjects = projectList.filter((project) => project.source_type === "local").length;
+  const recentProjects = [...projectList]
+    .sort((a, b) => +new Date(b.updated_at) - +new Date(a.updated_at))
+    .slice(0, 3);
+  const latestUpdate = recentProjects[0]?.updated_at;
+
   return (
-    <div className="p-8 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold text-[#1A1A2E]">Projects</h1>
-          <p className="text-[#64748B] text-sm mt-1">Manage local folders, authorized Git users, repositories, and branches</p>
+    <div className="mx-auto flex max-w-7xl flex-col gap-6 p-8">
+      <section className="rounded-[28px] border border-[#E2E8F0] bg-white p-6 shadow-sm">
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+          <div>
+            <div className="inline-flex items-center gap-2 rounded-full bg-[#EEF4FF] px-3 py-1 text-xs font-semibold text-[#0050A0]">
+              <Sparkles size={13} /> AI workspace dashboard
+            </div>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[#1A1A2E]">Projects</h1>
+            <p className="mt-2 max-w-2xl text-sm text-[#64748B]">
+              Manage your repository-connected AI workspaces, Git access profiles, and the active project contexts used by Hermes and OpenClaw.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => setShowIdentityCreate((value) => !value)}>
+              <KeyRound size={16} /> Git Profile
+            </Button>
+            <Button onClick={() => setShowCreate(true)}>
+              <Plus size={16} /> New Project
+            </Button>
+          </div>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => setShowIdentityCreate((v) => !v)}>
-            <KeyRound size={16} /> Git Identity
-          </Button>
-          <Button onClick={() => setShowCreate(true)}>
-            <Plus size={16} /> New Project
-          </Button>
+
+        <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <SummaryCard label="Total workspaces" value={String(projectList.length)} helper="All AI-enabled projects" />
+          <SummaryCard label="Git connected" value={String(gitProjects)} helper="Repositories with branch context" tone="blue" />
+          <SummaryCard label="Local folders" value={String(localProjects)} helper="On-disk workspaces without remote sync" />
+          <SummaryCard label="Git profiles" value={String(identityList.length)} helper={latestUpdate ? `Latest activity ${formatDate(latestUpdate)}` : "No activity yet"} tone="violet" />
         </div>
-      </div>
+      </section>
+
+      <section className="flex flex-col gap-3 rounded-[24px] border border-[#E2E8F0] bg-white p-5 shadow-sm xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex flex-1 items-center gap-3 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
+          <Search size={16} className="text-[#94A3B8]" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search name, description, branch, or path"
+            className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {([
+            ["all", `All (${projectList.length})`],
+            ["git", `Git (${gitProjects})`],
+            ["local", `Local (${localProjects})`],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setSourceFilter(value)}
+              className={sourceFilter === value
+                ? "rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] px-3 py-2 text-sm font-medium text-[#0050A0]"
+                : "rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-sm text-[#64748B] hover:border-[#94A3B8] hover:text-[#1A1A2E]"}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </section>
 
       {showIdentityCreate && (
-        <Card className="mb-6 p-6">
-          <h2 className="font-semibold text-[#1A1A2E] mb-4">Add Git Identity</h2>
-          <form onSubmit={handleCreateIdentity} className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-4">
-              <Input id="git-name" label="Display Name" placeholder="Work GitHub" value={identityForm.name}
-                onChange={(e) => setIdentityForm((f) => ({ ...f, name: e.target.value }))} required />
-              <Input id="git-provider" label="Provider" placeholder="github / gitlab / generic" value={identityForm.provider}
-                onChange={(e) => setIdentityForm((f) => ({ ...f, provider: e.target.value }))} />
-              <Input id="git-user" label="Git Username" placeholder="username" value={identityForm.username}
-                onChange={(e) => setIdentityForm((f) => ({ ...f, username: e.target.value }))} required />
-              <Input id="git-token" label="Access Token" type="password" placeholder="Personal access token" value={identityForm.access_token}
-                onChange={(e) => setIdentityForm((f) => ({ ...f, access_token: e.target.value }))} required />
+        <Card className="rounded-[24px] p-6 shadow-sm">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-[#1A1A2E]">Add Git Profile</h2>
+              <p className="mt-1 text-sm text-[#64748B]">Store repository access once and reuse it across multiple projects.</p>
             </div>
-            <p className="text-xs text-[#94A3B8]">Token is stored server-side and hidden from API responses. Use a least-privilege token for repo read access.</p>
-            {identityError && <p className="text-sm text-[#C8102E]">{identityError}</p>}
+          </div>
+          <form onSubmit={handleCreateIdentity} className="flex flex-col gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <Input id="git-name" label="Display Name" placeholder="Work GitHub" value={identityForm.name}
+                onChange={(e) => setIdentityForm((current) => ({ ...current, name: e.target.value }))} required />
+              <Input id="git-provider" label="Provider" placeholder="github / gitlab / generic" value={identityForm.provider}
+                onChange={(e) => setIdentityForm((current) => ({ ...current, provider: e.target.value }))} />
+              <Input id="git-user" label="Git Username" placeholder="username" value={identityForm.username}
+                onChange={(e) => setIdentityForm((current) => ({ ...current, username: e.target.value }))} required />
+              <Input id="git-token" label="Access Token" type="password" placeholder="Personal access token" value={identityForm.access_token}
+                onChange={(e) => setIdentityForm((current) => ({ ...current, access_token: e.target.value }))} required />
+            </div>
+            <p className="text-xs text-[#94A3B8]">Token is stored server-side and hidden from API responses. Use a least-privilege token for repository read access.</p>
+            {identityError && (
+              <InlineBanner
+                tone="error"
+                title="Git profile could not be saved"
+                description={identityError}
+              />
+            )}
             <div className="flex gap-3 pt-2">
-              <Button type="submit" loading={identityCreating}>Save Git Identity</Button>
+              <Button type="submit" loading={identityCreating}>Save Git Profile</Button>
               <Button type="button" variant="secondary" onClick={() => setShowIdentityCreate(false)}>Cancel</Button>
             </div>
           </form>
 
           {identityList.length > 0 && (
-            <div className="mt-5 border-t border-[#E2E8F0] pt-4 space-y-2">
+            <div className="mt-6 grid gap-3 md:grid-cols-2">
               {identityList.map((identity) => (
-                <div key={identity.id} className="flex items-center justify-between text-sm bg-[#F8FAFC] rounded-lg px-3 py-2">
-                  <span className="text-[#1A1A2E] font-medium">{identity.name}</span>
-                  <span className="text-[#64748B]">{identity.provider} · {identity.username}</span>
-                  <button type="button" onClick={() => handleDeleteIdentity(identity.id)} className="text-[#94A3B8] hover:text-[#C8102E]">
-                    <Trash2 size={13} />
-                  </button>
+                <div key={identity.id} className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-[#1A1A2E]">{identity.name}</div>
+                      <div className="mt-1 text-xs text-[#64748B]">{identity.provider} · {identity.username}</div>
+                    </div>
+                    <button type="button" onClick={() => void handleDeleteIdentity(identity.id)} className="text-[#94A3B8] hover:text-[#C8102E]">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                  <div className="mt-3 text-xs text-[#94A3B8]">Created {formatDate(identity.created_at)}</div>
                 </div>
               ))}
             </div>
@@ -211,55 +306,64 @@ export default function ProjectsPage() {
       )}
 
       {showCreate && (
-        <Card className="mb-6 p-6">
-          <h2 className="font-semibold text-[#1A1A2E] mb-4">Create Project</h2>
-          <form onSubmit={handleCreate} className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-4">
+        <Card className="rounded-[24px] p-6 shadow-sm">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold text-[#1A1A2E]">Create Project Workspace</h2>
+            <p className="mt-1 text-sm text-[#64748B]">Connect a local folder or a Git repository and make it available to the AI workspace.</p>
+          </div>
+          <form onSubmit={handleCreate} className="flex flex-col gap-5">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <Input id="pname" label="Project Name" placeholder="My Project" value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
-              <Input id="desc" label="Description (optional)" placeholder="Brief description" value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
+                onChange={(e) => setForm((current) => ({ ...current, name: e.target.value }))} required />
+              <Input id="desc" label="Description (optional)" placeholder="What is this workspace for?" value={form.description}
+                onChange={(e) => setForm((current) => ({ ...current, description: e.target.value }))} />
             </div>
 
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-[#1A1A2E]">Source Type</label>
-              <div className="flex gap-3">
-                {["local", "git"].map((t) => (
-                  <button key={t} type="button"
-                    onClick={() => setForm((f) => ({ ...f, source_type: t }))}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm transition-colors ${
-                      form.source_type === t
-                        ? "border-[#0050A0] bg-blue-50 text-[#0050A0]"
-                        : "border-[#E2E8F0] text-[#64748B] hover:border-[#94A3B8]"
-                    }`}>
-                    {t === "local" ? <FolderOpen size={14} /> : <GitBranch size={14} />}
-                    {t === "local" ? "Local Folder" : "Git Repository"}
-                  </button>
-                ))}
-              </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {[
+                { value: "local", label: "Local Folder", hint: "Use an existing path on disk", icon: FolderOpen },
+                { value: "git", label: "Git Repository", hint: "Clone and track a remote repository", icon: GitBranch },
+              ].map(({ value, label, hint, icon: Icon }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setForm((current) => ({ ...current, source_type: value }))}
+                  className={form.source_type === value
+                    ? "rounded-2xl border border-[#BFDBFE] bg-[#EFF6FF] p-4 text-left"
+                    : "rounded-2xl border border-[#E2E8F0] bg-white p-4 text-left hover:border-[#94A3B8]"}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="rounded-xl bg-white p-2 shadow-sm"><Icon size={16} className="text-[#0050A0]" /></div>
+                    <div>
+                      <div className="text-sm font-semibold text-[#1A1A2E]">{label}</div>
+                      <div className="mt-1 text-xs text-[#64748B]">{hint}</div>
+                    </div>
+                  </div>
+                </button>
+              ))}
             </div>
 
             <Input id="path" label={form.source_type === "local" ? "Folder Path" : "Git URL"}
               placeholder={form.source_type === "local" ? "C:/Projects/my-app" : "https://github.com/org/repo.git"}
               value={form.source_path}
               onChange={(e) => {
-                setForm((f) => ({ ...f, source_path: e.target.value }));
+                setForm((current) => ({ ...current, source_path: e.target.value }));
                 setRemoteBranches([]);
                 setBranchFetchError("");
               }} required />
 
             {form.source_type === "git" && (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-medium text-[#1A1A2E]">Authorized Git User</label>
+                  <label className="text-sm font-medium text-[#1A1A2E]">Git Profile</label>
                   <select value={form.git_identity_id}
                     onChange={(e) => {
-                      setForm((f) => ({ ...f, git_identity_id: e.target.value }));
+                      setForm((current) => ({ ...current, git_identity_id: e.target.value }));
                       setRemoteBranches([]);
                       setBranchFetchError("");
                     }}
-                    className="h-10 rounded-lg border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white">
-                    <option value="">No identity / public repo</option>
+                    className="h-11 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white">
+                    <option value="">No profile / public repo</option>
                     {identityList.map((identity) => (
                       <option key={identity.id} value={identity.id}>{identity.name} · {identity.username}</option>
                     ))}
@@ -271,41 +375,53 @@ export default function ProjectsPage() {
                     {remoteBranches.length > 0 ? (
                       <select
                         value={form.default_branch}
-                        onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
-                        className="flex-1 h-10 rounded-lg border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white focus:outline-none focus:ring-2 focus:ring-[#0050A0]">
-                        {remoteBranches.map((b) => (
-                          <option key={b} value={b}>{b}</option>
+                        onChange={(e) => setForm((current) => ({ ...current, default_branch: e.target.value }))}
+                        className="h-11 flex-1 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white focus:outline-none focus:ring-2 focus:ring-[#0050A0]"
+                      >
+                        {remoteBranches.map((branch) => (
+                          <option key={branch} value={branch}>{branch}</option>
                         ))}
                       </select>
                     ) : (
                       <input
                         value={form.default_branch}
-                        onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
+                        onChange={(e) => setForm((current) => ({ ...current, default_branch: e.target.value }))}
                         placeholder="main"
-                        className="flex-1 h-10 rounded-lg border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white focus:outline-none focus:ring-2 focus:ring-[#0050A0]"
+                        className="h-11 flex-1 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white focus:outline-none focus:ring-2 focus:ring-[#0050A0]"
                       />
                     )}
                     <button
                       type="button"
-                      onClick={fetchRemoteBranches}
+                      onClick={() => void fetchRemoteBranches()}
                       disabled={loadingBranches || !form.source_path}
                       title="Fetch branches from remote"
-                      className="px-3 h-10 rounded-lg border border-[#E2E8F0] text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0] disabled:opacity-40 flex items-center justify-center">
+                      className="flex h-11 items-center justify-center rounded-xl border border-[#E2E8F0] px-3 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0] disabled:opacity-40"
+                    >
                       {loadingBranches ? (
-                        <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin inline-block" />
+                        <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
                       ) : (
                         <GitBranch size={14} />
                       )}
                     </button>
                   </div>
                   {branchFetchError && (
-                    <p className="text-xs text-[#C8102E] mt-1">{branchFetchError}</p>
+                    <InlineBanner
+                      tone="warning"
+                      title="Could not fetch remote branches"
+                      description={branchFetchError}
+                    />
                   )}
                 </div>
               </div>
             )}
 
-            {error && <p className="text-sm text-[#C8102E]">{error}</p>}
+            {error && (
+              <InlineBanner
+                tone="error"
+                title="Project setup needs attention"
+                description={error}
+              />
+            )}
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" loading={creating}>Create Project</Button>
@@ -316,54 +432,126 @@ export default function ProjectsPage() {
       )}
 
       {loading ? (
-        <div className="flex items-center justify-center py-20 text-[#94A3B8]">Loading...</div>
-      ) : projectList.length === 0 ? (
-        <div className="text-center py-20">
-          <FolderOpen size={48} className="text-[#E2E8F0] mx-auto mb-4" />
-          <p className="text-[#64748B] font-medium">No projects yet</p>
-          <p className="text-[#94A3B8] text-sm mt-1">Create a project to start analysing code with AI agents</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {projectList.map((p) => (
-            <Card key={p.id}
-              className="p-5 cursor-pointer hover:border-[#0050A0] hover:shadow-md transition-all group"
-              onClick={() => router.push(`/projects/${p.id}`)}>
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-9 h-9 rounded-lg bg-[#F1F5F9] flex items-center justify-center flex-shrink-0">
-                    {p.source_type === "git" ? (
-                      <GitBranch size={16} className="text-[#0050A0]" />
-                    ) : (
-                      <FolderOpen size={16} className="text-[#0050A0]" />
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="font-semibold text-[#1A1A2E] truncate group-hover:text-[#0050A0]">{p.name}</h3>
-                    {p.description && <p className="text-sm text-[#64748B] truncate mt-0.5">{p.description}</p>}
-                  </div>
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Card key={index} className="rounded-[24px] p-5">
+              <div className="flex items-start gap-3">
+                <SkeletonBlock className="h-11 w-11 flex-shrink-0" />
+                <div className="min-w-0 flex-1 space-y-3">
+                  <SkeletonBlock className="h-5 w-40" />
+                  <SkeletonBlock className="h-4 w-full" />
+                  <SkeletonBlock className="h-4 w-3/4" />
                 </div>
-                <button onClick={(e) => handleDelete(p.id, e)}
-                  className="opacity-0 group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E] transition-all ml-2">
-                  <Trash2 size={14} />
-                </button>
               </div>
-              <div className="flex items-center gap-1.5 mt-4 text-xs text-[#94A3B8]">
-                <Clock size={11} />
-                {formatDate(p.updated_at)}
-                <span className="ml-2 px-2 py-0.5 rounded-full bg-[#F1F5F9] text-[#64748B] capitalize">
-                  {p.source_type}
-                </span>
-                {p.source_type === "git" && p.default_branch && (
-                  <span className="px-2 py-0.5 rounded-full bg-blue-50 text-[#0050A0]">
-                    {p.default_branch}
-                  </span>
-                )}
+              <div className="mt-5 grid gap-3 md:grid-cols-2">
+                <SkeletonBlock className="h-16 w-full" />
+                <SkeletonBlock className="h-16 w-full" />
+                <SkeletonBlock className="h-16 w-full" />
+                <SkeletonBlock className="h-16 w-full" />
               </div>
             </Card>
           ))}
         </div>
+      ) : filteredProjects.length === 0 ? (
+        <SectionEmpty
+          className="bg-white px-6 py-20 shadow-sm rounded-[24px]"
+          title={search || sourceFilter !== "all" ? "No project matches your current view" : "No workspaces yet"}
+          description={search || sourceFilter !== "all"
+            ? "Try another search term, switch filters, or create a new workspace."
+            : "Create your first local folder or connect a Git repository to start a project-aware workspace."}
+          action={
+            <div className="flex flex-wrap justify-center gap-3">
+              <Button onClick={() => setShowCreate(true)}><Plus size={14} /> New Project</Button>
+              {(search || sourceFilter !== "all") && (
+                <Button variant="secondary" onClick={() => { setSearch(""); setSourceFilter("all"); }}>
+                  Clear Filters
+                </Button>
+              )}
+            </div>
+          }
+        />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          {filteredProjects.map((project) => {
+            const linkedIdentity = project.git_identity_id
+              ? identityList.find((identity) => identity.id === project.git_identity_id)
+              : null;
+            return (
+              <Card
+                key={project.id}
+                className="group rounded-[24px] border border-[#E2E8F0] p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-[#BFDBFE] hover:shadow-md"
+                onClick={() => router.push(`/projects/${project.id}`)}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-[#F1F5F9] text-[#0050A0]">
+                      {project.source_type === "git" ? <GitBranch size={18} /> : <FolderOpen size={18} />}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="truncate text-base font-semibold text-[#1A1A2E] group-hover:text-[#0050A0]">{project.name}</h3>
+                        <Badge>{project.source_type}</Badge>
+                        {project.source_type === "git" && project.default_branch && <Badge tone="blue">{project.default_branch}</Badge>}
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-sm text-[#64748B]">{project.description || project.source_path}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => void handleDelete(project.id, e)}
+                    className="opacity-0 text-[#94A3B8] transition group-hover:opacity-100 hover:text-[#C8102E]"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-2">
+                  <InfoTile icon={<Clock size={12} />} label="Updated" value={formatDate(project.updated_at)} />
+                  <InfoTile icon={<GitBranch size={12} />} label="Branch" value={project.default_branch ?? "—"} />
+                  <InfoTile icon={<FolderOpen size={12} />} label="Path" value={project.source_path} truncate />
+                  <InfoTile icon={<KeyRound size={12} />} label="Git Profile" value={linkedIdentity ? `${linkedIdentity.name} · ${linkedIdentity.username}` : "Not linked"} truncate />
+                </div>
+              </Card>
+            );
+          })}
+        </div>
       )}
+    </div>
+  );
+}
+
+function SummaryCard({ label, value, helper, tone = "default" }: { label: string; value: string; helper: string; tone?: "default" | "blue" | "violet" }) {
+  const toneClass = tone === "blue"
+    ? "bg-[#EFF6FF] border-[#BFDBFE]"
+    : tone === "violet"
+      ? "bg-[#F5F3FF] border-[#DDD6FE]"
+      : "bg-white border-[#E2E8F0]";
+  return (
+    <div className={`rounded-2xl border px-4 py-4 ${toneClass}`}>
+      <div className="text-sm text-[#64748B]">{label}</div>
+      <div className="mt-2 text-2xl font-semibold text-[#1A1A2E]">{value}</div>
+      <div className="mt-1 text-xs text-[#94A3B8]">{helper}</div>
+    </div>
+  );
+}
+
+function Badge({ children, tone = "default" }: { children: ReactNode; tone?: "default" | "blue" }) {
+  return (
+    <span className={tone === "blue"
+      ? "rounded-full bg-[#EFF6FF] px-2 py-0.5 text-xs font-medium text-[#0050A0]"
+      : "rounded-full bg-[#F1F5F9] px-2 py-0.5 text-xs font-medium capitalize text-[#64748B]"}>
+      {children}
+    </span>
+  );
+}
+
+function InfoTile({ icon, label, value, truncate = false }: { icon: ReactNode; label: string; value: string; truncate?: boolean }) {
+  return (
+    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-3">
+      <div className="flex items-center gap-1.5 text-xs text-[#94A3B8]">
+        {icon}
+        {label}
+      </div>
+      <div className={`mt-1 text-sm font-medium text-[#334155] ${truncate ? "truncate" : ""}`}>{value}</div>
     </div>
   );
 }

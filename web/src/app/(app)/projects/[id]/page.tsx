@@ -1,20 +1,46 @@
 "use client";
-import { memo, useCallback, useEffect, useRef, useState, use } from "react";
+import { memo, use, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
-  MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
-  Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, AlertCircle, ArrowDown,
-  RefreshCw, Trash2
+  AlertCircle,
+  ArrowDown,
+  ArrowLeft,
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  Cpu,
+  File,
+  FolderOpen,
+  GitBranch,
+  MessageSquarePlus,
+  Plus,
+  RefreshCw,
+  Search,
+  Send,
+  Sparkles,
+  Square,
+  Trash2,
+  User,
+  Zap,
 } from "lucide-react";
 import {
-  projects as projectsApi, conversations as convsApi,
-  createWsConnection, type Project, type Conversation,
-  type Message, type FileNode, type AgentMode,
+  conversations as convsApi,
+  createWsConnection,
+  projects as projectsApi,
+  type AgentMode,
+  type Conversation,
+  type FileNode,
+  type GitStatus,
+  type Message,
+  type Project,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
+import { cn, formatDate } from "@/lib/utils";
+import { useToastStore } from "@/lib/toast-store";
 
 const MODE_LABELS: Record<AgentMode, string> = {
   openclaw: "OpenClaw",
@@ -22,11 +48,11 @@ const MODE_LABELS: Record<AgentMode, string> = {
   debate: "Debate Mode",
 };
 
-function displayAgentName(agent: string, round?: number, phase?: string) {
-  if (phase === "round" && round) return `${agent} · Round ${round}`;
-  if (phase === "final") return `${agent} · Final`;
-  return agent;
-}
+const MODE_STYLES: Record<AgentMode, string> = {
+  openclaw: "bg-blue-50 text-[#0050A0] border border-[#BFDBFE]",
+  hermes: "bg-violet-50 text-[#7C3AED] border border-[#DDD6FE]",
+  debate: "bg-amber-50 text-[#B45309] border border-[#FDE68A]",
+};
 
 type StreamStatus = {
   agent: string;
@@ -36,13 +62,69 @@ type StreamStatus = {
   startedAt: number;
 };
 
+type ContextTab = "files" | "git" | "project";
+
+function displayAgentName(agent: string, round?: number, phase?: string) {
+  if (phase === "round" && round) return `${agent} · Round ${round}`;
+  if (phase === "final") return `${agent} · Final`;
+  return agent;
+}
+
+function detectLanguage(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "rs": return "rust";
+    case "ts":
+    case "tsx": return "typescript";
+    case "js":
+    case "jsx": return "javascript";
+    case "py": return "python";
+    case "json": return "json";
+    case "md": return "markdown";
+    case "css": return "css";
+    case "html": return "html";
+    case "sql": return "sql";
+    case "swift": return "swift";
+    case "yml":
+    case "yaml": return "yaml";
+    default: return "text";
+  }
+}
+
+function flattenFilePaths(nodes: FileNode[]): string[] {
+  const results: string[] = [];
+  for (const node of nodes) {
+    if (node.is_dir) {
+      if (node.children?.length) results.push(...flattenFilePaths(node.children));
+    } else {
+      results.push(node.path);
+    }
+  }
+  return results;
+}
+
+function formatRelativeTime(value: string) {
+  const date = new Date(value).getTime();
+  if (Number.isNaN(date)) return "Unknown";
+  const diffMs = Date.now() - date;
+  const minutes = Math.max(1, Math.floor(diffMs / 60000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return formatDate(value);
+}
+
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  const pushToast = useToastStore((state) => state.pushToast);
 
   const [project, setProject] = useState<Project | null>(null);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
   const [branches, setBranches] = useState<string[]>([]);
+  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [switchingBranch, setSwitchingBranch] = useState(false);
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
@@ -53,9 +135,18 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
   const [streamStatuses, setStreamStatuses] = useState<Record<string, StreamStatus>>({});
   const [statusNow, setStatusNow] = useState(0);
+  const [mountedAt] = useState(() => Date.now());
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [refreshStatus, setRefreshStatus] = useState<string>("");
+  const [refreshStatus, setRefreshStatus] = useState("");
+  const [conversationQuery, setConversationQuery] = useState("");
+  const [contextTab, setContextTab] = useState<ContextTab>("files");
+  const [fileQuery, setFileQuery] = useState("");
+  const [selectedFilePath, setSelectedFilePath] = useState("");
+  const [selectedFileContent, setSelectedFileContent] = useState("");
+  const [filePreviewLoading, setFilePreviewLoading] = useState(false);
+  const [filePreviewError, setFilePreviewError] = useState("");
+
   const streamBuffersRef = useRef<Record<string, string>>({});
   const streamStatusesRef = useRef<Record<string, StreamStatus>>({});
   const wsRef = useRef<WebSocket | null>(null);
@@ -67,9 +158,121 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const flushRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Coalesce multiple incoming chunks into a single React state update per
-  // animation frame. Without this, fast token streams trigger 30-60+ setState
-  // calls per second, each causing a full re-render of streaming bubbles.
+  const filteredConvs = useMemo(() => {
+    const query = conversationQuery.trim().toLowerCase();
+    if (!query) return convs;
+    return convs.filter((conv) => (
+      `${conv.title} ${MODE_LABELS[conv.mode]}`.toLowerCase().includes(query)
+    ));
+  }, [convs, conversationQuery]);
+
+  const dirtyCount = (gitStatus?.changed.length ?? 0) + (gitStatus?.staged.length ?? 0) + (gitStatus?.untracked.length ?? 0);
+  const focusedFileName = selectedFilePath ? selectedFilePath.split("/").pop() ?? selectedFilePath : "";
+  const allFilePaths = useMemo(() => flattenFilePaths(fileTree), [fileTree]);
+  const fileHits = useMemo(() => {
+    const query = fileQuery.trim().toLowerCase();
+    if (!query) return allFilePaths.slice(0, 8);
+    return allFilePaths.filter((path) => path.toLowerCase().includes(query)).slice(0, 10);
+  }, [allFilePaths, fileQuery]);
+  const gitHotspots = useMemo(() => {
+    const unique = Array.from(new Set([...(gitStatus?.changed ?? []), ...(gitStatus?.staged ?? []), ...(gitStatus?.untracked ?? [])]));
+    return unique.slice(0, 6);
+  }, [gitStatus]);
+  const workspaceInsights = useMemo(() => {
+    const items: { title: string; detail: string; action: string }[] = [];
+    if (dirtyCount > 0) {
+      items.push({
+        title: "Review pending changes",
+        detail: `${dirtyCount} file(s) differ from the current branch baseline.`,
+        action: "Summarize change risk and next steps before editing more code.",
+      });
+    }
+    if (selectedFilePath) {
+      items.push({
+        title: "Focused file context available",
+        detail: focusedFileName,
+        action: `Analyze file: ${selectedFilePath}. Explain purpose, risk, and likely edits.`,
+      });
+    }
+    if ((convs.length ?? 0) > 0) {
+      items.push({
+        title: "Shared project memory is active",
+        detail: `${convs.length} conversation(s) contribute to project context.`,
+        action: "Summarize what the team has learned so far and identify the best next implementation step.",
+      });
+    }
+    if (project?.source_type === "git") {
+      items.push({
+        title: "Repository-aware workspace",
+        detail: `Current branch: ${project.default_branch ?? "unknown"}`,
+        action: `Review the branch state for ${project.default_branch ?? "this workspace"} and list the safest next action.`,
+      });
+    }
+    return items.slice(0, 3);
+  }, [convs.length, dirtyCount, focusedFileName, project, selectedFilePath]);
+  const activeThreadSummary = useMemo(() => {
+    const nonSystem = messages.filter((msg) => msg.role !== "system");
+    const lastAgent = [...nonSystem].reverse().find((msg) => msg.role === "hermes" || msg.role === "openclaw");
+    const lastUser = [...nonSystem].reverse().find((msg) => msg.role === "user");
+    return {
+      messageCount: nonSystem.length,
+      lastAgent: lastAgent?.agent_name ?? (lastAgent?.role ? MODE_LABELS[lastAgent.role as Extract<AgentMode, "hermes" | "openclaw">] : null),
+      lastUserAt: lastUser?.created_at ?? null,
+    };
+  }, [messages]);
+  const conversationHealth = useMemo(() => {
+    const recentCount = convs.filter((conv) => mountedAt - new Date(conv.updated_at).getTime() < 1000 * 60 * 60 * 24).length;
+    const debateCount = convs.filter((conv) => conv.mode === "debate").length;
+    return {
+      total: convs.length,
+      recent: recentCount,
+      debate: debateCount,
+    };
+  }, [convs, mountedAt]);
+  const streamStatusEntries = useMemo(() => Object.entries(streamStatuses), [streamStatuses]);
+  const streamBufferEntries = useMemo(() => Object.entries(streamBuffers), [streamBuffers]);
+  const debateTimeline = useMemo(() => {
+    const statusText = streamStatusEntries.map(([, status]) => `${status.agent} ${status.phase ?? ""} ${status.message}`.toLowerCase()).join(" ");
+    const hasOpenClaw = statusText.includes("openclaw");
+    const hasHermes = statusText.includes("hermes");
+    const hasFinal = statusText.includes("final") || statusText.includes("synthesis");
+    return [
+      {
+        title: "OpenClaw proposes",
+        detail: "Fast first pass and implementation angle.",
+        state: hasOpenClaw ? (hasHermes || hasFinal ? "done" : "active") : mode === "debate" && streaming ? "active" : "idle",
+      },
+      {
+        title: "Hermes challenges",
+        detail: "Counterpoints, risks, and stronger reasoning.",
+        state: hasHermes ? (hasFinal ? "done" : "active") : mode === "debate" && (hasOpenClaw || streaming) ? "queued" : "idle",
+      },
+      {
+        title: "Final synthesis",
+        detail: "Unified recommendation with trade-offs resolved.",
+        state: hasFinal ? "active" : mode === "debate" && (hasOpenClaw || hasHermes || streaming) ? "queued" : "idle",
+      },
+    ] as const;
+  }, [mode, streamStatusEntries, streaming]);
+
+  function syncTextareaHeight() {
+    const target = textareaRef.current;
+    if (!target) return;
+    target.style.height = "auto";
+    target.style.height = `${Math.min(target.scrollHeight, 160)}px`;
+  }
+
+  function appendPrompt(snippet: string) {
+    setInput((current) => {
+      const next = `${current}${current.trim() ? "\n\n" : ""}${snippet}`;
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        syncTextareaHeight();
+      });
+      return next;
+    });
+  }
+
   const scheduleStreamFlush = useCallback(() => {
     if (flushRafRef.current !== null) return;
     flushRafRef.current = requestAnimationFrame(() => {
@@ -79,36 +282,55 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     });
   }, []);
 
+  const loadFilePreview = useCallback(async (path: string) => {
+    setSelectedFilePath(path);
+    setContextTab("files");
+    setFilePreviewLoading(true);
+    setFilePreviewError("");
+    try {
+      const result = await projectsApi.fileContent(id, path);
+      setSelectedFileContent(result.content);
+    } catch (err) {
+      setSelectedFileContent("");
+      setFilePreviewError(err instanceof Error ? err.message : "Failed to load file preview");
+    } finally {
+      setFilePreviewLoading(false);
+    }
+  }, [id]);
+
   const selectConv = useCallback(async (conv: Conversation) => {
     setActiveConv(conv);
+    setMode(conv.mode);
     const data = await convsApi.get(id, conv.id);
     setMessages(data.messages);
   }, [id]);
 
-  // Effect 1: project + file tree + branches — reload only when project id changes.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const p = await projectsApi.get(id);
-      const [files, branchData] = await Promise.all([
+      const [files, branchData, status] = await Promise.all([
         projectsApi.fileTree(id).catch(() => []),
         p.source_type === "git"
           ? projectsApi.gitBranches(id).catch(() => ({ branches: [] }))
           : Promise.resolve({ branches: [] }),
+        p.source_type === "git"
+          ? projectsApi.gitStatus(id).catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (cancelled) return;
       setProject(p);
       setFileTree(files);
       setBranches(branchData.branches);
+      setGitStatus(status);
     })();
     return () => { cancelled = true; };
   }, [id]);
 
-  // Effect 2: conversations list — reload when project id or mode changes.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const cs = await convsApi.list(id, mode);
+      const cs = await convsApi.list(id);
       if (cancelled) return;
       setConvs(cs);
       streamBuffersRef.current = {};
@@ -116,26 +338,28 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       setStreamBuffers({});
       setStreamStatuses({});
       setStreaming(false);
-      if (cs.length > 0) {
-        setActiveConv(cs[0]);
-        const data = await convsApi.get(id, cs[0].id);
+
+      const currentId = activeConv?.id;
+      const preferred = cs.find((conv) => conv.id === currentId) ?? cs[0] ?? null;
+      setActiveConv(preferred);
+      if (preferred) {
+        setMode(preferred.mode);
+        const data = await convsApi.get(id, preferred.id);
         if (!cancelled) setMessages(data.messages);
       } else {
-        setActiveConv(null);
         setMessages([]);
       }
     })();
     return () => { cancelled = true; };
-  }, [id, mode]);
+  }, [id, activeConv?.id]);
 
-  // Effect 3: WebSocket bound to activeConv lifecycle.
-  // Opens once per conversation; sendViaWs reuses the live connection.
   useEffect(() => {
     if (!activeConv) {
       wsRef.current?.close();
       wsRef.current = null;
       return;
     }
+
     const convId = activeConv.id;
     const ws = createWsConnection(convId, id);
     wsRef.current = ws;
@@ -211,14 +435,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         }
         delete streamBuffersRef.current[label];
         scheduleStreamFlush();
-        if (Object.keys(streamBuffersRef.current).length === 0 && Object.keys(streamStatusesRef.current).length === 0) setStreaming(false);
+        if (Object.keys(streamBuffersRef.current).length === 0 && Object.keys(streamStatusesRef.current).length === 0) {
+          setStreaming(false);
+        }
       }
     };
 
     ws.onclose = () => {
-      if (wsRef.current === ws) {
-        setStreaming(false);
-      }
+      if (wsRef.current === ws) setStreaming(false);
     };
 
     ws.onerror = () => {
@@ -244,17 +468,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         flushRafRef.current = null;
       }
     };
-  }, [activeConv?.id, id, wsReconnectKey, scheduleStreamFlush]);
+  }, [activeConv, id, scheduleStreamFlush, wsReconnectKey]);
 
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
-    // Coalesce scroll requests to once per animation frame so chunk-driven
-    // updates don't pile up smooth-scroll animations on top of each other.
     if (scrollRafRef.current !== null) return;
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
-      // "auto" while streaming avoids fighting the smooth-animation queue;
-      // committed messages still get smooth scroll on the next paint.
       const behavior: ScrollBehavior = streaming ? "auto" : "smooth";
       bottomRef.current?.scrollIntoView({ behavior });
     });
@@ -292,6 +512,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setConvs((cs) => [conv, ...cs]);
     setMessages([]);
     setActiveConv(conv);
+    setMode(conv.mode);
+    pushToast({ tone: "success", title: "Conversation created", description: `${MODE_LABELS[conv.mode]} is ready for the next turn.` });
   }
 
   async function refreshProject() {
@@ -300,51 +522,50 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setRefreshStatus("");
     try {
       const p = await projectsApi.get(id);
-      let syncMsg = "";
+      let syncMsg = "Workspace refreshed";
       if (p.source_type === "git") {
-        // Fetch from origin and fast-forward the current branch. Best-effort:
-        // if the local branch has diverged, surface the message but still
-        // refresh the file tree / branch list afterwards.
         try {
           const sync = await projectsApi.gitSync(id);
           syncMsg = sync.status === "fast-forwarded"
             ? "Pulled latest from origin"
             : sync.status === "up-to-date"
-              ? "Up to date"
-              : sync.status === "no-remote-branch"
-                ? "No matching remote branch"
-                : "";
+              ? "Already up to date"
+              : "No matching remote branch";
         } catch (err) {
           syncMsg = err instanceof Error ? err.message : "Sync failed";
         }
       }
-      const [files, branchData] = await Promise.all([
+      const [files, branchData, status] = await Promise.all([
         projectsApi.fileTree(id).catch(() => []),
         p.source_type === "git"
           ? projectsApi.gitBranches(id).catch(() => ({ branches: [] }))
           : Promise.resolve({ branches: [] }),
+        p.source_type === "git"
+          ? projectsApi.gitStatus(id).catch(() => null)
+          : Promise.resolve(null),
       ]);
       setProject(p);
       setFileTree(files);
       setBranches(branchData.branches);
-      if (syncMsg) {
-        setRefreshStatus(syncMsg);
-        setTimeout(() => setRefreshStatus(""), 3000);
-      }
+      setGitStatus(status);
+      setRefreshStatus(syncMsg);
+      pushToast({ tone: p.source_type === "git" ? "info" : "success", title: "Workspace refreshed", description: syncMsg });
+      setTimeout(() => setRefreshStatus(""), 3000);
     } finally {
       setRefreshing(false);
     }
   }
 
-  async function deleteConv(conv: Conversation, e: React.MouseEvent) {
+  async function deleteConv(conv: Conversation, e: MouseEvent) {
     e.stopPropagation();
     if (!confirm(`Delete conversation "${conv.title}"? All messages will be lost.`)) return;
     await convsApi.delete(id, conv.id);
-    setConvs((cs) => cs.filter((c) => c.id !== conv.id));
+    const remaining = convs.filter((c) => c.id !== conv.id);
+    setConvs(remaining);
     if (activeConv?.id === conv.id) {
-      const remaining = convs.filter((c) => c.id !== conv.id);
       if (remaining.length > 0) {
         setActiveConv(remaining[0]);
+        setMode(remaining[0].mode);
         const data = await convsApi.get(id, remaining[0].id);
         setMessages(data.messages);
       } else {
@@ -352,6 +573,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         setMessages([]);
       }
     }
+    pushToast({ tone: "warning", title: "Conversation deleted", description: `Removed ${conv.title} from this workspace.` });
   }
 
   function sendViaWs(content: string) {
@@ -380,7 +602,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     } else if (ws && ws.readyState === WebSocket.CONNECTING) {
       ws.addEventListener("open", () => ws.send(payload), { once: true });
     } else {
-      // Connection lost — trigger reconnect, then send when ready.
       setWsReconnectKey((k) => k + 1);
       setTimeout(() => {
         const next = wsRef.current;
@@ -398,7 +619,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setStreamBuffers({});
     setStreamStatuses({});
     setStreaming(false);
-    // Force the WS effect to reconnect for the next message.
     setWsReconnectKey((k) => k + 1);
   }
 
@@ -408,259 +628,858 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setRefreshStatus("");
     try {
       const updated = await projectsApi.checkoutBranch(id, branch);
-      const [files, branchData] = await Promise.all([
+      const [files, branchData, status] = await Promise.all([
         projectsApi.fileTree(id).catch(() => []),
         projectsApi.gitBranches(id).catch(() => ({ branches: [] })),
+        projectsApi.gitStatus(id).catch(() => null),
       ]);
       setProject(updated);
       setFileTree(files);
       setBranches(branchData.branches);
+      setGitStatus(status);
+      setSelectedFilePath("");
+      setSelectedFileContent("");
       streamBuffersRef.current = {};
       streamStatusesRef.current = {};
       setStreamBuffers({});
       setStreamStatuses({});
+      setRefreshStatus(`Switched to ${branch}`);
+      pushToast({ tone: "success", title: "Branch switched", description: `Workspace is now on ${branch}.` });
+      setTimeout(() => setRefreshStatus(""), 3000);
     } catch (err) {
-      // Most likely on Windows + OneDrive: a working-tree file/dir is held
-      // open by the OneDrive sync engine and git2 can't rmdir it.
       const msg = err instanceof Error ? err.message : "Branch switch failed";
       setRefreshStatus(`Switch failed: ${msg}`);
+      pushToast({ tone: "error", title: "Branch switch failed", description: msg });
       setTimeout(() => setRefreshStatus(""), 6000);
     } finally {
       setSwitchingBranch(false);
     }
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!input.trim() || streaming) return;
     sendViaWs(input.trim());
     setInput("");
+    requestAnimationFrame(syncTextareaHeight);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
+  function handleKeyDown(e: KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit(e as unknown as React.FormEvent);
+      handleSubmit(e as unknown as FormEvent);
     }
   }
 
   return (
-    <div className="flex h-full">
-      {/* Left: File Tree + Conversations */}
-      <div className="w-64 flex-shrink-0 bg-white border-r border-[#E2E8F0] flex flex-col">
-        {/* Back + Project name */}
-        <div className="px-4 py-3 border-b border-[#E2E8F0]">
-          <button onClick={() => router.push("/projects")}
-            className="flex items-center gap-1.5 text-xs text-[#64748B] hover:text-[#1A1A2E] mb-2">
-            <ArrowLeft size={12} /> Projects
-          </button>
-          <h2 className="font-semibold text-[#1A1A2E] text-sm truncate">{project?.name}</h2>
+    <div className="flex h-full flex-col bg-[#F5F7FB]">
+      <div className="border-b border-[#E2E8F0] bg-white px-6 py-4">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex items-start gap-3">
+            <button
+              onClick={() => router.push("/projects")}
+              className="mt-0.5 rounded-lg border border-[#E2E8F0] bg-white p-2 text-[#64748B] transition hover:border-[#0050A0] hover:text-[#0050A0]"
+              title="Back to projects"
+            >
+              <ArrowLeft size={16} />
+            </button>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-semibold text-[#1A1A2E]">{project?.name ?? "Project workspace"}</h1>
+                {project && <StatusPill>{project.source_type === "git" ? "Git repository" : "Local folder"}</StatusPill>}
+                <StatusPill className={MODE_STYLES[mode]}>{MODE_LABELS[mode]}</StatusPill>
+              </div>
+              <p className="mt-1 text-sm text-[#64748B]">
+                Repo-aware multi-agent workspace with files, branch status, and conversation history in one place.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" onClick={newConv}>
+              <Plus size={14} /> New Conversation
+            </Button>
+            <Button variant="secondary" onClick={refreshProject} loading={refreshing}>
+              <RefreshCw size={14} /> Refresh Workspace
+            </Button>
+          </div>
         </div>
 
-        {/* File Tree */}
-        <div className="flex-1 overflow-auto">
-          <div className="px-4 py-2 border-b border-[#F1F5F9] flex items-center justify-between">
-            <p className="text-xs font-semibold text-[#94A3B8] uppercase tracking-wider">Files</p>
-            <button
-              type="button"
-              onClick={refreshProject}
-              disabled={refreshing}
-              title={project?.source_type === "git" ? "Fetch from origin + refresh files" : "Refresh files"}
-              className="text-[#94A3B8] hover:text-[#0050A0] disabled:opacity-50"
-            >
-              <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
-            </button>
+        <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-6">
+          <OverviewCard label="Current branch" value={project?.default_branch ?? "—"} icon={<GitBranch size={14} />} />
+          <OverviewCard label="Conversations" value={String(convs.length)} icon={<MessageSquarePlus size={14} />} />
+          <OverviewCard label="Dirty files" value={String(dirtyCount)} icon={<File size={14} />} tone={dirtyCount > 0 ? "warning" : "default"} />
+          <OverviewCard label="Mode" value={MODE_LABELS[mode]} icon={<Sparkles size={14} />} />
+          <OverviewCard label="Selected file" value={selectedFilePath ? selectedFilePath.split("/").pop() ?? selectedFilePath : "None"} icon={<FolderOpen size={14} />} />
+          <OverviewCard label="Last update" value={project ? formatDate(project.updated_at) : "—"} icon={<Clock3 size={14} />} />
+        </div>
+
+        {refreshStatus && (
+          <div className="mt-3">
+            <InlineBanner
+              tone={refreshStatus.toLowerCase().includes("failed") ? "error" : "info"}
+              title="Workspace status"
+              description={refreshStatus}
+            />
           </div>
-          {refreshStatus && (
-            <div className="px-4 py-1 text-[11px] text-[#0050A0] bg-blue-50 border-b border-[#E0E7FF]">
-              {refreshStatus}
+        )}
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        <aside className="w-[320px] flex-shrink-0 border-r border-[#E2E8F0] bg-white">
+          <div className="border-b border-[#E2E8F0] px-4 py-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Conversations</p>
+                <p className="mt-1 text-sm text-[#64748B]">Shared project history across agents</p>
+              </div>
+              <button onClick={newConv} className="rounded-lg border border-[#E2E8F0] p-2 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0]">
+                <Plus size={14} />
+              </button>
             </div>
-          )}
-          <div className="py-1">
-            {fileTree.map((node) => <FileNodeItem key={node.path} node={node} depth={0} />)}
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              <MiniStat label="All" value={String(conversationHealth.total)} tone="blue" />
+              <MiniStat label="Recent" value={String(conversationHealth.recent)} tone="green" />
+              <MiniStat label="Debate" value={String(conversationHealth.debate)} tone="amber" />
+            </div>
+            <div className="mt-4 flex items-center gap-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
+              <Search size={14} className="text-[#94A3B8]" />
+              <input
+                value={conversationQuery}
+                onChange={(e) => setConversationQuery(e.target.value)}
+                placeholder="Search title or mode"
+                className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
+              />
+            </div>
           </div>
 
-          <div className="px-4 py-2 border-t border-[#F1F5F9] flex items-center justify-between">
-            <p className="text-xs font-semibold text-[#94A3B8] uppercase tracking-wider">{MODE_LABELS[mode]} Chats</p>
-            <button onClick={newConv} className="text-[#94A3B8] hover:text-[#0050A0]">
-              <Plus size={13} />
-            </button>
-          </div>
-          {convs.map((c) => (
-            <div
-              key={c.id}
-              className={cn(
-                "group flex items-center gap-1 pr-2 transition-colors",
-                activeConv?.id === c.id
-                  ? "bg-blue-50"
-                  : "hover:bg-[#F8F9FA]"
-              )}
-            >
-              <button
-                onClick={() => selectConv(c)}
-                className={cn(
-                  "flex-1 min-w-0 text-left px-4 py-2 text-sm transition-colors",
-                  activeConv?.id === c.id
-                    ? "text-[#0050A0] font-medium"
-                    : "text-[#64748B]"
-                )}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <MessageSquarePlus size={13} className="flex-shrink-0" />
-                  <span className="truncate">{c.title}</span>
+          <div className="h-[calc(100%-113px)] overflow-auto px-2 py-2">
+            {!project ? (
+              <div className="space-y-2 px-2 py-2">
+                <SkeletonBlock className="h-[88px] w-full" />
+                <SkeletonBlock className="h-[88px] w-full" />
+                <SkeletonBlock className="h-[88px] w-full" />
+              </div>
+            ) : filteredConvs.length === 0 ? (
+              <SectionEmpty
+                className="px-4 py-8"
+                title={conversationQuery ? "No conversations found" : "No conversations yet"}
+                description={conversationQuery
+                  ? "Try another title or mode keyword, or create a fresh conversation."
+                  : "Create a conversation to start building shared history across agents."}
+                action={<Button size="sm" onClick={newConv}><Plus size={14} /> New Conversation</Button>}
+              />
+            ) : (
+              filteredConvs.map((conv) => (
+                <div
+                  key={conv.id}
+                  className={cn(
+                    "group mb-2 rounded-2xl border p-3 transition",
+                    activeConv?.id === conv.id
+                      ? "border-[#BFDBFE] bg-[#EFF6FF] shadow-sm"
+                      : "border-transparent bg-transparent hover:border-[#E2E8F0] hover:bg-[#F8FAFC]"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <button className="min-w-0 flex-1 text-left" onClick={() => void selectConv(conv)}>
+                      <div className="flex items-center gap-2">
+                        <MessageSquarePlus size={14} className={activeConv?.id === conv.id ? "text-[#0050A0]" : "text-[#94A3B8]"} />
+                        <span className="truncate text-sm font-medium text-[#1A1A2E]">{conv.title}</span>
+                        {activeConv?.id === conv.id && <span className="rounded-full bg-white/90 px-2 py-0.5 text-[11px] font-semibold text-[#0050A0]">Active</span>}
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
+                        <span className={cn("rounded-full px-2 py-0.5", MODE_STYLES[conv.mode])}>{MODE_LABELS[conv.mode]}</span>
+                        <span>{formatRelativeTime(conv.updated_at)}</span>
+                        {streaming && activeConv?.id === conv.id && <span className="rounded-full border border-[#BFDBFE] bg-white px-2 py-0.5 text-[#1D4ED8]">Live</span>}
+                      </div>
+                      <div className="mt-2 line-clamp-2 text-xs text-[#64748B]">
+                        {activeConv?.id === conv.id
+                          ? `${activeThreadSummary.messageCount} message(s) in this thread${activeThreadSummary.lastAgent ? ` · last agent: ${activeThreadSummary.lastAgent}` : ""}`
+                          : conv.mode === "debate"
+                            ? "Debate timeline available for trade-off analysis and synthesis."
+                            : conv.mode === "hermes"
+                              ? "Deeper reasoning lane for architecture, planning, and careful review."
+                              : "Fast execution lane for focused implementation and direct answers."}
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => void deleteConv(conv, e)}
+                      title="Delete conversation"
+                      className="opacity-0 transition group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E]"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 </div>
-              </button>
+              ))
+            )}
+          </div>
+        </aside>
+
+        <main className="flex min-w-0 flex-1 flex-col">
+          <div className="border-b border-[#E2E8F0] bg-white px-6 py-3">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+              <div className="space-y-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-sm font-semibold text-[#1A1A2E]">{activeConv?.title ?? "No conversation selected"}</h2>
+                    {activeConv && <StatusPill className={MODE_STYLES[activeConv.mode]}>{MODE_LABELS[activeConv.mode]}</StatusPill>}
+                    {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">Streaming live</StatusPill>}
+                  </div>
+                  <p className="mt-1 text-xs text-[#64748B]">
+                    {activeConv
+                      ? "Choose the response strategy for the next turn. Conversation history remains shared at project scope."
+                      : "Create a conversation to start working with the agents."}
+                  </p>
+                  {activeConv && (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Thread size</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                      </div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last agent</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E] truncate">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
+                      </div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last user turn</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {(["openclaw", "hermes", "debate"] as AgentMode[]).map((candidate) => (
+                    <button
+                      key={candidate}
+                      onClick={() => setMode(candidate)}
+                      className={cn(
+                        "rounded-xl px-3 py-2 text-xs font-medium transition",
+                        mode === candidate
+                          ? MODE_STYLES[candidate]
+                          : "border border-[#E2E8F0] bg-white text-[#64748B] hover:border-[#94A3B8] hover:text-[#1A1A2E]"
+                      )}
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        {candidate === "openclaw" && <Cpu size={12} />}
+                        {candidate === "hermes" && <Bot size={12} />}
+                        {candidate === "debate" && <Zap size={12} />}
+                        {MODE_LABELS[candidate]}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid w-full max-w-[360px] grid-cols-2 gap-2 xl:grid-cols-1">
+                <button
+                  type="button"
+                  onClick={() => selectedFilePath && appendPrompt(`Please analyze file: ${selectedFilePath}\nFocus on architecture, risks, and recommended edits.`)}
+                  disabled={!selectedFilePath || streaming}
+                  className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-3 text-left transition hover:border-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <div className="text-xs font-semibold text-[#1A1A2E]">Use focused file</div>
+                  <div className="mt-1 text-xs text-[#64748B]">{focusedFileName || "Pick a file from the context panel first."}</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => appendPrompt(`Review the current branch state for ${project?.default_branch ?? "this workspace"}. Summarize changed files, risks, and the best next step.`)}
+                  disabled={streaming}
+                  className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-3 text-left transition hover:border-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <div className="text-xs font-semibold text-[#1A1A2E]">Review branch state</div>
+                  <div className="mt-1 text-xs text-[#64748B]">Turn current Git context into an actionable next step.</div>
+                </button>
+              </div>
+            </div>
+
+            {mode === "debate" && (
+              <div className="mt-4 rounded-3xl border border-[#FDE68A] bg-[linear-gradient(180deg,#FFFDF5_0%,#FFFBEB_100%)] p-4 text-sm text-[#92400E] shadow-sm">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div className="font-semibold text-[#92400E]">Debate workflow</div>
+                    <p className="mt-1 text-xs text-[#A16207]">Structured disagreement first, synthesis second. Use this when trade-offs or correctness matter more than speed.</p>
+                  </div>
+                  <StatusPill className="bg-white/90 text-[#B45309]">{streaming ? "Debate running" : "Ready for next round"}</StatusPill>
+                </div>
+                <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                  {debateTimeline.map((step, index) => (
+                    <DebateStepCard key={step.title} index={index + 1} title={step.title} detail={step.detail} state={step.state} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div
+            ref={messagesScrollRef}
+            onScroll={handleMessagesScroll}
+            className="relative flex-1 overflow-auto px-6 py-6"
+          >
+            {!activeConv ? (
+              <div className="flex h-full items-center justify-center">
+                <SectionEmpty
+                  className="w-full max-w-lg bg-white px-6 py-12 shadow-sm"
+                  title="Create a conversation to start"
+                  description="Use OpenClaw, Hermes, or Debate Mode with the same project context and repository state."
+                  action={<Button onClick={newConv}><Plus size={14} /> New Conversation</Button>}
+                />
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {streaming && (
+                  <div className="rounded-2xl border border-[#DBEAFE] bg-[linear-gradient(180deg,#F8FBFF_0%,#EFF6FF_100%)] px-4 py-3 shadow-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold text-[#1D4ED8]">Live agent activity</div>
+                        <div className="mt-1 text-xs text-[#64748B]">
+                          {mode === "debate"
+                            ? "Debate mode streams partial reasoning from each side before synthesis."
+                            : "The active model is streaming its response into this conversation."}
+                        </div>
+                      </div>
+                      <StatusPill className="bg-white text-[#1D4ED8]">{streamStatusEntries.length || streamBufferEntries.length} active lane(s)</StatusPill>
+                    </div>
+                  </div>
+                )}
+
+                {messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    style={{ contentVisibility: "auto", containIntrinsicSize: "0 200px" }}
+                  >
+                    <ChatMessage message={msg} />
+                  </div>
+                ))}
+
+                {streamStatusEntries.map(([agentLabel, status]) => (
+                  <StatusMessage key={`streaming-status-${agentLabel}`} label={agentLabel} status={status} now={statusNow} />
+                ))}
+
+                {streamBufferEntries.map(([agentLabel, content]) =>
+                  content ? (
+                    <ChatMessage
+                      key={`streaming-buffer-${agentLabel}`}
+                      message={{
+                        id: `streaming-buffer-${agentLabel}`,
+                        conversation_id: "",
+                        role: agentLabel.startsWith("Hermes") ? "hermes" : "openclaw",
+                        content,
+                        agent_name: agentLabel,
+                        created_at: new Date().toISOString(),
+                      }}
+                      streaming
+                    />
+                  ) : null
+                )}
+                <div ref={bottomRef} />
+              </div>
+            )}
+
+            {showJumpToBottom && (
               <button
                 type="button"
-                onClick={(e) => deleteConv(c, e)}
-                title="Delete conversation"
-                className="opacity-0 group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E] flex-shrink-0 p-1"
+                onClick={jumpToBottom}
+                className="sticky bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-[#BFDBFE] bg-white px-3 py-1.5 text-xs font-medium text-[#0050A0] shadow-sm hover:bg-blue-50"
               >
-                <Trash2 size={12} />
+                <span className="inline-flex items-center gap-1.5">
+                  <ArrowDown size={13} /> New output
+                </span>
               </button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Right: Chat */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Toolbar */}
-        <div className="h-14 border-b border-[#E2E8F0] bg-white flex items-center px-6 gap-4">
-          {project?.source_type === "git" && (
-            <div className="flex items-center gap-2 border-r border-[#E2E8F0] pr-4 mr-1">
-              <GitBranch size={13} className="text-[#0050A0]" />
-              <select
-                value={project.default_branch ?? ""}
-                disabled={switchingBranch || streaming}
-                onChange={(e) => void switchBranch(e.target.value)}
-                className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs text-[#1A1A2E] disabled:opacity-50"
-                title="Switch Git branch"
-              >
-                {(branches.length ? branches : [project.default_branch ?? "main"]).map((branch) => (
-                  <option key={branch} value={branch}>{branch}</option>
-                ))}
-              </select>
-              {switchingBranch && <span className="text-xs text-[#94A3B8]">switching...</span>}
-            </div>
-          )}
-          <span className="text-sm font-medium text-[#64748B]">Mode:</span>
-          {(["openclaw", "hermes", "debate"] as AgentMode[]).map((m) => (
-            <button key={m}
-              onClick={() => setMode(m)}
-              className={cn(
-                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
-                mode === m
-                  ? "bg-[#0050A0] text-white"
-                  : "text-[#64748B] hover:bg-[#F1F5F9]"
-              )}>
-              {m === "openclaw" && <Cpu size={12} />}
-              {m === "hermes" && <Bot size={12} />}
-              {m === "debate" && <Zap size={12} />}
-              {MODE_LABELS[m] as string}
-            </button>
-          ))}
-          {mode === "debate" && (
-            <span className="text-xs text-[#94A3B8] ml-2">Agents will challenge each other</span>
-          )}
-        </div>
-
-        {/* Messages */}
-        <div
-          ref={messagesScrollRef}
-          onScroll={handleMessagesScroll}
-          className="relative flex-1 overflow-auto px-6 py-6 space-y-4"
-        >
-          {!activeConv ? (
-            <div className="flex flex-col items-center justify-center h-full text-center">
-              <MessageSquarePlus size={48} className="text-[#E2E8F0] mb-4" />
-              <p className="text-[#64748B] font-medium">No conversation selected</p>
-              <p className="text-[#94A3B8] text-sm mt-1">Create a new conversation to start</p>
-              <Button className="mt-4" onClick={newConv}><Plus size={14} /> New Conversation</Button>
-            </div>
-          ) : (
-            <>
-              {messages.map((msg) => (
-                // content-visibility:auto lets the browser skip layout/paint
-                // for off-screen messages — effectively virtualizes long
-                // histories without restructuring the DOM tree. The
-                // contain-intrinsic-size placeholder (200px estimate) gives
-                // the scrollbar something stable to work with before the
-                // real content is rendered on scroll into view.
-                <div
-                  key={msg.id}
-                  style={{
-                    contentVisibility: "auto",
-                    containIntrinsicSize: "0 200px",
-                  }}
-                >
-                  <ChatMessage message={msg} />
-                </div>
-              ))}
-
-              {/* Waiting statuses */}
-              {Object.entries(streamStatuses).map(([agentLabel, status]) => (
-                <StatusMessage key={`streaming-status-${agentLabel}`} label={agentLabel} status={status} now={statusNow} />
-              ))}
-
-              {/* Streaming buffers */}
-              {Object.entries(streamBuffers).map(([agentLabel, content]) =>
-                content ? (
-                  <ChatMessage key={`streaming-buffer-${agentLabel}`} message={{
-                    id: `streaming-buffer-${agentLabel}`, conversation_id: "", role: agentLabel.startsWith("Hermes") ? "hermes" : "openclaw",
-                    content, agent_name: agentLabel, created_at: new Date().toISOString(),
-                  }} streaming />
-                ) : null
-              )}
-              <div ref={bottomRef} />
-            </>
-          )}
-          {showJumpToBottom && (
-            <button
-              type="button"
-              onClick={jumpToBottom}
-              className="sticky bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-[#BFDBFE] bg-white px-3 py-1.5 text-xs font-medium text-[#0050A0] shadow-sm hover:bg-blue-50"
-            >
-              <ArrowDown size={13} /> New output
-            </button>
-          )}
-        </div>
-
-        {/* Input */}
-        <div className="border-t border-[#E2E8F0] bg-white px-6 py-4">
-          <form onSubmit={handleSubmit} className="flex gap-3 items-end">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={activeConv ? "Ask the agents... (Enter to send, Shift+Enter for newline)" : "Select a conversation first"}
-              disabled={!activeConv || streaming}
-              rows={1}
-              className={cn(
-                "flex-1 resize-none rounded-lg border border-[#E2E8F0] px-4 py-2.5 text-sm text-[#1A1A2E]",
-                "placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#0050A0] focus:border-transparent",
-                "disabled:opacity-50 disabled:cursor-not-allowed min-h-[42px] max-h-40 overflow-auto"
-              )}
-              style={{ height: "auto" }}
-              onInput={(e) => {
-                const t = e.currentTarget;
-                t.style.height = "auto";
-                t.style.height = Math.min(t.scrollHeight, 160) + "px";
-              }}
-            />
-            {streaming ? (
-              <Button type="button" variant="secondary" onClick={stopStreaming}>
-                <Square size={14} /> Stop
-              </Button>
-            ) : (
-              <Button type="submit" disabled={!activeConv || !input.trim()}>
-                <Send size={15} />
-              </Button>
             )}
-          </form>
-        </div>
+          </div>
+
+          <div className="border-t border-[#E2E8F0] bg-white px-6 py-4">
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
+                <span className={cn("rounded-full px-2.5 py-1", MODE_STYLES[mode])}>{MODE_LABELS[mode]}</span>
+                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Branch: {project?.default_branch ?? "—"}</span>
+                {selectedFilePath ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedFilePath("");
+                      setSelectedFileContent("");
+                    }}
+                    className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8]"
+                  >
+                    Focused file: {focusedFileName} ×
+                  </button>
+                ) : (
+                  <span className="rounded-full border border-dashed border-[#CBD5E1] bg-white px-2.5 py-1 text-[#94A3B8]">No focused file</span>
+                )}
+                {streaming && <span className="rounded-full border border-[#BFDBFE] bg-[#EFF6FF] px-2.5 py-1 text-[#1D4ED8]">Agents are responding…</span>}
+              </div>
+
+              <div className="rounded-3xl border border-[#D6DFEA] bg-[#FBFCFE] p-3 shadow-[0_12px_30px_rgba(15,23,42,0.04)]">
+                <div className="mb-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => selectedFilePath && appendPrompt(`Please analyze file: ${selectedFilePath}\nExplain purpose, important logic, and likely change points.`)}
+                    disabled={!selectedFilePath || streaming}
+                    className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Analyze focused file
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => appendPrompt(`Summarize the current workspace status, including branch health, likely risks, and the next recommended action.`)}
+                    disabled={streaming}
+                    className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Summarize workspace
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => appendPrompt(`Help me plan the next implementation step for this project. Give me a concise checklist before any code edits.`)}
+                    disabled={streaming}
+                    className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Plan next step
+                  </button>
+                </div>
+
+                <div className="flex items-end gap-3">
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={(e) => {
+                      setInput(e.target.value);
+                      requestAnimationFrame(syncTextareaHeight);
+                    }}
+                    onKeyDown={handleKeyDown}
+                    placeholder={activeConv ? "Ask the agents about this project… Enter to send, Shift+Enter for newline." : "Select a conversation first"}
+                    disabled={!activeConv || streaming}
+                    rows={1}
+                    className={cn(
+                      "min-h-[88px] max-h-48 flex-1 resize-none overflow-auto rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-sm text-[#1A1A2E]",
+                      "placeholder:text-[#94A3B8] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[#0050A0]",
+                      "disabled:cursor-not-allowed disabled:opacity-50"
+                    )}
+                    style={{ height: "auto" }}
+                  />
+                  <div className="flex flex-col gap-2">
+                    {streaming ? (
+                      <Button type="button" variant="secondary" onClick={stopStreaming}>
+                        <Square size={14} /> Stop
+                      </Button>
+                    ) : (
+                      <Button type="submit" disabled={!activeConv || !input.trim()}>
+                        <Send size={15} /> Send
+                      </Button>
+                    )}
+                    <div className="rounded-2xl border border-[#E2E8F0] bg-white px-3 py-2 text-right text-xs text-[#64748B]">
+                      <div>{input.trim().length} chars</div>
+                      <div>{selectedFilePath ? "File context on" : "No file context"}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </form>
+          </div>
+        </main>
+
+        <aside className="hidden w-[360px] flex-shrink-0 border-l border-[#E2E8F0] bg-white xl:flex xl:flex-col">
+          <div className="border-b border-[#E2E8F0] px-4 py-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Context panel</p>
+            <div className="mt-3 flex gap-2">
+              {([
+                ["files", "Files"],
+                ["git", "Git"],
+                ["project", "Project"],
+              ] as [ContextTab, string][]).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  onClick={() => setContextTab(tab)}
+                  className={cn(
+                    "rounded-xl px-3 py-2 text-xs font-medium transition",
+                    contextTab === tab
+                      ? "bg-[#EAF2FF] text-[#0050A0]"
+                      : "text-[#64748B] hover:bg-[#F8FAFC] hover:text-[#1A1A2E]"
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-auto p-4">
+            {contextTab === "files" && (
+              <div className="space-y-4">
+                <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Quick file lookup</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">Search by path and jump straight into a relevant file before prompting the agents.</p>
+                    </div>
+                    <StatusPill>{allFilePaths.length} files</StatusPill>
+                  </div>
+                  <div className="mt-3 flex items-center gap-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
+                    <Search size={14} className="text-[#94A3B8]" />
+                    <input
+                      value={fileQuery}
+                      onChange={(e) => setFileQuery(e.target.value)}
+                      placeholder="Find by filename or path"
+                      className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
+                    />
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {fileHits.length === 0 ? (
+                      <SectionEmpty title="No file matches" description="Try a different filename fragment or refresh the workspace tree." />
+                    ) : fileHits.map((path) => (
+                      <button
+                        key={path}
+                        type="button"
+                        onClick={() => void loadFilePreview(path)}
+                        className={cn(
+                          "flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left text-sm transition",
+                          selectedFilePath === path
+                            ? "border-[#BFDBFE] bg-[#EFF6FF] text-[#0050A0]"
+                            : "border-[#E2E8F0] bg-[#FBFCFE] text-[#475569] hover:border-[#94A3B8] hover:text-[#1A1A2E]"
+                        )}
+                      >
+                        <span className="truncate">{path}</span>
+                        <span className="ml-3 text-[11px] text-[#94A3B8]">Open</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE]">
+                  <div className="border-b border-[#E2E8F0] px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-[#1A1A2E]">Project files</h3>
+                        <p className="mt-1 text-xs text-[#64748B]">Click a file to preview and use it as prompt context.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={refreshProject}
+                        disabled={refreshing}
+                        className="rounded-lg border border-[#E2E8F0] p-2 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0]"
+                      >
+                        <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-[260px] overflow-auto py-2">
+                    {fileTree.length === 0 ? (
+                      <SectionEmpty
+                        className="mx-4 my-4"
+                        title="No files available"
+                        description="Refresh the workspace or switch branches to reload repository contents."
+                      />
+                    ) : fileTree.map((node) => (
+                      <FileNodeItem
+                        key={node.path}
+                        node={node}
+                        depth={0}
+                        selectedPath={selectedFilePath}
+                        onSelect={loadFilePreview}
+                      />
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">File preview</h3>
+                      <p className="mt-1 text-xs text-[#64748B] truncate">{selectedFilePath || "No file selected"}</p>
+                    </div>
+                    {selectedFilePath && (
+                      <button
+                        type="button"
+                        onClick={() => appendPrompt(`Please analyze file: ${selectedFilePath}\nFocus on purpose, logic hotspots, and recommended changes.`)}
+                        className="rounded-lg border border-[#E2E8F0] px-2.5 py-1.5 text-xs font-medium text-[#0050A0] hover:border-[#0050A0]"
+                      >
+                        Ask about file
+                      </button>
+                    )}
+                  </div>
+
+                  {filePreviewLoading ? (
+                    <div className="mt-4 space-y-3">
+                      <SkeletonBlock className="h-4 w-40" />
+                      <SkeletonBlock className="h-56 w-full rounded-xl" />
+                    </div>
+                  ) : filePreviewError ? (
+                    <InlineBanner title="File preview failed" description={filePreviewError} tone="error" />
+                  ) : selectedFilePath ? (
+                    <div className="mt-4 overflow-hidden rounded-xl border border-[#E2E8F0]">
+                      <SyntaxHighlighter language={detectLanguage(selectedFilePath)}>{selectedFileContent}</SyntaxHighlighter>
+                    </div>
+                  ) : (
+                    <SectionEmpty
+                      className="mt-4"
+                      title="No file selected"
+                      description="Pick a file from the tree to preview its contents here and feed it into the next prompt."
+                    />
+                  )}
+                </section>
+              </div>
+            )}
+
+            {contextTab === "git" && (
+              <div className="space-y-4">
+                <section className="grid grid-cols-3 gap-3">
+                  <MiniStat label="Changed" value={String(gitStatus?.changed.length ?? 0)} tone="blue" />
+                  <MiniStat label="Staged" value={String(gitStatus?.staged.length ?? 0)} tone="green" />
+                  <MiniStat label="Untracked" value={String(gitStatus?.untracked.length ?? 0)} tone="amber" />
+                </section>
+
+                <section className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] p-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Hotspots</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">The files most likely to matter in the next conversation.</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => appendPrompt("Review the changed, staged, and untracked files. Rank the most important files to inspect next and explain why.")}
+                      className="rounded-lg border border-[#E2E8F0] px-2.5 py-1.5 text-xs font-medium text-[#0050A0] hover:border-[#0050A0]"
+                    >
+                      Ask agents
+                    </button>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {gitHotspots.length === 0 ? (
+                      <SectionEmpty title="No Git hotspots" description="This branch looks clean right now. Refresh or switch branches to inspect a different state." />
+                    ) : gitHotspots.map((path, index) => (
+                      <button
+                        key={path}
+                        type="button"
+                        onClick={() => void loadFilePreview(path)}
+                        className="flex w-full items-center justify-between rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-left text-sm text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0]"
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#EFF6FF] text-[11px] font-semibold text-[#1D4ED8]">{index + 1}</span>
+                          <span className="truncate">{path}</span>
+                        </span>
+                        <span className="text-[11px] text-[#94A3B8]">Preview</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Branch control</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">Switch branches from the active repository state.</p>
+                    </div>
+                    {project?.source_type === "git" && (
+                      <select
+                        value={project.default_branch ?? ""}
+                        disabled={switchingBranch || streaming}
+                        onChange={(e) => void switchBranch(e.target.value)}
+                        className="h-9 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs text-[#1A1A2E] disabled:opacity-50"
+                      >
+                        {(branches.length ? branches : [project.default_branch ?? "main"]).map((branch) => (
+                          <option key={branch} value={branch}>{branch}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  {switchingBranch && <p className="mt-2 text-xs text-[#64748B]">Switching branch…</p>}
+                </section>
+
+                <GitStatusSection title="Changed files" items={gitStatus?.changed ?? []} onOpen={loadFilePreview} />
+                <GitStatusSection title="Staged files" items={gitStatus?.staged ?? []} onOpen={loadFilePreview} />
+                <GitStatusSection title="Untracked files" items={gitStatus?.untracked ?? []} onOpen={loadFilePreview} />
+              </div>
+            )}
+
+            {contextTab === "project" && project && (
+              <div className="space-y-4">
+                <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
+                  <h3 className="text-sm font-semibold text-[#1A1A2E]">Workspace summary</h3>
+                  <dl className="mt-4 space-y-3 text-sm">
+                    <InfoRow label="Project name" value={project.name} />
+                    <InfoRow label="Source type" value={project.source_type} />
+                    <InfoRow label="Source path" value={project.source_path} />
+                    <InfoRow label="Local path" value={project.local_path ?? "—"} />
+                    <InfoRow label="Default branch" value={project.default_branch ?? "—"} />
+                    <InfoRow label="Updated" value={formatDate(project.updated_at)} />
+                  </dl>
+                </section>
+
+                <section className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] p-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-[#1A1A2E]">Project intelligence</h3>
+                      <p className="mt-1 text-xs text-[#64748B]">Turn current repo context into the next best question or action.</p>
+                    </div>
+                    <StatusPill>{workspaceInsights.length} insight{workspaceInsights.length === 1 ? "" : "s"}</StatusPill>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {workspaceInsights.length === 0 ? (
+                      <SectionEmpty title="No insights yet" description="Start a conversation, select a file, or refresh Git state to surface recommended actions here." />
+                    ) : workspaceInsights.map((insight) => (
+                      <button
+                        key={insight.title}
+                        type="button"
+                        onClick={() => appendPrompt(insight.action)}
+                        className="w-full rounded-2xl border border-[#E2E8F0] bg-white px-4 py-3 text-left transition hover:border-[#0050A0] hover:shadow-sm"
+                      >
+                        <div className="text-sm font-semibold text-[#1A1A2E]">{insight.title}</div>
+                        <div className="mt-1 text-xs text-[#64748B]">{insight.detail}</div>
+                        <div className="mt-3 text-xs font-medium text-[#0050A0]">Use as next prompt</div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
+                  <h3 className="text-sm font-semibold text-[#1A1A2E]">How to use this workspace well</h3>
+                  <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-[#64748B]">
+                    <li>Use the right panel to preview files before asking the agents for changes.</li>
+                    <li>Switch mode based on task: OpenClaw for speed, Hermes for deeper reasoning, Debate for trade-off analysis.</li>
+                    <li>Keep an eye on branch and dirty file counts before asking for implementation advice.</li>
+                  </ul>
+                </section>
+              </div>
+            )}
+          </div>
+        </aside>
       </div>
+    </div>
+  );
+}
+
+function DebateStepCard({
+  index,
+  title,
+  detail,
+  state,
+}: {
+  index: number;
+  title: string;
+  detail: string;
+  state: "idle" | "queued" | "active" | "done";
+}) {
+  const toneClass = state === "done"
+    ? "border-[#FDE68A] bg-white"
+    : state === "active"
+      ? "border-[#F59E0B] bg-[#FFF7ED]"
+      : state === "queued"
+        ? "border-[#FDE68A] bg-[#FEFCE8]"
+        : "border-[#FDE68A]/60 bg-white/70";
+
+  const badgeClass = state === "done"
+    ? "bg-[#FEF3C7] text-[#92400E]"
+    : state === "active"
+      ? "bg-[#F59E0B] text-white"
+      : state === "queued"
+        ? "bg-[#FFF7ED] text-[#B45309]"
+        : "bg-white text-[#A16207]";
+
+  const statusLabel = state === "done"
+    ? "Done"
+    : state === "active"
+      ? "Running"
+      : state === "queued"
+        ? "Queued"
+        : "Waiting";
+
+  return (
+    <div className={cn("rounded-2xl border p-4 shadow-sm", toneClass)}>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[#A16207]">Step {index}</span>
+        <span className={cn("rounded-full px-2.5 py-1 text-[11px] font-semibold", badgeClass)}>{statusLabel}</span>
+      </div>
+      <div className="mt-3 text-sm font-semibold text-[#92400E]">{title}</div>
+      <div className="mt-1 text-xs text-[#A16207]">{detail}</div>
+    </div>
+  );
+}
+
+function OverviewCard({
+  label,
+  value,
+  icon,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  icon: ReactNode;
+  tone?: "default" | "warning";
+}) {
+  return (
+    <div className={cn(
+      "rounded-2xl border bg-white px-4 py-3 shadow-sm",
+      tone === "warning" ? "border-[#FDE68A] bg-[#FFFBEB]" : "border-[#E2E8F0]"
+    )}>
+      <div className="flex items-center gap-2 text-xs text-[#64748B]">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-2 truncate text-sm font-semibold text-[#1A1A2E]">{value}</div>
+    </div>
+  );
+}
+
+function StatusPill({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <span className={cn("rounded-full bg-[#F1F5F9] px-2.5 py-1 text-xs font-medium text-[#475569]", className)}>
+      {children}
+    </span>
+  );
+}
+
+function MiniStat({ label, value, tone }: { label: string; value: string; tone: "blue" | "green" | "amber" }) {
+  const toneClass = tone === "blue"
+    ? "border-[#BFDBFE] bg-[#EFF6FF] text-[#1D4ED8]"
+    : tone === "green"
+      ? "border-[#BBF7D0] bg-[#F0FDF4] text-[#166534]"
+      : "border-[#FDE68A] bg-[#FFFBEB] text-[#B45309]";
+
+  return (
+    <div className={cn("rounded-2xl border px-4 py-3", toneClass)}>
+      <div className="text-xs font-medium">{label}</div>
+      <div className="mt-1 text-lg font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function GitStatusSection({ title, items, onOpen }: { title: string; items: string[]; onOpen: (path: string) => void }) {
+  return (
+    <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[#1A1A2E]">{title}</h3>
+        <span className="text-xs text-[#94A3B8]">{items.length}</span>
+      </div>
+      {items.length === 0 ? (
+        <SectionEmpty
+          className="mt-3 px-4 py-6"
+          title="No files"
+          description="This section is currently clean for the active branch state."
+        />
+      ) : (
+        <div className="mt-3 space-y-2">
+          {items.map((item) => (
+            <button
+              key={item}
+              onClick={() => void onOpen(item)}
+              className="flex w-full items-center justify-between rounded-xl border border-[#E2E8F0] px-3 py-2 text-left text-sm text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            >
+              <span className="truncate">{item}</span>
+              <File size={13} className="flex-shrink-0" />
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[120px_1fr] gap-3">
+      <dt className="text-[#64748B]">{label}</dt>
+      <dd className="break-all text-[#1A1A2E]">{value}</dd>
     </div>
   );
 }
@@ -668,35 +1487,47 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 function StatusMessage({ label, status, now }: { label: string; status: StreamStatus; now: number }) {
   const isHermes = status.agent.startsWith("Hermes") || label.startsWith("Hermes");
   const elapsed = Math.max(0, Math.floor(((now || status.startedAt) - status.startedAt) / 1000));
+  const phaseLabel = status.phase === "final"
+    ? "Final"
+    : status.round
+      ? `Round ${status.round}`
+      : "Streaming";
 
   return (
     <div className="flex gap-3">
       <div className={cn(
-        "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-white text-xs font-bold",
-        isHermes ? "bg-[#7C3AED]" : "bg-[#0050A0]",
+        "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow-sm",
+        isHermes ? "bg-[#7C3AED]" : "bg-[#0050A0]"
       )}>
         {isHermes ? <Bot size={14} /> : <Cpu size={14} />}
       </div>
-      <div className="max-w-[75%]">
-        <span className={cn(
-          "text-xs font-semibold mb-1 block",
-          isHermes ? "text-[#7C3AED]" : "text-[#0050A0]"
-        )}>
-          {label}
-          <span className="ml-1 animate-pulse">●</span>
-        </span>
-        <div className={cn(
-          "rounded-xl px-4 py-3 text-sm rounded-tl-sm border flex items-center gap-2",
-          isHermes
-            ? "bg-[#F5F3FF] border-[#E9D5FF] text-[#1A1A2E]"
-            : "bg-[#EFF6FF] border-[#BFDBFE] text-[#1A1A2E]"
-        )}>
+      <div className="max-w-[75%] min-w-0">
+        <div className="mb-1 flex flex-wrap items-center gap-2">
           <span className={cn(
-            "h-3 w-3 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0",
-            isHermes ? "border-[#7C3AED]" : "border-[#0050A0]"
-          )} />
-          <span>{status.message}</span>
-          <span className="text-xs text-[#64748B] tabular-nums">{elapsed}s</span>
+            "block text-xs font-semibold",
+            isHermes ? "text-[#7C3AED]" : "text-[#0050A0]"
+          )}>
+            {label}
+            <span className="ml-1 animate-pulse">●</span>
+          </span>
+          <span className="rounded-full border border-white/70 bg-white/70 px-2 py-0.5 text-[11px] font-medium text-[#64748B]">{phaseLabel}</span>
+        </div>
+        <div className={cn(
+          "rounded-2xl rounded-tl-sm border px-4 py-3 text-sm shadow-sm",
+          isHermes
+            ? "border-[#E9D5FF] bg-[#F5F3FF] text-[#1A1A2E]"
+            : "border-[#BFDBFE] bg-[#EFF6FF] text-[#1A1A2E]"
+        )}>
+          <div className="flex items-start gap-2">
+            <span className={cn(
+              "mt-0.5 h-3 w-3 flex-shrink-0 rounded-full border-2 border-t-transparent animate-spin",
+              isHermes ? "border-[#7C3AED]" : "border-[#0050A0]"
+            )} />
+            <div className="min-w-0 flex-1">
+              <div>{status.message}</div>
+              <div className="mt-2 text-xs text-[#64748B]">Elapsed {elapsed}s</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -709,11 +1540,12 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
   const isOpenClaw = message.role === "openclaw";
   const isSystem = message.role === "system";
   const visibleContent = message.content.replace(/<!--\s*consensus:reached\s*-->/gi, "").trim();
+  const timestamp = message.created_at ? new Date(message.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
 
   if (isSystem) {
     return (
-      <div className="flex items-start gap-2 mx-auto max-w-[80%] rounded-md border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs text-[#991B1B]">
-        <AlertCircle size={13} className="flex-shrink-0 mt-0.5" />
+      <div className="mx-auto flex max-w-[80%] items-start gap-2 rounded-md border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs text-[#991B1B]">
+        <AlertCircle size={13} className="mt-0.5 flex-shrink-0" />
         <span className="whitespace-pre-wrap">{visibleContent}</span>
       </div>
     );
@@ -721,40 +1553,38 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
 
   return (
     <div className={cn("flex gap-3", isUser && "flex-row-reverse")}>
-      {/* Avatar */}
       <div className={cn(
-        "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-white text-xs font-bold",
+        "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold text-white",
         isUser && "bg-[#002D62]",
         isHermes && "bg-[#7C3AED]",
-        isOpenClaw && "bg-[#0050A0]",
+        isOpenClaw && "bg-[#0050A0]"
       )}>
         {isUser ? <User size={14} /> : isHermes ? <Bot size={14} /> : <Cpu size={14} />}
       </div>
 
-      {/* Bubble */}
-      <div className={cn("max-w-[75%]", isUser && "items-end flex flex-col")}>
-        {!isUser && (
-          <span className={cn(
-            "text-xs font-semibold mb-1 block",
-            isHermes ? "text-[#7C3AED]" : "text-[#0050A0]"
-          )}>
-            {message.agent_name ?? (isHermes ? "Hermes" : "OpenClaw")}
-            {streaming && <span className="ml-1 animate-pulse">●</span>}
-          </span>
-        )}
+      <div className={cn("max-w-[75%]", isUser && "flex flex-col items-end")}>
+        <div className={cn("mb-1 flex flex-wrap items-center gap-2", isUser && "justify-end")}>
+          {!isUser && (
+            <span className={cn(
+              "block text-xs font-semibold",
+              isHermes ? "text-[#7C3AED]" : "text-[#0050A0]"
+            )}>
+              {message.agent_name ?? (isHermes ? "Hermes" : "OpenClaw")}
+              {streaming && <span className="ml-1 animate-pulse">●</span>}
+            </span>
+          )}
+          {streaming && <span className="rounded-full border border-[#E2E8F0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#64748B]">Streaming</span>}
+          {timestamp && <span className="text-[11px] text-[#94A3B8]">{timestamp}</span>}
+        </div>
         <div className={cn(
-          "rounded-xl px-4 py-3 text-sm",
+          "rounded-2xl px-4 py-3 text-sm shadow-sm",
           isUser
-            ? "bg-[#002D62] text-white rounded-tr-sm"
+            ? "rounded-tr-sm bg-[#002D62] text-white"
             : isHermes
-              ? "bg-[#F5F3FF] border border-[#E9D5FF] text-[#1A1A2E] rounded-tl-sm"
-              : "bg-[#EFF6FF] border border-[#BFDBFE] text-[#1A1A2E] rounded-tl-sm"
+              ? "rounded-tl-sm border border-[#E9D5FF] bg-[#F5F3FF] text-[#1A1A2E]"
+              : "rounded-tl-sm border border-[#BFDBFE] bg-[#EFF6FF] text-[#1A1A2E]"
         )}>
           {isUser || streaming ? (
-            // While streaming, render as plain text — re-parsing markdown on
-            // every chunk is the dominant cost when buffers are long.
-            // Markdown + syntax highlighting kicks in once the message is
-            // committed (streaming=false).
             <p className="whitespace-pre-wrap">{visibleContent}</p>
           ) : (
             <div className="prose prose-sm max-w-none">
@@ -765,7 +1595,7 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
                     return match ? (
                       <SyntaxHighlighter language={match[1]}>{String(children)}</SyntaxHighlighter>
                     ) : (
-                      <code className="bg-black/10 rounded px-1 py-0.5 font-mono text-xs" {...props}>
+                      <code className="rounded bg-black/10 px-1 py-0.5 font-mono text-xs" {...props}>
                         {children}
                       </code>
                     );
@@ -782,30 +1612,58 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
   );
 });
 
-function FileNodeItem({ node, depth }: { node: FileNode; depth: number }) {
+function FileNodeItem({
+  node,
+  depth,
+  selectedPath,
+  onSelect,
+}: {
+  node: FileNode;
+  depth: number;
+  selectedPath: string;
+  onSelect: (path: string) => void;
+}) {
   const [open, setOpen] = useState(depth === 0);
+
   if (node.is_dir) {
     return (
       <div>
         <button
-          onClick={() => setOpen((o) => !o)}
-          className="w-full flex items-center gap-1.5 px-4 py-1 text-xs text-[#64748B] hover:bg-[#F8F9FA] hover:text-[#1A1A2E]"
-          style={{ paddingLeft: `${16 + depth * 12}px` }}>
+          onClick={() => setOpen((prev) => !prev)}
+          className="flex w-full items-center gap-1.5 px-4 py-1.5 text-xs text-[#64748B] hover:bg-[#F8F9FA] hover:text-[#1A1A2E]"
+          style={{ paddingLeft: `${16 + depth * 12}px` }}
+        >
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           <FolderOpen size={12} className="text-[#F59E0B]" />
-          {node.name}
+          <span className="truncate">{node.name}</span>
         </button>
         {open && node.children?.map((child) => (
-          <FileNodeItem key={child.path} node={child} depth={depth + 1} />
+          <FileNodeItem
+            key={child.path}
+            node={child}
+            depth={depth + 1}
+            selectedPath={selectedPath}
+            onSelect={onSelect}
+          />
         ))}
       </div>
     );
   }
+
+  const selected = selectedPath === node.path;
   return (
-    <div className="flex items-center gap-1.5 px-4 py-1 text-xs text-[#94A3B8] hover:bg-[#F8F9FA] hover:text-[#64748B] cursor-pointer"
-      style={{ paddingLeft: `${16 + depth * 12 + 16}px` }}>
+    <button
+      onClick={() => void onSelect(node.path)}
+      className={cn(
+        "flex w-full items-center gap-1.5 px-4 py-1.5 text-left text-xs transition",
+        selected
+          ? "bg-[#EAF2FF] text-[#0050A0]"
+          : "text-[#94A3B8] hover:bg-[#F8F9FA] hover:text-[#64748B]"
+      )}
+      style={{ paddingLeft: `${16 + depth * 12 + 16}px` }}
+    >
       <File size={11} />
-      {node.name}
-    </div>
+      <span className="truncate">{node.name}</span>
+    </button>
   );
 }
