@@ -53,6 +53,7 @@ import { Button } from "@/components/ui/button";
 import { InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
 import { cn, formatDate } from "@/lib/utils";
 import { useToastStore } from "@/lib/toast-store";
+import { useT } from "@/lib/i18n";
 import { InsightsTab } from "@/components/InsightsTab";
 import { CostTab } from "@/components/CostTab";
 import { RoadmapTab } from "@/components/RoadmapTab";
@@ -61,31 +62,31 @@ type ProjectTab = "workspace" | "insights" | "cost" | "roadmap";
 
 type QuickAction = "health" | "explore" | "roadmap" | "patch";
 
-const QUICK_ACTIONS: Array<{ key: QuickAction; label: string; icon: typeof Activity; prompt: string }> = [
+const QUICK_ACTIONS: Array<{ key: QuickAction; labelKey: string; icon: typeof Activity; prompt: string }> = [
   {
     key: "health",
-    label: "Health Scan",
+    labelKey: "quick.healthScan",
     icon: Activity,
     prompt:
       "請以 Debate Mode 執行專案初診。OpenClaw 從架構、系統風險、資料流與長期維護角度分析；Hermes 從實作成本、可讀性、日常維護、測試與快速改善角度分析。請根據已索引的專案檔案提出：1. 專案摘要 2. 技術棧與入口點 3. 主要風險 4. 可立即改善項目 5. 中長期優化方向 6. 測試/文件缺口。所有具體判斷都要引用檔案路徑作為依據；如果證據不足，明確說明。最後產生優先順序清楚的結論。",
   },
   {
     key: "explore",
-    label: "Explore Ideas",
+    labelKey: "quick.exploreIdeas",
     icon: Lightbulb,
     prompt:
       "請進入問題探索模式。不要只回答單一問題，請讓 OpenClaw / Hermes 主動碰撞這個專案可能值得改善、重構或產品化的方向。輸出：潛在問題、可驗證假設、使用者可能真正想解決的需求、創新功能想法、風險與取捨。每個建議都要盡可能引用已索引檔案路徑，並標示信心等級與下一步驗證方式。",
   },
   {
     key: "roadmap",
-    label: "Roadmap",
+    labelKey: "quick.roadmap",
     icon: ListChecks,
     prompt:
       "請把目前專案可優化方向整理成可執行 Roadmap。請輸出任務清單，每個任務包含：title、priority、why、affected files、acceptance criteria、estimated effort、dependencies、建議由 OpenClaw 或 Hermes 主導。任務必須根據專案檔案與目前對話，不要憑空發明。",
   },
   {
     key: "patch",
-    label: "Patch Plan",
+    labelKey: "quick.patchPlan",
     icon: Code2,
     prompt:
       "請進入 Patch / PR 規劃模式。根據目前專案狀態，挑選最高價值且風險可控的一項改善，產生 patch-ready 計畫。請輸出：目標、受影響檔案、修改步驟、預期 diff 摘要、測試指令、回滾方案、PR 標題與描述。不要實際 commit 或 push；若證據不足，先列出需要讀取或確認的檔案。",
@@ -170,6 +171,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const { id } = use(params);
   const router = useRouter();
   const pushToast = useToastStore((state) => state.pushToast);
+  const t = useT();
+  const modeLabel = (m: AgentMode): string =>
+    m === "openclaw" ? t("chat.modeOpenClaw")
+    : m === "hermes" ? t("chat.modeHermes")
+    : t("chat.modeDebate");
 
   const [project, setProject] = useState<Project | null>(null);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
@@ -730,38 +736,38 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             <button
               onClick={() => router.push("/projects")}
               className="mt-0.5 rounded-lg border border-[#E2E8F0] bg-white p-2 text-[#64748B] transition hover:border-[#0050A0] hover:text-[#0050A0]"
-              title="Back to projects"
+              title={t("project.backToProjects")}
             >
               <ArrowLeft size={16} />
             </button>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-xl font-semibold text-[#1A1A2E]">{project?.name ?? "Project workspace"}</h1>
-                {project && <StatusPill>{project.source_type === "git" ? "Git repository" : "Local folder"}</StatusPill>}
-                <StatusPill className={MODE_STYLES[mode]}>{MODE_LABELS[mode]}</StatusPill>
+                <h1 className="text-xl font-semibold text-[#1A1A2E]">{project?.name ?? t("project.workspace")}</h1>
+                {project && <StatusPill>{project.source_type === "git" ? t("project.gitRepository") : project.source_type === "upload" ? t("project.uploadProject") : t("project.localFolder")}</StatusPill>}
+                <StatusPill className={MODE_STYLES[mode]}>{modeLabel(mode)}</StatusPill>
               </div>
               <p className="mt-1 text-sm text-[#64748B]">
-                Repo-aware multi-agent workspace with files, branch status, and conversation history in one place.
+                {t("project.repoSummary")}
               </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" onClick={newConv}>
-              <Plus size={14} /> New Conversation
+              <Plus size={14} /> {t("project.newConversation")}
             </Button>
             <Button variant="secondary" onClick={refreshProject} loading={refreshing}>
-              <RefreshCw size={14} /> Refresh Workspace
+              <RefreshCw size={14} /> {t("project.refreshWorkspace")}
             </Button>
           </div>
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-6">
-          <OverviewCard label="Current branch" value={project?.default_branch ?? "—"} icon={<GitBranch size={14} />} />
-          <OverviewCard label="Conversations" value={String(convs.length)} icon={<MessageSquarePlus size={14} />} />
-          <OverviewCard label="Dirty files" value={String(dirtyCount)} icon={<File size={14} />} tone={dirtyCount > 0 ? "warning" : "default"} />
-          <OverviewCard label="Mode" value={MODE_LABELS[mode]} icon={<Sparkles size={14} />} />
-          <OverviewCard label="Selected file" value={selectedFilePath ? selectedFilePath.split("/").pop() ?? selectedFilePath : "None"} icon={<FolderOpen size={14} />} />
-          <OverviewCard label="Last update" value={project ? formatDate(project.updated_at) : "—"} icon={<Clock3 size={14} />} />
+          <OverviewCard label={t("project.currentBranch")} value={project?.default_branch ?? "—"} icon={<GitBranch size={14} />} />
+          <OverviewCard label={t("project.conversations")} value={String(convs.length)} icon={<MessageSquarePlus size={14} />} />
+          <OverviewCard label={t("project.dirtyFiles")} value={String(dirtyCount)} icon={<File size={14} />} tone={dirtyCount > 0 ? "warning" : "default"} />
+          <OverviewCard label={t("project.mode")} value={modeLabel(mode)} icon={<Sparkles size={14} />} />
+          <OverviewCard label={t("project.selectedFile")} value={selectedFilePath ? selectedFilePath.split("/").pop() ?? selectedFilePath : "—"} icon={<FolderOpen size={14} />} />
+          <OverviewCard label={t("project.lastUpdate")} value={project ? formatDate(project.updated_at) : "—"} icon={<Clock3 size={14} />} />
         </div>
 
         {refreshStatus && (
@@ -779,10 +785,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       <div className="border-b border-[#E2E8F0] bg-white px-6">
         <div className="flex gap-1">
           {([
-            ["workspace", "Workspace", MessageSquarePlus],
-            ["insights", "Insights", PieChart],
-            ["cost", "Cost", DollarSign],
-            ["roadmap", "Roadmap", MapIcon],
+            ["workspace", t("project.workspace"), MessageSquarePlus],
+            ["insights", t("project.insights"), PieChart],
+            ["cost", t("project.cost"), DollarSign],
+            ["roadmap", t("project.roadmap"), MapIcon],
           ] as Array<[ProjectTab, string, typeof MessageSquarePlus]>).map(([key, label, Icon]) => (
             <button
               key={key}
@@ -1131,7 +1137,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       requestAnimationFrame(syncTextareaHeight);
                     }}
                     onKeyDown={handleKeyDown}
-                    placeholder={activeConv ? "Ask the agents about this project… Enter to send, Shift+Enter for newline." : "Select a conversation first"}
+                    placeholder={activeConv ? t("chat.placeholder") : t("chat.placeholderEmpty")}
                     disabled={!activeConv || streaming}
                     rows={1}
                     className={cn(
@@ -1167,9 +1173,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Context panel</p>
             <div className="mt-3 flex gap-2">
               {([
-                ["files", "Files"],
-                ["git", "Git"],
-                ["project", "Project"],
+                ["files", t("project.tabFiles")],
+                ["git", t("project.tabGit")],
+                ["project", t("project.tabProject")],
               ] as [ContextTab, string][]).map(([tab, label]) => (
                 <button
                   key={tab}
@@ -1629,6 +1635,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState(false);
   const pushToast = useToastStore((s) => s.pushToast);
+  const t = useT();
 
   async function rate(value: 1 | -1) {
     const next = rating === value ? 0 : value;
@@ -1731,7 +1738,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
               <>
                 <button
                   onClick={() => void rate(1)}
-                  title="Helpful"
+                  title={t("chat.helpful")}
                   className={cn(
                     "rounded p-1 hover:bg-[#F1F5F9]",
                     rating === 1 && "bg-[#ECFDF5] text-[#10B981]"
@@ -1741,7 +1748,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
                 </button>
                 <button
                   onClick={() => void rate(-1)}
-                  title="Not helpful"
+                  title={t("chat.notHelpful")}
                   className={cn(
                     "rounded p-1 hover:bg-[#F1F5F9]",
                     rating === -1 && "bg-[#FEF2F2] text-[#C8102E]"
@@ -1755,13 +1762,13 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
               <button
                 onClick={() => void addToRoadmap()}
                 disabled={adding || added}
-                title={added ? "Added" : "Add to Roadmap"}
+                title={added ? t("chat.added") : t("chat.addToRoadmap")}
                 className={cn(
                   "ml-1 flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-[#F1F5F9]",
                   added && "text-[#10B981]"
                 )}
               >
-                <ClipboardList size={12} /> {added ? "Added" : adding ? "…" : "Add to Roadmap"}
+                <ClipboardList size={12} /> {added ? t("chat.added") : adding ? t("chat.adding") : t("chat.addToRoadmap")}
               </button>
             )}
           </div>

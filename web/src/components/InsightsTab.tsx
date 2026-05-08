@@ -6,6 +6,7 @@ import {
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
 } from "recharts";
 import { projects as projectsApi, type MetricsSummary, type MetricsHealth } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 
 const MODE_COLORS: Record<string, string> = {
   openclaw: "#0050A0",
@@ -23,6 +24,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
   const [health, setHealth] = useState<MetricsHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
+  const t = useT();
 
   async function refresh() {
     setLoading(true);
@@ -56,17 +58,17 @@ export function InsightsTab({ projectId }: { projectId: string }) {
   return (
     <div className="p-6 space-y-6 overflow-auto">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-[#1A1A2E]">Insights</h2>
+        <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("insights.title")}</h2>
         <button
           onClick={() => void refresh()}
           className="text-xs text-[#0050A0] hover:underline"
         >
-          Refresh
+          {t("common.refresh")}
         </button>
       </div>
 
       {health && (
-        <ChartCard title="Project Health Score" subtitle={`Composite score across 5 risk dimensions · ${health.indexed_files} indexed files`}>
+        <ChartCard title={t("insights.healthScore")} subtitle={`${t("insights.healthDesc")} · ${health.indexed_files} ${t("insights.indexedFiles")}`}>
           <div className="flex flex-col md:flex-row items-center gap-6 pt-2">
             <div className="flex flex-col items-center min-w-[140px]">
               <div className={`text-5xl font-bold ${
@@ -107,18 +109,18 @@ export function InsightsTab({ projectId }: { projectId: string }) {
 
       {/* KPI cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <KpiCard label="Conversations" value={totals.conversations} />
-        <KpiCard label="Total messages" value={totals.messages} />
-        <KpiCard label="Agent replies" value={totals.agent_messages} />
+        <KpiCard label={t("insights.totalConversations")} value={totals.conversations} />
+        <KpiCard label={t("insights.totalMessages")} value={totals.messages} />
+        <KpiCard label={t("insights.agentReplies")} value={totals.agent_messages} />
         <KpiCard
-          label="File-cited replies"
+          label={t("insights.fileCited")}
           value={`${(file_citation.rate * 100).toFixed(0)}%`}
           sub={`${file_citation.with_citation}/${file_citation.total}`}
         />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <ChartCard title="Conversation mode distribution">
+        <ChartCard title={t("insights.modeDistribution")}>
           {mode_distribution.length === 0 ? (
             <Empty />
           ) : (
@@ -147,7 +149,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
         </ChartCard>
 
         <ChartCard
-          title="Average reply length per agent"
+          title={t("insights.avgReplyLength")}
           subtitle="characters · last 90 days"
         >
           {avg_chars_by_agent.length === 0 ? (
@@ -175,8 +177,8 @@ export function InsightsTab({ projectId }: { projectId: string }) {
         </ChartCard>
 
         <ChartCard
-          title="Debate consensus rate"
-          subtitle="ratio of Final turns ending with consensus"
+          title={t("insights.consensusRate")}
+          subtitle={t("insights.consensusDesc")}
         >
           {consensus.debate_finals === 0 ? (
             <Empty hint="No Debate sessions yet" />
@@ -185,7 +187,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
           )}
         </ChartCard>
 
-        <ChartCard title="Debate round distribution">
+        <ChartCard title={t("insights.roundDistribution")}>
           {debate_round_distribution.length === 0 ? (
             <Empty hint="No Debate rounds recorded" />
           ) : (
@@ -203,7 +205,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
       </div>
 
       {feedback_by_agent.length > 0 && (
-        <ChartCard title="Agent satisfaction" subtitle="from per-message 👍 / 👎">
+        <ChartCard title={t("insights.satisfaction")} subtitle={t("insights.satisfactionDesc")}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
             {feedback_by_agent.map((f) => (
               <div key={f.agent} className="rounded-md bg-[#F8FAFC] p-3 flex items-center justify-between">
@@ -227,10 +229,10 @@ export function InsightsTab({ projectId }: { projectId: string }) {
         </ChartCard>
       )}
 
-      <ChartCard title="Latency" subtitle="across all agent calls">
+      <ChartCard title={t("insights.latency")} subtitle={t("insights.latencyDesc")}>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
-          <Stat label="Avg TTFT" value={fmtMs(timing.avg_ttft_ms)} />
-          <Stat label="Avg total" value={fmtMs(timing.avg_total_ms)} />
+          <Stat label={t("insights.avgTtft")} value={fmtMs(timing.avg_ttft_ms)} />
+          <Stat label={t("insights.avgTotal")} value={fmtMs(timing.avg_total_ms)} />
           <Stat label="p50" value={fmtMs(timing.p50_total_ms)} />
           <Stat label="p95" value={fmtMs(timing.p95_total_ms)} />
         </div>

@@ -7,6 +7,8 @@ import { auth } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useT } from "@/lib/i18n";
+import { LocaleSwitcher } from "@/components/LocaleSwitcher";
 
 const productHighlights = [
   "Repository-aware conversations with file and branch context",
@@ -17,6 +19,7 @@ const productHighlights = [
 export default function LoginPage() {
   const router = useRouter();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const t = useT();
   const [form, setForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -84,18 +87,21 @@ export default function LoginPage() {
           </div>
 
           <div className="rounded-[28px] border border-[#E2E8F0] bg-white p-8 shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
-            <div className="mb-6">
-              <div className="text-sm font-medium text-[#0050A0]">Welcome back</div>
-              <h2 className="mt-2 text-2xl font-semibold text-[#1A1A2E]">Sign in to your workspace</h2>
-              <p className="mt-2 text-sm leading-6 text-[#64748B]">
-                Access your projects, repository-linked conversations, and multi-agent workflows.
-              </p>
+            <div className="mb-6 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-[#0050A0]">{t("auth.welcomeBack")}</div>
+                <h2 className="mt-2 text-2xl font-semibold text-[#1A1A2E]">{t("common.signIn")}</h2>
+                <p className="mt-2 text-sm leading-6 text-[#64748B]">
+                  {t("auth.signInToContinue")}
+                </p>
+              </div>
+              <LocaleSwitcher tone="light" />
             </div>
 
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
               <Input
                 id="email"
-                label="Email"
+                label={t("auth.email")}
                 type="email"
                 placeholder="you@example.com"
                 value={form.email}
@@ -104,7 +110,7 @@ export default function LoginPage() {
               />
               <Input
                 id="password"
-                label="Password"
+                label={t("auth.password")}
                 type="password"
                 placeholder="••••••••"
                 value={form.password}
@@ -119,14 +125,14 @@ export default function LoginPage() {
               )}
 
               <Button type="submit" size="lg" loading={loading} className="mt-2 w-full">
-                Sign In
+                {loading ? t("auth.signingIn") : t("common.signIn")}
               </Button>
             </form>
 
             <p className="mt-6 text-center text-sm text-[#64748B]">
-              No account?{" "}
+              {t("auth.dontHaveAccount")}{" "}
               <Link href="/register" className="font-medium text-[#0050A0] hover:underline">
-                Create one
+                {t("auth.signUp")}
               </Link>
             </p>
           </div>

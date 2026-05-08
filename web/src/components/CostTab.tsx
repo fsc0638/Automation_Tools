@@ -4,6 +4,7 @@ import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar, Cell,
 } from "recharts";
 import { projects as projectsApi, type MetricsCost } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 
 const AGENT_COLORS: Record<string, string> = {
   openclaw: "#0050A0",
@@ -20,6 +21,7 @@ export function CostTab({ projectId }: { projectId: string }) {
   const [data, setData] = useState<MetricsCost | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
+  const t = useT();
 
   async function refresh() {
     setLoading(true);
@@ -56,23 +58,23 @@ export function CostTab({ projectId }: { projectId: string }) {
   return (
     <div className="p-6 space-y-6 overflow-auto">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-[#1A1A2E]">Cost</h2>
-        <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">Refresh</button>
+        <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("cost.title")}</h2>
+        <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">{t("common.refresh")}</button>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <Kpi label="Total cost (30d)" value={`$${data.total_cost_usd.toFixed(2)}`} />
-        <Kpi label="Input tokens" value={totalIn.toLocaleString()} />
-        <Kpi label="Output tokens" value={totalOut.toLocaleString()} />
-        <Kpi label="Agent calls" value={totalCalls.toLocaleString()} />
-        <Kpi label="Avg $/call" value={totalCalls > 0 ? `$${(data.total_cost_usd / totalCalls).toFixed(4)}` : "—"} />
+        <Kpi label={t("cost.totalCost")} value={`$${data.total_cost_usd.toFixed(2)}`} />
+        <Kpi label={t("cost.inputTokens")} value={totalIn.toLocaleString()} />
+        <Kpi label={t("cost.outputTokens")} value={totalOut.toLocaleString()} />
+        <Kpi label={t("cost.agentCalls")} value={totalCalls.toLocaleString()} />
+        <Kpi label={t("cost.avgPerCall")} value={totalCalls > 0 ? `$${(data.total_cost_usd / totalCalls).toFixed(4)}` : "—"} />
       </div>
 
       <div className="text-xs text-[#94A3B8] bg-[#FEF3C7] border border-[#FCD34D] rounded-md px-3 py-2">
-        ⚠️ {data.note} Cost is approximate.
+        ⚠️ {t("cost.note")}
       </div>
 
-      <Card title="Daily cost trend" subtitle="USD per day · stacked by agent">
+      <Card title={t("cost.dailyTrend")} subtitle="USD per day · stacked by agent">
         {dailySorted.length === 0 ? (
           <Empty hint="No usage in the last 30 days" />
         ) : (
@@ -90,7 +92,7 @@ export function CostTab({ projectId }: { projectId: string }) {
       </Card>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Card title="By agent (30d)">
+        <Card title={t("cost.byAgent")}>
           {data.by_agent.length === 0 ? (
             <Empty />
           ) : (
@@ -108,7 +110,7 @@ export function CostTab({ projectId }: { projectId: string }) {
           )}
         </Card>
 
-        <Card title="By mode (30d)" subtitle="Debate is naturally more expensive (multiple rounds)">
+        <Card title={t("cost.byMode")} subtitle="Debate is naturally more expensive (multiple rounds)">
           {data.by_mode.length === 0 ? (
             <Empty />
           ) : (
@@ -127,7 +129,7 @@ export function CostTab({ projectId }: { projectId: string }) {
         </Card>
       </div>
 
-      <Card title="Pricing in use">
+      <Card title={t("cost.pricingInUse")}>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 text-xs">
           <Stat label="OpenClaw in" value={`$${data.pricing.openclaw_per_1k_in}/1k`} />
           <Stat label="OpenClaw out" value={`$${data.pricing.openclaw_per_1k_out}/1k`} />

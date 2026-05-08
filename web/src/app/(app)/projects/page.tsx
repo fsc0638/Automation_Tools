@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Card, InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
 import { formatDate } from "@/lib/utils";
 import { useToastStore } from "@/lib/toast-store";
+import { useT } from "@/lib/i18n";
 
 const emptyProjectForm = {
   name: "",
@@ -38,6 +39,7 @@ const emptyIdentityForm = {
 export default function ProjectsPage() {
   const router = useRouter();
   const pushToast = useToastStore((state) => state.pushToast);
+  const t = useT();
   const [projectList, setProjectList] = useState<Project[]>([]);
   const [identityList, setIdentityList] = useState<GitIdentity[]>([]);
   const [loading, setLoading] = useState(true);
@@ -172,14 +174,14 @@ export default function ProjectsPage() {
 
   async function handleDelete(id: string, e: MouseEvent) {
     e.stopPropagation();
-    if (!confirm("Delete this project?")) return;
+    if (!confirm(t("projects.confirmDelete"))) return;
     await projectsApi.delete(id);
     await load();
     pushToast({ tone: "warning", title: "Project deleted", description: "The workspace has been removed from your dashboard." });
   }
 
   async function handleDeleteIdentity(id: string) {
-    if (!confirm("Delete this Git identity? Existing cloned projects will remain, but future fetch/checkout may need credentials.")) return;
+    if (!confirm(t("identity.confirmDelete"))) return;
     await gitIdentities.delete(id);
     await load();
     pushToast({ tone: "warning", title: "Git profile deleted", description: "Projects may need another profile for future repository access." });
@@ -211,17 +213,17 @@ export default function ProjectsPage() {
             <div className="inline-flex items-center gap-2 rounded-full bg-[#EEF4FF] px-3 py-1 text-xs font-semibold text-[#0050A0]">
               <Sparkles size={13} /> AI workspace dashboard
             </div>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[#1A1A2E]">Projects</h1>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[#1A1A2E]">{t("projects.title")}</h1>
             <p className="mt-2 max-w-2xl text-sm text-[#64748B]">
-              Manage your repository-connected AI workspaces, Git access profiles, and the active project contexts used by Hermes and OpenClaw.
+              {t("projects.subtitle")}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="secondary" onClick={() => setShowIdentityCreate((value) => !value)}>
-              <KeyRound size={16} /> Git Profile
+              <KeyRound size={16} /> {t("projects.gitIdentity")}
             </Button>
             <Button onClick={() => setShowCreate(true)}>
-              <Plus size={16} /> New Project
+              <Plus size={16} /> {t("projects.newProject")}
             </Button>
           </div>
         </div>
@@ -240,15 +242,15 @@ export default function ProjectsPage() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, description, branch, or path"
+            placeholder={t("projects.searchPlaceholder")}
             className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
           />
         </div>
         <div className="flex flex-wrap gap-2">
           {([
-            ["all", `All (${projectList.length})`],
-            ["git", `Git (${gitProjects})`],
-            ["local", `Local (${localProjects})`],
+            ["all", `${t("projects.filterAll")} (${projectList.length})`],
+            ["git", `${t("projects.filterGit")} (${gitProjects})`],
+            ["local", `${t("projects.filterLocal")} (${localProjects})`],
           ] as const).map(([value, label]) => (
             <button
               key={value}
@@ -267,22 +269,21 @@ export default function ProjectsPage() {
         <Card className="rounded-[24px] p-6 shadow-sm">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-lg font-semibold text-[#1A1A2E]">Add Git Profile</h2>
-              <p className="mt-1 text-sm text-[#64748B]">Store repository access once and reuse it across multiple projects.</p>
+              <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("projects.addGitIdentity")}</h2>
+              <p className="mt-1 text-sm text-[#64748B]">{t("identity.tokenHint")}</p>
             </div>
           </div>
           <form onSubmit={handleCreateIdentity} className="flex flex-col gap-4">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <Input id="git-name" label="Display Name" placeholder="Work GitHub" value={identityForm.name}
+              <Input id="git-name" label={t("identity.displayName")} placeholder="Work GitHub" value={identityForm.name}
                 onChange={(e) => setIdentityForm((current) => ({ ...current, name: e.target.value }))} required />
-              <Input id="git-provider" label="Provider" placeholder="github / gitlab / generic" value={identityForm.provider}
+              <Input id="git-provider" label={t("identity.provider")} placeholder="github / gitlab / generic" value={identityForm.provider}
                 onChange={(e) => setIdentityForm((current) => ({ ...current, provider: e.target.value }))} />
-              <Input id="git-user" label="Git Username" placeholder="username" value={identityForm.username}
+              <Input id="git-user" label={t("identity.gitUsername")} placeholder="username" value={identityForm.username}
                 onChange={(e) => setIdentityForm((current) => ({ ...current, username: e.target.value }))} required />
-              <Input id="git-token" label="Access Token" type="password" placeholder="Personal access token" value={identityForm.access_token}
+              <Input id="git-token" label={t("identity.accessToken")} type="password" placeholder="Personal access token" value={identityForm.access_token}
                 onChange={(e) => setIdentityForm((current) => ({ ...current, access_token: e.target.value }))} required />
             </div>
-            <p className="text-xs text-[#94A3B8]">Token is stored server-side and hidden from API responses. Use a least-privilege token for repository read access.</p>
             {identityError && (
               <InlineBanner
                 tone="error"
@@ -291,8 +292,8 @@ export default function ProjectsPage() {
               />
             )}
             <div className="flex gap-3 pt-2">
-              <Button type="submit" loading={identityCreating}>Save Git Profile</Button>
-              <Button type="button" variant="secondary" onClick={() => setShowIdentityCreate(false)}>Cancel</Button>
+              <Button type="submit" loading={identityCreating}>{t("identity.saveIdentity")}</Button>
+              <Button type="button" variant="secondary" onClick={() => setShowIdentityCreate(false)}>{t("common.cancel")}</Button>
             </div>
           </form>
 
@@ -325,17 +326,17 @@ export default function ProjectsPage() {
           </div>
           <form onSubmit={handleCreate} className="flex flex-col gap-5">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <Input id="pname" label="Project Name" placeholder="My Project" value={form.name}
+              <Input id="pname" label={t("projects.projectName")} placeholder="My Project" value={form.name}
                 onChange={(e) => setForm((current) => ({ ...current, name: e.target.value }))} required />
-              <Input id="desc" label="Description (optional)" placeholder="What is this workspace for?" value={form.description}
+              <Input id="desc" label={`${t("projects.description")} ${t("common.optional")}`} placeholder={t("projects.descriptionHint")} value={form.description}
                 onChange={(e) => setForm((current) => ({ ...current, description: e.target.value }))} />
             </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               {[
-                { value: "local", label: "Local Folder", hint: "Use an existing path on disk", icon: FolderOpen },
-                { value: "git", label: "Git Repository", hint: "Clone and track a remote repository", icon: GitBranch },
-                { value: "upload", label: "Upload ZIP", hint: "Upload a packaged project archive", icon: Upload },
+                { value: "local", label: t("projects.sourceLocal"), hint: t("projects.sourceLocalHint"), icon: FolderOpen },
+                { value: "git", label: t("projects.sourceGit"), hint: t("projects.sourceGitHint"), icon: GitBranch },
+                { value: "upload", label: t("projects.sourceUpload"), hint: t("projects.sourceUploadHint"), icon: Upload },
               ].map(({ value, label, hint, icon: Icon }) => (
                 <button
                   key={value}
@@ -357,7 +358,7 @@ export default function ProjectsPage() {
             </div>
 
             {form.source_type !== "upload" && (
-              <Input id="path" label={form.source_type === "local" ? "Folder Path" : "Git URL"}
+              <Input id="path" label={form.source_type === "local" ? t("projects.folderPath") : t("projects.gitUrl")}
                 placeholder={form.source_type === "local" ? "C:/Projects/my-app" : "https://github.com/org/repo.git"}
                 value={form.source_path}
                 onChange={(e) => {
@@ -369,7 +370,7 @@ export default function ProjectsPage() {
 
             {form.source_type === "upload" && (
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium text-[#1A1A2E]">Project ZIP</label>
+                <label className="text-sm font-medium text-[#1A1A2E]">{t("projects.uploadZip")}</label>
                 <input
                   type="file"
                   accept=".zip,application/zip,application/x-zip-compressed"
@@ -377,14 +378,14 @@ export default function ProjectsPage() {
                   className="block w-full rounded-xl border border-dashed border-[#94A3B8] bg-[#F8FAFC] px-3 py-3 text-sm text-[#64748B] file:mr-3 file:rounded-md file:border-0 file:bg-[#0050A0] file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:border-[#0050A0]"
                   required
                 />
-                <p className="text-xs text-[#94A3B8]">Max 100 MB. The archive is extracted into the project data root and indexed automatically.</p>
+                <p className="text-xs text-[#94A3B8]">{t("projects.uploadHint")}</p>
               </div>
             )}
 
             {form.source_type === "git" && (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-medium text-[#1A1A2E]">Git Profile</label>
+                  <label className="text-sm font-medium text-[#1A1A2E]">{t("projects.gitProfile")}</label>
                   <select value={form.git_identity_id}
                     onChange={(e) => {
                       setForm((current) => ({ ...current, git_identity_id: e.target.value }));
@@ -392,14 +393,14 @@ export default function ProjectsPage() {
                       setBranchFetchError("");
                     }}
                     className="h-11 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white">
-                    <option value="">No profile / public repo</option>
+                    <option value="">{t("projects.noProfile")}</option>
                     {identityList.map((identity) => (
                       <option key={identity.id} value={identity.id}>{identity.name} · {identity.username}</option>
                     ))}
                   </select>
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-medium text-[#1A1A2E]">Branch</label>
+                  <label className="text-sm font-medium text-[#1A1A2E]">{t("projects.branch")}</label>
                   <div className="flex gap-2">
                     {remoteBranches.length > 0 ? (
                       <select
@@ -423,7 +424,7 @@ export default function ProjectsPage() {
                       type="button"
                       onClick={() => void fetchRemoteBranches()}
                       disabled={loadingBranches || !form.source_path}
-                      title="Fetch branches from remote"
+                      title={t("projects.fetchBranches")}
                       className="flex h-11 items-center justify-center rounded-xl border border-[#E2E8F0] px-3 text-[#64748B] hover:border-[#0050A0] hover:text-[#0050A0] disabled:opacity-40"
                     >
                       {loadingBranches ? (
@@ -453,8 +454,8 @@ export default function ProjectsPage() {
             )}
 
             <div className="flex gap-3 pt-2">
-              <Button type="submit" loading={creating}>Create Project</Button>
-              <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>Cancel</Button>
+              <Button type="submit" loading={creating}>{t("projects.createProject")}</Button>
+              <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
             </div>
           </form>
         </Card>

@@ -2,13 +2,7 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { tasks as tasksApi, type ProjectTask, type TaskPriority, type TaskStatus } from "@/lib/api";
-
-const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
-  { key: "todo", label: "Todo" },
-  { key: "in-progress", label: "In progress" },
-  { key: "done", label: "Done" },
-  { key: "cancelled", label: "Cancelled" },
-];
+import { useT } from "@/lib/i18n";
 
 const PRIORITY_BADGE: Record<TaskPriority, string> = {
   critical: "bg-red-100 text-red-700",
@@ -31,6 +25,13 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
   const [showNew, setShowNew] = useState(false);
   const [draft, setDraft] = useState({ title: "", why: "", priority: "medium" as TaskPriority });
   const [hoverCol, setHoverCol] = useState<TaskStatus | null>(null);
+  const t = useT();
+  const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
+    { key: "todo", label: t("roadmap.colTodo") },
+    { key: "in-progress", label: t("roadmap.colInProgress") },
+    { key: "done", label: t("roadmap.colDone") },
+    { key: "cancelled", label: t("roadmap.colCancelled") },
+  ];
 
   async function refresh() {
     setLoading(true);
@@ -103,29 +104,29 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
   }
 
   if (loading && items.length === 0) {
-    return <div className="p-8 text-center text-[#94A3B8]">Loading…</div>;
+    return <div className="p-8 text-center text-[#94A3B8]">{t("common.loading")}</div>;
   }
   if (err) return <div className="p-8 text-center text-[#C8102E]">{err}</div>;
 
   const grouped: Record<TaskStatus, ProjectTask[]> = {
     todo: [], "in-progress": [], done: [], cancelled: [],
   };
-  for (const t of items) grouped[t.status]?.push(t);
+  for (const tk of items) grouped[tk.status]?.push(tk);
 
   return (
     <div className="p-6 space-y-4 overflow-auto">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-[#1A1A2E]">Roadmap</h2>
-          <p className="text-xs text-[#94A3B8]">Persistent tasks driven from Agent suggestions or added manually.</p>
+          <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("roadmap.title")}</h2>
+          <p className="text-xs text-[#94A3B8]">{t("roadmap.subtitle")}</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">Refresh</button>
+          <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">{t("common.refresh")}</button>
           <button
             onClick={() => setShowNew((v) => !v)}
             className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium hover:bg-[#003B7A]"
           >
-            <Plus size={12} /> New task
+            <Plus size={12} /> {t("roadmap.newTask")}
           </button>
         </div>
       </div>
@@ -135,39 +136,39 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
           <input
             value={draft.title}
             onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-            placeholder="Task title…"
+            placeholder={t("roadmap.taskTitle")}
             className="w-full h-10 px-3 rounded-md border border-[#E2E8F0] text-sm"
             required
           />
           <textarea
             value={draft.why}
             onChange={(e) => setDraft({ ...draft, why: e.target.value })}
-            placeholder="Why does this matter? (optional)"
+            placeholder={t("roadmap.whyHint")}
             rows={2}
             className="w-full px-3 py-2 rounded-md border border-[#E2E8F0] text-sm"
           />
           <div className="flex items-center gap-3">
-            <label className="text-xs text-[#64748B]">Priority:</label>
+            <label className="text-xs text-[#64748B]">{t("roadmap.priority")}:</label>
             <select
               value={draft.priority}
               onChange={(e) => setDraft({ ...draft, priority: e.target.value as TaskPriority })}
               className="h-8 px-2 text-xs rounded-md border border-[#E2E8F0]"
             >
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="critical">Critical</option>
+              <option value="low">{t("roadmap.priorityLow")}</option>
+              <option value="medium">{t("roadmap.priorityMedium")}</option>
+              <option value="high">{t("roadmap.priorityHigh")}</option>
+              <option value="critical">{t("roadmap.priorityCritical")}</option>
             </select>
             <div className="flex-1" />
-            <button type="button" onClick={() => setShowNew(false)} className="text-xs text-[#64748B] hover:text-[#1A1A2E]">Cancel</button>
-            <button type="submit" className="px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium">Create</button>
+            <button type="button" onClick={() => setShowNew(false)} className="text-xs text-[#64748B] hover:text-[#1A1A2E]">{t("common.cancel")}</button>
+            <button type="submit" className="px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium">{t("common.create")}</button>
           </div>
         </form>
       )}
 
       {items.length === 0 ? (
         <div className="text-sm text-[#94A3B8] text-center py-12 border border-dashed border-[#E2E8F0] rounded-lg">
-          No tasks yet. Click <span className="text-[#0050A0]">New task</span> or run a Patch Plan / Roadmap quick action.
+          {t("roadmap.empty")}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">

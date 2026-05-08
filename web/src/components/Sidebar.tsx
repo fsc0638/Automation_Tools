@@ -4,20 +4,23 @@ import { usePathname, useRouter } from "next/navigation";
 import { Bot, FolderOpen, LogOut, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
-
-const nav = [
-  {
-    href: "/projects",
-    label: "Projects",
-    description: "Manage repositories and workspaces",
-    icon: FolderOpen,
-  },
-];
+import { useT } from "@/lib/i18n";
+import { LocaleSwitcher } from "@/components/LocaleSwitcher";
 
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuthStore();
+  const t = useT();
+
+  const nav = [
+    {
+      href: "/projects",
+      label: t("sidebar.projects"),
+      description: t("sidebar.projectsDesc"),
+      icon: FolderOpen,
+    },
+  ];
 
   function handleLogout() {
     logout();
@@ -27,14 +30,17 @@ export function Sidebar() {
   return (
     <aside className="flex h-full w-72 flex-shrink-0 flex-col border-r border-white/10 bg-[radial-gradient(circle_at_top,_rgba(58,126,204,0.22),_transparent_38%),linear-gradient(180deg,#061936_0%,#08142B_100%)] text-white">
       <div className="border-b border-white/10 px-5 py-5">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/10 shadow-[0_12px_30px_rgba(0,0,0,0.22)] backdrop-blur-sm">
-            <span className="text-sm font-bold text-white">K</span>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/10 shadow-[0_12px_30px_rgba(0,0,0,0.22)] backdrop-blur-sm">
+              <span className="text-sm font-bold text-white">K</span>
+            </div>
+            <div>
+              <div className="text-sm font-semibold tracking-wide text-white">{t("sidebar.title")}</div>
+              <div className="mt-0.5 text-xs text-blue-100/70">{t("sidebar.subtitle")}</div>
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-semibold tracking-wide text-white">Kway Dev</div>
-            <div className="mt-0.5 text-xs text-blue-100/70">AI-native coding workspace</div>
-          </div>
+          <LocaleSwitcher tone="dark" />
         </div>
 
         <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
@@ -43,9 +49,9 @@ export function Sidebar() {
               <Sparkles size={15} />
             </div>
             <div>
-              <div className="text-sm font-medium text-white">Workspace status</div>
+              <div className="text-sm font-medium text-white">{t("sidebar.workspaceStatus")}</div>
               <p className="mt-1 text-xs leading-5 text-blue-100/75">
-                Use Projects to manage repo-aware conversations, branch context, and multi-agent workflows in one place.
+                {t("sidebar.workspaceStatusDesc")}
               </p>
             </div>
           </div>
@@ -54,7 +60,7 @@ export function Sidebar() {
 
       <nav className="flex-1 px-3 py-4">
         <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-100/45">
-          Navigation
+          {t("sidebar.navigation")}
         </div>
         <div className="space-y-1.5">
           {nav.map(({ href, label, description, icon: Icon }) => {
@@ -103,10 +109,10 @@ export function Sidebar() {
           <button
             onClick={handleLogout}
             className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/6 px-3 py-2.5 text-sm font-medium text-blue-100/80 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-            title="Sign out"
+            title={t("common.signOut")}
           >
             <LogOut size={15} />
-            Sign out
+            {t("common.signOut")}
           </button>
         </div>
       </div>
