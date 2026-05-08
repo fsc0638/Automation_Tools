@@ -7,6 +7,7 @@ use crate::crypto::TokenCipher;
 pub mod auth;
 pub mod conversation_memory;
 pub mod conversations;
+pub mod feedback;
 pub mod git_identities;
 pub mod metrics;
 pub mod project_index;
@@ -33,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .merge(conversations::routes())
         .merge(metrics::routes())
         .merge(tasks::routes())
+        .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

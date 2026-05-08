@@ -106,6 +106,14 @@ export const projects = {
     }),
 };
 
+export const feedback = {
+  submit: (messageId: string, rating: 1 | -1, note?: string) =>
+    request<{ id: string; message_id: string; rating: number; note: string | null }>(
+      `/messages/${messageId}/feedback`,
+      { method: "POST", body: JSON.stringify({ rating, note }) },
+    ),
+};
+
 export const tasks = {
   list: (projectId: string) =>
     request<ProjectTask[]>(`/projects/${projectId}/tasks`),
@@ -324,4 +332,11 @@ export interface MetricsSummary {
     p95_total_ms: number | null;
   };
   file_citation: { total: number; with_citation: number; rate: number };
+  feedback_by_agent: Array<{
+    agent: string;
+    thumbs_up: number;
+    thumbs_down: number;
+    total: number;
+    satisfaction_rate: number;
+  }>;
 }

@@ -163,6 +163,35 @@ async fn metrics_summary(
     .fetch_one(db)
     .await?;
 
+    // Per-agent feedback counts (👍 = +1, 👎 = -1)
+    let feedback_rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT m.role,
+                COUNT(*) FILTER (WHERE f.rating = 1),
+                COUNT(*) FILTER (WHERE f.rating = -1)
+         FROM message_feedback f
+         JOIN messages m ON m.id = f.message_id
+         JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.project_id = $1 AND m.role IN ('openclaw','hermes')
+         GROUP BY m.role",
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+    let feedback_by_agent: Vec<serde_json::Value> = feedback_rows
+        .into_iter()
+        .map(|(agent, ups, downs)| {
+            let total = ups + downs;
+            let satisfaction = if total > 0 { ups as f64 / total as f64 } else { 0.0 };
+            json!({
+                "agent": agent,
+                "thumbs_up": ups,
+                "thumbs_down": downs,
+                "total": total,
+                "satisfaction_rate": satisfaction,
+            })
+        })
+        .collect();
+
     // File citation rate
     let citation_row: (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COUNT(*) FILTER (WHERE has_file_citation)
@@ -205,6 +234,7 @@ async fn metrics_summary(
             "with_citation": citation_with,
             "rate": citation_rate,
         },
+        "feedback_by_agent": feedback_by_agent,
     })))
 }
 

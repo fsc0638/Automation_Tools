@@ -6,10 +6,12 @@ import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
   MessageSquarePlus, Send, FolderOpen, ChevronRight, ChevronDown,
   Bot, Cpu, User, Zap, ArrowLeft, Plus, File, GitBranch, Square, AlertCircle, ArrowDown,
-  RefreshCw, Trash2, Activity, Lightbulb, ListChecks, Code2
+  RefreshCw, Trash2, Activity, Lightbulb, ListChecks, Code2,
+  ThumbsUp, ThumbsDown,
 } from "lucide-react";
 import {
   projects as projectsApi, conversations as convsApi,
+  feedback as feedbackApi,
   createWsConnection, type Project, type Conversation,
   type Message, type FileNode, type AgentMode,
 } from "@/lib/api";
@@ -798,6 +800,22 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
   const isOpenClaw = message.role === "openclaw";
   const isSystem = message.role === "system";
   const visibleContent = message.content.replace(/<!--\s*consensus:reached\s*-->/gi, "").trim();
+  const [rating, setRating] = useState<1 | -1 | 0>(0);
+
+  async function rate(value: 1 | -1) {
+    // Optimistic toggle: clicking the same vote unsets it locally; the
+    // backend just stores the latest call so resubmitting same value is OK.
+    const next = rating === value ? 0 : value;
+    setRating(next);
+    if (next !== 0) {
+      try {
+        await feedbackApi.submit(message.id, next);
+      } catch {
+        setRating(rating); // revert
+      }
+    }
+  }
+  const canRate = (isHermes || isOpenClaw) && !streaming && !message.id.startsWith("streaming-buffer-");
 
   if (isSystem) {
     return (
@@ -866,6 +884,30 @@ const ChatMessage = memo(function ChatMessage({ message, streaming }: { message:
             </div>
           )}
         </div>
+        {canRate && (
+          <div className="flex items-center gap-1 mt-1.5 opacity-50 hover:opacity-100 transition-opacity">
+            <button
+              onClick={() => void rate(1)}
+              title="Helpful"
+              className={cn(
+                "p-1 rounded hover:bg-[#F1F5F9]",
+                rating === 1 && "text-[#10B981] bg-[#ECFDF5]"
+              )}
+            >
+              <ThumbsUp size={12} />
+            </button>
+            <button
+              onClick={() => void rate(-1)}
+              title="Not helpful"
+              className={cn(
+                "p-1 rounded hover:bg-[#F1F5F9]",
+                rating === -1 && "text-[#C8102E] bg-[#FEF2F2]"
+              )}
+            >
+              <ThumbsDown size={12} />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

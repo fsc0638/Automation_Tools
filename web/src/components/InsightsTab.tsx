@@ -51,7 +51,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
   }
   if (!metrics) return null;
 
-  const { totals, mode_distribution, avg_chars_by_agent, consensus, debate_round_distribution, timing, file_citation } = metrics;
+  const { totals, mode_distribution, avg_chars_by_agent, consensus, debate_round_distribution, timing, file_citation, feedback_by_agent } = metrics;
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
@@ -201,6 +201,31 @@ export function InsightsTab({ projectId }: { projectId: string }) {
           )}
         </ChartCard>
       </div>
+
+      {feedback_by_agent.length > 0 && (
+        <ChartCard title="Agent satisfaction" subtitle="from per-message 👍 / 👎">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
+            {feedback_by_agent.map((f) => (
+              <div key={f.agent} className="rounded-md bg-[#F8FAFC] p-3 flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium text-[#1A1A2E] capitalize">{f.agent}</div>
+                  <div className="text-[11px] text-[#94A3B8]">{f.thumbs_up} 👍 · {f.thumbs_down} 👎 · {f.total} total</div>
+                </div>
+                <div className="text-right">
+                  <div className={`text-2xl font-bold ${
+                    f.satisfaction_rate >= 0.8 ? "text-[#10B981]"
+                    : f.satisfaction_rate >= 0.5 ? "text-[#F59E0B]"
+                    : "text-[#C8102E]"
+                  }`}>
+                    {(f.satisfaction_rate * 100).toFixed(0)}%
+                  </div>
+                  <div className="text-[10px] text-[#94A3B8]">satisfaction</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </ChartCard>
+      )}
 
       <ChartCard title="Latency" subtitle="across all agent calls">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
