@@ -4,7 +4,10 @@ use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-use crate::agents::openclaw::ChatMessage;
+use crate::agents::{
+    openclaw::ChatMessage,
+    telemetry::{parse_openai_stream_chunk, AgentResponseMetadata, AgentStreamEvent, OpenAiUsage},
+};
 
 const REPLY_TOKEN_CEILING: u32 = 1200;
 
@@ -26,31 +29,25 @@ struct OpenAiChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenAiChatResponse {
     choices: Vec<OpenAiChoice>,
+    usage: Option<OpenAiUsage>,
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenAiChoice {
     message: ChatMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChunk {
-    choices: Option<Vec<StreamChoice>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +67,14 @@ struct AnthropicMessage {
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
     content: Vec<AnthropicContent>,
+    usage: Option<AnthropicUsage>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,11 +111,28 @@ struct GeminiGenerationConfig {
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
     candidates: Option<Vec<GeminiCandidate>>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsageMetadata>,
+    #[serde(rename = "modelVersion")]
+    model_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiUsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<u32>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GeminiCandidate {
     content: Option<GeminiContent>,
+}
+
+pub(crate) struct CompletedAgentReply {
+    pub(crate) content: String,
+    pub(crate) metadata: AgentResponseMetadata,
 }
 
 #[derive(Clone)]
@@ -169,7 +191,7 @@ impl GenericAgentClient {
         req.bearer_auth(&self.profile.api_key)
     }
 
-    pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
+    pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<CompletedAgentReply> {
         match self.profile.provider.as_str() {
             "openai" | "openai_compatible" => self.openai_chat(messages).await,
             "anthropic" => self.anthropic_chat(messages).await,
@@ -178,12 +200,13 @@ impl GenericAgentClient {
         }
     }
 
-    async fn openai_chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
+    async fn openai_chat(&self, messages: Vec<ChatMessage>) -> Result<CompletedAgentReply> {
         let body = OpenAiChatRequest {
             model: self.profile.model.clone(),
             messages: self.build_messages(messages),
             stream: false,
             max_tokens: Some(REPLY_TOKEN_CEILING),
+            stream_options: None,
         };
         let response = self
             .with_openai_auth(self.client.post(self.openai_url()))
@@ -196,10 +219,23 @@ impl GenericAgentClient {
             .json::<OpenAiChatResponse>()
             .await
             .context("failed to parse custom OpenAI-compatible response")?;
-        Ok(response.choices.into_iter().next().map(|c| c.message.content).unwrap_or_default())
+        Ok(CompletedAgentReply {
+            content: response
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.message.content)
+                .unwrap_or_default(),
+            metadata: AgentResponseMetadata {
+                provider: self.profile.provider.clone(),
+                model: response.model.unwrap_or_else(|| self.profile.model.clone()),
+                input_tokens: response.usage.as_ref().and_then(|u| u.prompt_tokens),
+                output_tokens: response.usage.as_ref().and_then(|u| u.completion_tokens),
+            },
+        })
     }
 
-    async fn anthropic_chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
+    async fn anthropic_chat(&self, messages: Vec<ChatMessage>) -> Result<CompletedAgentReply> {
         let full = self.build_messages(messages);
         let mut system = String::new();
         let mut converted = Vec::new();
@@ -230,10 +266,18 @@ impl GenericAgentClient {
             .json::<AnthropicResponse>()
             .await
             .context("failed to parse Anthropic response")?;
-        Ok(response.content.into_iter().filter_map(|p| p.text).collect::<Vec<_>>().join(""))
+        Ok(CompletedAgentReply {
+            content: response.content.into_iter().filter_map(|p| p.text).collect::<Vec<_>>().join(""),
+            metadata: AgentResponseMetadata {
+                provider: self.profile.provider.clone(),
+                model: response.model.unwrap_or_else(|| self.profile.model.clone()),
+                input_tokens: response.usage.as_ref().and_then(|u| u.input_tokens),
+                output_tokens: response.usage.as_ref().and_then(|u| u.output_tokens),
+            },
+        })
     }
 
-    async fn gemini_chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
+    async fn gemini_chat(&self, messages: Vec<ChatMessage>) -> Result<CompletedAgentReply> {
         let full = self.build_messages(messages);
         let mut system_text = String::new();
         let mut contents = Vec::new();
@@ -276,44 +320,58 @@ impl GenericAgentClient {
             .flat_map(|c| c.parts.into_iter().map(|p| p.text))
             .collect::<Vec<_>>()
             .join("");
-        Ok(text)
+        Ok(CompletedAgentReply {
+            content: text,
+            metadata: AgentResponseMetadata {
+                provider: self.profile.provider.clone(),
+                model: response.model_version.unwrap_or_else(|| self.profile.model.clone()),
+                input_tokens: response.usage_metadata.as_ref().and_then(|u| u.prompt_token_count),
+                output_tokens: response.usage_metadata.as_ref().and_then(|u| u.candidates_token_count),
+            },
+        })
     }
 
-    pub fn chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    pub fn chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>> {
         if matches!(self.profile.provider.as_str(), "openai" | "openai_compatible") {
             return self.openai_chat_stream(messages);
         }
         let this = self.clone();
         Box::pin(async_stream::stream! {
             match this.chat(messages).await {
-                Ok(reply) => yield reply,
-                Err(error) => yield format!("[{} error: {}]", this.profile.name, error),
+                Ok(reply) => {
+                    yield AgentStreamEvent::Content(reply.content);
+                    yield AgentStreamEvent::Metadata(reply.metadata);
+                }
+                Err(error) => yield AgentStreamEvent::Content(format!("[{} error: {}]", this.profile.name, error)),
             }
         })
     }
 
-    fn openai_chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    fn openai_chat_stream(&self, messages: Vec<ChatMessage>) -> Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>> {
         let client = self.client.clone();
         let url = self.openai_url();
         let key = self.profile.api_key.clone();
         let name = self.profile.name.clone();
+        let provider = self.profile.provider.clone();
+        let configured_model = self.profile.model.clone();
         let body = OpenAiChatRequest {
             model: self.profile.model.clone(),
             messages: self.build_messages(messages),
             stream: true,
             max_tokens: Some(REPLY_TOKEN_CEILING),
+            stream_options: Some(StreamOptions { include_usage: true }),
         };
         Box::pin(async_stream::stream! {
             let response = match client.post(url).bearer_auth(key).json(&body).send().await {
                 Ok(response) => match response.error_for_status() {
                     Ok(response) => response,
                     Err(error) => {
-                        yield format!("[{name} error: agent returned an error status: {error}]");
+                        yield AgentStreamEvent::Content(format!("[{name} error: agent returned an error status: {error}]"));
                         return;
                     }
                 },
                 Err(error) => {
-                    yield format!("[{name} error: failed to send request: {error}]");
+                    yield AgentStreamEvent::Content(format!("[{name} error: failed to send request: {error}]"));
                     return;
                 }
             };
@@ -324,7 +382,7 @@ impl GenericAgentClient {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield format!("[{name} stream error: {error}]");
+                        yield AgentStreamEvent::Content(format!("[{name} stream error: {error}]"));
                         return;
                     }
                 };
@@ -334,13 +392,21 @@ impl GenericAgentClient {
                     buffer = buffer[newline_pos + 1..].to_string();
                     let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue; };
                     if data == "[DONE]" { return; }
-                    if let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) {
+                    if let Ok(parsed) = parse_openai_stream_chunk(data) {
                         if let Some(choices) = parsed.choices {
                             for choice in choices {
                                 if let Some(content) = choice.delta.content {
-                                    yield content;
+                                    yield AgentStreamEvent::Content(content);
                                 }
                             }
+                        }
+                        if let Some(usage) = parsed.usage {
+                            yield AgentStreamEvent::Metadata(AgentResponseMetadata {
+                                provider: provider.clone(),
+                                model: parsed.model.unwrap_or_else(|| configured_model.clone()),
+                                input_tokens: usage.prompt_tokens,
+                                output_tokens: usage.completion_tokens,
+                            });
                         }
                     }
                 }

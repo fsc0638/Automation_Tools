@@ -7,6 +7,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
@@ -247,42 +248,35 @@ async fn metrics_cost(
     let db = &state.db;
     let cfg = &state.config;
 
-    // Per-agent token totals over the past 30 days.
-    let agent_rows: Vec<(String, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT agent, SUM(tokens_in)::bigint, SUM(tokens_out)::bigint, COUNT(*)
+    let rows: Vec<(
+        chrono::DateTime<chrono::Utc>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT
+            date_trunc('day', created_at) AS day,
+            agent,
+            mode,
+            provider,
+            model,
+            SUM(tokens_in)::bigint,
+            SUM(tokens_out)::bigint,
+            COUNT(*)
          FROM agent_usage_events
          WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-         GROUP BY agent",
+         GROUP BY day, agent, mode, provider, model
+         ORDER BY day, agent, mode, provider, model",
     )
     .bind(project_id)
     .fetch_all(db)
     .await?;
 
-    // Per-mode token totals over the past 30 days.
-    let mode_rows: Vec<(String, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT mode, SUM(tokens_in)::bigint, SUM(tokens_out)::bigint, COUNT(*)
-         FROM agent_usage_events
-         WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-         GROUP BY mode",
-    )
-    .bind(project_id)
-    .fetch_all(db)
-    .await?;
-
-    // Daily breakdown for trend chart — includes input + output cost per agent.
-    let daily_rows: Vec<(chrono::DateTime<chrono::Utc>, String, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT date_trunc('day', created_at) AS day, agent,
-                SUM(tokens_in)::bigint, SUM(tokens_out)::bigint
-         FROM agent_usage_events
-         WHERE project_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-         GROUP BY day, agent
-         ORDER BY day",
-    )
-    .bind(project_id)
-    .fetch_all(db)
-    .await?;
-
-    let price_for = |agent: &str| -> (f64, f64) {
+    let price_for_event = |agent: &str, _provider: Option<&str>, _model: Option<&str>| -> (f64, f64) {
         if agent == "hermes" {
             (cfg.hermes_price_per_1k_in, cfg.hermes_price_per_1k_out)
         } else {
@@ -291,55 +285,72 @@ async fn metrics_cost(
     };
 
     let mut total_cost = 0.0_f64;
-    let by_agent: Vec<serde_json::Value> = agent_rows
+    let mut by_agent_map: BTreeMap<String, CostBucket> = BTreeMap::new();
+    let mut by_mode_map: BTreeMap<String, CostBucket> = BTreeMap::new();
+    let mut daily_map: BTreeMap<(String, String), CostBucket> = BTreeMap::new();
+
+    for (day, agent, mode, provider, model, tokens_in, tokens_out, calls) in rows {
+        let t_in = tokens_in.unwrap_or(0);
+        let t_out = tokens_out.unwrap_or(0);
+        let (in_p, out_p) = price_for_event(&agent, provider.as_deref(), model.as_deref());
+        let cost = (t_in as f64 / 1000.0) * in_p + (t_out as f64 / 1000.0) * out_p;
+        total_cost += cost;
+
+        let by_agent = by_agent_map.entry(agent.clone()).or_default();
+        by_agent.tokens_in += t_in;
+        by_agent.tokens_out += t_out;
+        by_agent.calls += calls;
+        by_agent.cost_usd += cost;
+
+        let by_mode = by_mode_map.entry(mode).or_default();
+        by_mode.tokens_in += t_in;
+        by_mode.tokens_out += t_out;
+        by_mode.calls += calls;
+        by_mode.cost_usd += cost;
+
+        let daily = daily_map
+            .entry((day.format("%Y-%m-%d").to_string(), agent))
+            .or_default();
+        daily.tokens_in += t_in;
+        daily.tokens_out += t_out;
+        daily.cost_usd += cost;
+    }
+
+    let by_agent: Vec<serde_json::Value> = by_agent_map
         .into_iter()
-        .map(|(agent, tokens_in, tokens_out, calls)| {
-            let t_in = tokens_in.unwrap_or(0);
-            let t_out = tokens_out.unwrap_or(0);
-            let (in_p, out_p) = price_for(&agent);
-            let cost = (t_in as f64 / 1000.0) * in_p + (t_out as f64 / 1000.0) * out_p;
-            total_cost += cost;
+        .map(|(agent, bucket)| {
             json!({
                 "agent": agent,
-                "tokens_in": t_in,
-                "tokens_out": t_out,
-                "calls": calls,
-                "cost_usd": cost,
+                "tokens_in": bucket.tokens_in,
+                "tokens_out": bucket.tokens_out,
+                "calls": bucket.calls,
+                "cost_usd": bucket.cost_usd,
             })
         })
         .collect();
 
-    let by_mode: Vec<serde_json::Value> = mode_rows
+    let by_mode: Vec<serde_json::Value> = by_mode_map
         .into_iter()
-        .map(|(mode, tokens_in, tokens_out, calls)| {
-            let t_in = tokens_in.unwrap_or(0);
-            let t_out = tokens_out.unwrap_or(0);
-            // Mode rows mix agents, so use OpenClaw pricing as a proxy.
-            let cost = (t_in as f64 / 1000.0) * cfg.openclaw_price_per_1k_in
-                + (t_out as f64 / 1000.0) * cfg.openclaw_price_per_1k_out;
+        .map(|(mode, bucket)| {
             json!({
                 "mode": mode,
-                "tokens_in": t_in,
-                "tokens_out": t_out,
-                "calls": calls,
-                "cost_usd": cost,
+                "tokens_in": bucket.tokens_in,
+                "tokens_out": bucket.tokens_out,
+                "calls": bucket.calls,
+                "cost_usd": bucket.cost_usd,
             })
         })
         .collect();
 
-    let daily: Vec<serde_json::Value> = daily_rows
+    let daily: Vec<serde_json::Value> = daily_map
         .into_iter()
-        .map(|(day, agent, tokens_in, tokens_out)| {
-            let t_in = tokens_in.unwrap_or(0);
-            let t_out = tokens_out.unwrap_or(0);
-            let (in_p, out_p) = price_for(&agent);
-            let cost = (t_in as f64 / 1000.0) * in_p + (t_out as f64 / 1000.0) * out_p;
+        .map(|((day, agent), bucket)| {
             json!({
-                "day": day.format("%Y-%m-%d").to_string(),
+                "day": day,
                 "agent": agent,
-                "tokens_in": t_in,
-                "tokens_out": t_out,
-                "cost_usd": cost,
+                "tokens_in": bucket.tokens_in,
+                "tokens_out": bucket.tokens_out,
+                "cost_usd": bucket.cost_usd,
             })
         })
         .collect();
@@ -355,8 +366,16 @@ async fn metrics_cost(
             "hermes_per_1k_in": cfg.hermes_price_per_1k_in,
             "hermes_per_1k_out": cfg.hermes_price_per_1k_out,
         },
-        "note": "Tokens estimated locally (CJK ≈ 1 tok, ASCII ≈ 1/4 tok). Wire gateway-reported usage in a future phase for exact billing.",
+        "note": "Prefer gateway/provider-reported usage when available; fallback to local token estimates (CJK ≈ 1 tok, ASCII ≈ 1/4 tok). Mode costs are priced per event before grouping.",
     })))
+}
+
+#[derive(Debug, Default, Clone)]
+struct CostBucket {
+    tokens_in: i64,
+    tokens_out: i64,
+    calls: i64,
+    cost_usd: f64,
 }
 
 fn level(score: i32) -> &'static str {

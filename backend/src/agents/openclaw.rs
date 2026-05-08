@@ -4,7 +4,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-use crate::config::Config;
+use crate::{
+    agents::telemetry::{
+        parse_openai_stream_chunk, AgentResponseMetadata, AgentStreamEvent, OpenAiStreamChunk,
+        OpenAiUsage,
+    },
+    config::Config,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
@@ -19,6 +25,13 @@ struct ChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 /// Hard ceiling on a single agent reply. Combined with the RESPONSE LENGTH
@@ -27,9 +40,12 @@ struct ChatRequest {
 /// synthesis to still complete.
 const REPLY_TOKEN_CEILING: u32 = 1200;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    usage: Option<OpenAiUsage>,
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,19 +53,8 @@ struct Choice {
     message: ChatMessage,
 }
 
-#[derive(Debug, Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChunk {
-    choices: Option<Vec<StreamChoice>>,
+pub(crate) fn parse_stream_chunk(data: &str) -> serde_json::Result<OpenAiStreamChunk> {
+    parse_openai_stream_chunk(data)
 }
 
 #[derive(Clone)]
@@ -133,6 +138,7 @@ impl OpenClawClient {
             messages: Self::build_messages(messages),
             stream,
             max_tokens: Some(REPLY_TOKEN_CEILING),
+            stream_options: stream.then_some(StreamOptions { include_usage: true }),
         }
     }
 
@@ -163,7 +169,7 @@ impl OpenClawClient {
     pub fn chat_stream(
         &self,
         messages: Vec<ChatMessage>,
-    ) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>> {
         let client = self.client.clone();
         let url = self.chat_completions_url.clone();
         let token = self.gateway_token.clone();
@@ -182,12 +188,12 @@ impl OpenClawClient {
                 Ok(response) => match response.error_for_status() {
                     Ok(response) => response,
                     Err(error) => {
-                        yield format!("[OpenClaw error: Gateway returned an error status: {error}]");
+                        yield AgentStreamEvent::Content(format!("[OpenClaw error: Gateway returned an error status: {error}]"));
                         return;
                     }
                 },
                 Err(error) => {
-                    yield format!("[OpenClaw error: failed to send request to Gateway: {error}]");
+                    yield AgentStreamEvent::Content(format!("[OpenClaw error: failed to send request to Gateway: {error}]"));
                     return;
                 }
             };
@@ -200,7 +206,7 @@ impl OpenClawClient {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield format!("[OpenClaw stream error: {error}]");
+                        yield AgentStreamEvent::Content(format!("[OpenClaw stream error: {error}]"));
                         return;
                     }
                 };
@@ -234,14 +240,22 @@ impl OpenClawClient {
                         continue;
                     }
 
-                    match serde_json::from_str::<StreamChunk>(data) {
+                    match parse_stream_chunk(data) {
                         Ok(parsed) => {
                             if let Some(choices) = parsed.choices {
                                 for choice in choices {
                                     if let Some(content) = choice.delta.content {
-                                        yield content;
+                                        yield AgentStreamEvent::Content(content);
                                     }
                                 }
+                            }
+                            if let Some(usage) = parsed.usage {
+                                yield AgentStreamEvent::Metadata(AgentResponseMetadata {
+                                    provider: "openclaw_gateway".into(),
+                                    model: parsed.model.unwrap_or_else(|| provider_model.clone()),
+                                    input_tokens: usage.prompt_tokens,
+                                    output_tokens: usage.completion_tokens,
+                                });
                             }
                         }
                         Err(_) => {
@@ -254,5 +268,22 @@ impl OpenClawClient {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stream_chunk;
+
+    #[test]
+    fn parse_stream_chunk_extracts_usage_and_model() {
+        let chunk = parse_stream_chunk(
+            r#"{"model":"gpt-4.1-mini","choices":[],"usage":{"prompt_tokens":321,"completion_tokens":123,"total_tokens":444}}"#,
+        )
+        .expect("chunk should parse");
+
+        assert_eq!(chunk.model.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(chunk.usage.as_ref().and_then(|u| u.prompt_tokens), Some(321));
+        assert_eq!(chunk.usage.as_ref().and_then(|u| u.completion_tokens), Some(123));
     }
 }

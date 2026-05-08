@@ -220,9 +220,27 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                     agent,
                     round,
                     phase,
+                    input_tokens,
+                    output_tokens,
+                    provider,
+                    model,
                 } => {
                     let key = event_key(agent, *round, phase.as_deref());
-                    let call_timing = timing.remove(&key);
+                    let call_timing = timing.remove(&key).map(|mut t| {
+                        if let Some(value) = input_tokens {
+                            t.exact_input_tokens = Some(*value);
+                        }
+                        if let Some(value) = output_tokens {
+                            t.exact_output_tokens = Some(*value);
+                        }
+                        if let Some(value) = provider {
+                            t.provider = Some(value.clone());
+                        }
+                        if let Some(value) = model {
+                            t.model = Some(value.clone());
+                        }
+                        t
+                    });
                     if let Some(content) = buffers.remove(&key) {
                         if !content.trim().is_empty() {
                             let role = agent_role(agent);
@@ -247,7 +265,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                             .execute(&state.db)
                             .await;
 
-                            // Phase 0 telemetry: record one usage event per agent call.
                             record_usage_event(
                                 &state.db,
                                 query.project_id,
@@ -384,6 +401,10 @@ struct AgentCallTiming {
     started_at: Instant,
     first_chunk_at: Option<Instant>,
     input_tokens: Option<u32>,
+    exact_input_tokens: Option<u32>,
+    exact_output_tokens: Option<u32>,
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 impl AgentCallTiming {
@@ -392,12 +413,15 @@ impl AgentCallTiming {
             started_at: Instant::now(),
             first_chunk_at: None,
             input_tokens: None,
+            exact_input_tokens: None,
+            exact_output_tokens: None,
+            provider: None,
+            model: None,
         }
     }
 }
 
-/// Rough output-token estimate. CJK characters ≈ 1 token each, ASCII ≈ 1/4 token.
-/// Replaced with tiktoken-rs in Phase 2 for accuracy.
+/// Fallback output-token estimate. Prefer provider-reported usage when available.
 fn estimate_output_tokens(content: &str) -> i32 {
     let mut cjk: usize = 0;
     let mut other: usize = 0;
@@ -409,6 +433,17 @@ fn estimate_output_tokens(content: &str) -> i32 {
         }
     }
     (cjk + other / 4) as i32
+}
+
+fn resolve_recorded_token_counts(timing: Option<&AgentCallTiming>, content: &str) -> (Option<i32>, i32) {
+    let estimated_out = estimate_output_tokens(content);
+    match timing {
+        Some(t) => (
+            t.exact_input_tokens.or(t.input_tokens).map(|v| v as i32),
+            t.exact_output_tokens.map(|v| v as i32).unwrap_or(estimated_out),
+        ),
+        None => (None, estimated_out),
+    }
 }
 
 fn detect_consensus_marker(content: &str) -> bool {
@@ -440,28 +475,29 @@ async fn record_usage_event(
     timing: Option<&AgentCallTiming>,
     content: &str,
 ) {
-    let (ttft_ms, total_ms, tokens_in) = match timing {
+    let (ttft_ms, total_ms) = match timing {
         Some(t) => {
             let now = Instant::now();
             let ttft = t
                 .first_chunk_at
                 .map(|c| c.duration_since(t.started_at).as_millis() as i32);
             let total = now.duration_since(t.started_at).as_millis() as i32;
-            let in_tokens = t.input_tokens.map(|v| v as i32);
-            (ttft, Some(total), in_tokens)
+            (ttft, Some(total))
         }
-        None => (None, None, None),
+        None => (None, None),
     };
+    let (tokens_in, tokens_out) = resolve_recorded_token_counts(timing, content);
+    let provider = timing.and_then(|t| t.provider.as_deref());
+    let model = timing.and_then(|t| t.model.as_deref());
 
     let chars_out = content.chars().count() as i32;
-    let tokens_out = estimate_output_tokens(content);
 
     let _ = sqlx::query(
         "INSERT INTO agent_usage_events (
              project_id, conversation_id, message_id, agent, mode, phase,
              round_number, ttft_ms, total_ms, tokens_in, tokens_out, chars_out,
-             has_consensus_marker, has_file_citation
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+             has_consensus_marker, has_file_citation, provider, model
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(project_id)
     .bind(conversation_id)
@@ -477,6 +513,31 @@ async fn record_usage_event(
     .bind(chars_out)
     .bind(detect_consensus_marker(content))
     .bind(detect_file_citation(content))
+    .bind(provider)
+    .bind(model)
     .execute(db)
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_recorded_token_counts, AgentCallTiming};
+    use std::time::Instant;
+
+    #[test]
+    fn exact_usage_overrides_estimated_tokens() {
+        let timing = AgentCallTiming {
+            started_at: Instant::now(),
+            first_chunk_at: None,
+            input_tokens: Some(999),
+            exact_input_tokens: Some(321),
+            exact_output_tokens: Some(123),
+            provider: None,
+            model: None,
+        };
+
+        let (tokens_in, tokens_out) = resolve_recorded_token_counts(Some(&timing), "這是一段本地估算會不同的內容");
+        assert_eq!(tokens_in, Some(321));
+        assert_eq!(tokens_out, 123);
+    }
 }

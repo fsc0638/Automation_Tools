@@ -251,7 +251,7 @@ const zhTW: Dict = {
   "cost.byAgent": "依代理人 (30 日)",
   "cost.byMode": "依模式 (30 日)",
   "cost.pricingInUse": "目前定價",
-  "cost.note": "Tokens 由本地估算（中日韓 ≈ 1 token、ASCII ≈ 0.25 token）。後續可串接 Gateway 回傳的精確 usage。",
+  "cost.note": "優先使用 Gateway / provider 回傳的 usage；若取不到，才退回本地估算（中日韓 ≈ 1 token、ASCII ≈ 0.25 token）。",
 
   // Roadmap tab
   "roadmap.title": "Roadmap",
@@ -539,7 +539,7 @@ const zhCN: Dict = {
   "cost.byAgent": "按智能体 (30 日)",
   "cost.byMode": "按模式 (30 日)",
   "cost.pricingInUse": "当前定价",
-  "cost.note": "Tokens 由本地估算（中日韩 ≈ 1 token、ASCII ≈ 0.25 token）。后续可对接 Gateway 返回的精确 usage。",
+  "cost.note": "优先使用 Gateway / provider 返回的 usage；若取不到，才回退到本地估算（中日韩 ≈ 1 token、ASCII ≈ 0.25 token）。",
 
   "roadmap.title": "Roadmap",
   "roadmap.subtitle": "由智能体建议或手动创建的可执行任务。",
@@ -822,7 +822,7 @@ const en: Dict = {
   "cost.byAgent": "By agent (30d)",
   "cost.byMode": "By mode (30d)",
   "cost.pricingInUse": "Pricing in use",
-  "cost.note": "Tokens estimated locally (CJK ≈ 1 tok, ASCII ≈ 1/4 tok). Wire gateway-reported usage in a future phase for exact billing.",
+  "cost.note": "Prefer gateway/provider-reported usage when available; otherwise fall back to local token estimates (CJK ≈ 1 tok, ASCII ≈ 1/4 tok).",
 
   "roadmap.title": "Roadmap",
   "roadmap.subtitle": "Persistent tasks driven from Agent suggestions or added manually.",

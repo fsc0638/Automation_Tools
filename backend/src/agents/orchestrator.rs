@@ -26,6 +26,7 @@ use crate::{
         generic::{AgentProfileRuntime, GenericAgentClient},
         hermes::HermesClient,
         openclaw::{ChatMessage, OpenClawClient},
+        telemetry::{AgentResponseMetadata, AgentStreamEvent},
     },
     config::Config,
     db::models::{Message, Project},
@@ -64,6 +65,14 @@ pub enum ServerEvent {
         round: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     #[serde(rename = "error")]
     Error { message: String },
@@ -529,21 +538,48 @@ fn estimate_chat_tokens(chat: &[ChatMessage]) -> u32 {
 /// Wrap an LLM token stream so it emits coalesced chunks of at least
 /// STREAM_BATCH_BYTES (final partial chunk is always flushed at end).
 fn batch_chunks(
-    stream: Pin<Box<dyn Stream<Item = String> + Send>>,
-) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    stream: Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>>,
+) -> Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>> {
     Box::pin(async_stream::stream! {
         let mut buf = String::new();
         let mut s = stream;
-        while let Some(chunk) = s.next().await {
-            buf.push_str(&chunk);
-            if buf.len() >= STREAM_BATCH_BYTES {
-                yield std::mem::take(&mut buf);
+        while let Some(item) = s.next().await {
+            match item {
+                AgentStreamEvent::Content(chunk) => {
+                    buf.push_str(&chunk);
+                    if buf.len() >= STREAM_BATCH_BYTES {
+                        yield AgentStreamEvent::Content(std::mem::take(&mut buf));
+                    }
+                }
+                AgentStreamEvent::Metadata(metadata) => {
+                    if !buf.is_empty() {
+                        yield AgentStreamEvent::Content(std::mem::take(&mut buf));
+                    }
+                    yield AgentStreamEvent::Metadata(metadata);
+                }
             }
         }
         if !buf.is_empty() {
-            yield buf;
+            yield AgentStreamEvent::Content(buf);
         }
     })
+}
+
+fn done_event(
+    agent: String,
+    round: Option<usize>,
+    phase: Option<String>,
+    metadata: Option<AgentResponseMetadata>,
+) -> ServerEvent {
+    ServerEvent::Done {
+        agent,
+        round,
+        phase,
+        input_tokens: metadata.as_ref().and_then(|m| m.input_tokens),
+        output_tokens: metadata.as_ref().and_then(|m| m.output_tokens),
+        provider: metadata.as_ref().map(|m| m.provider.clone()),
+        model: metadata.map(|m| m.model),
+    }
 }
 
 fn debate_instruction(
@@ -1081,7 +1117,7 @@ pub async fn run_agent_turn(
         AgentMode::Custom(profile) => {
             let display_name = profile.name.clone();
             let reply = GenericAgentClient::new(profile).chat(chat).await?;
-            results.push(("openclaw".into(), reply, Some(display_name)));
+            results.push(("openclaw".into(), reply.content, Some(display_name)));
         }
         AgentMode::CustomDebate(profiles) => {
             let mut turns: Vec<(String, String)> = Vec::new();
@@ -1102,8 +1138,8 @@ pub async fn run_agent_turn(
                 });
                 let display_name = profile.name.clone();
                 let reply = GenericAgentClient::new(profile).chat(ctx).await?;
-                turns.push((display_name.clone(), reply.clone()));
-                results.push(("openclaw".into(), reply, Some(display_name)));
+                turns.push((display_name.clone(), reply.content.clone()));
+                results.push(("openclaw".into(), reply.content, Some(display_name)));
             }
         }
         AgentMode::Debate => {
@@ -1209,11 +1245,13 @@ pub fn run_agent_stream(
                     input_tokens,
                 };
                 let mut stream = batch_chunks(openclaw.chat_stream(chat));
+                let mut response_metadata = None;
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                        Ok(Some(AgentStreamEvent::Content(chunk))) => yield ServerEvent::Chunk {
                             agent: "OpenClaw".into(), content: chunk, round: None, phase: None,
                         },
+                        Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                         Ok(None) => break,
                         Err(_) => {
                             yield ServerEvent::Error { message: "OpenClaw stream timed out".into() };
@@ -1221,7 +1259,7 @@ pub fn run_agent_stream(
                         }
                     }
                 }
-                yield ServerEvent::Done { agent: "OpenClaw".into(), round: None, phase: None };
+                yield done_event("OpenClaw".into(), None, None, response_metadata);
             }
             AgentMode::HermesOnly => {
                 let input_tokens = Some(estimate_chat_tokens(&chat));
@@ -1233,11 +1271,13 @@ pub fn run_agent_stream(
                     input_tokens,
                 };
                 let mut stream = batch_chunks(hermes.chat_stream(chat));
+                let mut response_metadata = None;
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                        Ok(Some(AgentStreamEvent::Content(chunk))) => yield ServerEvent::Chunk {
                             agent: "Hermes".into(), content: chunk, round: None, phase: None,
                         },
+                        Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                         Ok(None) => break,
                         Err(_) => {
                             yield ServerEvent::Error { message: "Hermes stream timed out".into() };
@@ -1245,7 +1285,7 @@ pub fn run_agent_stream(
                         }
                     }
                 }
-                yield ServerEvent::Done { agent: "Hermes".into(), round: None, phase: None };
+                yield done_event("Hermes".into(), None, None, response_metadata);
             }
             AgentMode::Custom(profile) => {
                 let agent_name = profile.name.clone();
@@ -1259,11 +1299,13 @@ pub fn run_agent_stream(
                 };
                 let custom = GenericAgentClient::new(profile);
                 let mut stream = batch_chunks(custom.chat_stream(chat));
+                let mut response_metadata = None;
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                        Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                        Ok(Some(AgentStreamEvent::Content(chunk))) => yield ServerEvent::Chunk {
                             agent: agent_name.clone(), content: chunk, round: None, phase: None,
                         },
+                        Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                         Ok(None) => break,
                         Err(_) => {
                             yield ServerEvent::Error { message: format!("{} stream timed out", agent_name) };
@@ -1271,7 +1313,7 @@ pub fn run_agent_stream(
                         }
                     }
                 }
-                yield ServerEvent::Done { agent: agent_name, round: None, phase: None };
+                yield done_event(agent_name, None, None, response_metadata);
             }
             AgentMode::CustomDebate(profiles) => {
                 let mut turns: Vec<(String, String)> = Vec::new();
@@ -1304,9 +1346,10 @@ pub fn run_agent_stream(
                     let mut buffer = String::new();
                     let custom = GenericAgentClient::new(profile);
                     let mut stream = batch_chunks(custom.chat_stream(ctx));
+                    let mut response_metadata = None;
                     loop {
                         match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                            Ok(Some(chunk)) => {
+                            Ok(Some(AgentStreamEvent::Content(chunk))) => {
                                 buffer.push_str(&chunk);
                                 yield ServerEvent::Chunk {
                                     agent: agent_name.clone(),
@@ -1315,6 +1358,7 @@ pub fn run_agent_stream(
                                     phase: Some("round".into()),
                                 };
                             }
+                            Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                             Ok(None) => break,
                             Err(_) => {
                                 if buffer.trim().is_empty() {
@@ -1325,7 +1369,7 @@ pub fn run_agent_stream(
                             }
                         }
                     }
-                    yield ServerEvent::Done { agent: agent_name.clone(), round: Some(idx + 1), phase: Some("round".into()) };
+                    yield done_event(agent_name.clone(), Some(idx + 1), Some("round".into()), response_metadata);
                     turns.push((agent_name, buffer));
                 }
 
@@ -1352,11 +1396,13 @@ pub fn run_agent_stream(
                     };
                     let custom = GenericAgentClient::new(profile);
                     let mut stream = batch_chunks(custom.chat_stream(ctx));
+                    let mut response_metadata = None;
                     loop {
                         match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                            Ok(Some(chunk)) => yield ServerEvent::Chunk {
+                            Ok(Some(AgentStreamEvent::Content(chunk))) => yield ServerEvent::Chunk {
                                 agent: agent_name.clone(), content: chunk, round: None, phase: Some("final".into()),
                             },
+                            Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                             Ok(None) => break,
                             Err(_) => {
                                 yield ServerEvent::Error { message: format!("{} stream timed out", agent_name) };
@@ -1364,7 +1410,7 @@ pub fn run_agent_stream(
                             }
                         }
                     }
-                    yield ServerEvent::Done { agent: agent_name, round: None, phase: Some("final".into()) };
+                    yield done_event(agent_name, None, Some("final".into()), response_metadata);
                 }
             }
             AgentMode::Debate => {
@@ -1397,9 +1443,10 @@ pub fn run_agent_stream(
                             DebateAgent::OpenClaw => openclaw.chat_stream(ctx),
                             DebateAgent::Hermes => hermes.chat_stream(ctx),
                         });
+                        let mut response_metadata = None;
                         loop {
                             match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                                Ok(Some(chunk)) => {
+                                Ok(Some(AgentStreamEvent::Content(chunk))) => {
                                     buffer.push_str(&chunk);
                                     yield ServerEvent::Chunk {
                                         agent: agent_name.clone(),
@@ -1408,6 +1455,7 @@ pub fn run_agent_stream(
                                         phase: Some(phase.into()),
                                     };
                                 }
+                                Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                                 Ok(None) => break,
                                 Err(_) => {
                                     yield ServerEvent::Error {
@@ -1417,11 +1465,7 @@ pub fn run_agent_stream(
                                 }
                             }
                         }
-                        yield ServerEvent::Done {
-                            agent: agent_name,
-                            round: None,
-                            phase: Some(phase.into()),
-                        };
+                        yield done_event(agent_name, None, Some(phase.into()), response_metadata);
                         append_debate_note(
                             project.root.as_deref(),
                             agent,
@@ -1460,9 +1504,10 @@ pub fn run_agent_stream(
                         DebateAgent::Hermes => hermes.chat_stream(round.context),
                     });
                     let mut timed_out = false;
+                    let mut response_metadata = None;
                     loop {
                         match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                            Ok(Some(chunk)) => {
+                            Ok(Some(AgentStreamEvent::Content(chunk))) => {
                                 buffer.push_str(&chunk);
                                 yield ServerEvent::Chunk {
                                     agent: agent_name.clone(),
@@ -1471,6 +1516,7 @@ pub fn run_agent_stream(
                                     phase: Some("round".into()),
                                 };
                             }
+                            Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                             Ok(None) => break,
                             Err(_) => {
                                 timed_out = true;
@@ -1490,11 +1536,7 @@ pub fn run_agent_stream(
                     if timed_out && buffer.trim().is_empty() {
                         return;
                     }
-                    yield ServerEvent::Done {
-                        agent: agent_name,
-                        round: round_num,
-                        phase: Some("round".into()),
-                    };
+                    yield done_event(agent_name, round_num, Some("round".into()), response_metadata);
                     runner.record_turn(buffer);
                     if timed_out {
                         break;
@@ -1517,9 +1559,10 @@ pub fn run_agent_stream(
                     DebateAgent::OpenClaw => openclaw.chat_stream(final_round.context),
                     DebateAgent::Hermes => hermes.chat_stream(final_round.context),
                 });
+                let mut response_metadata = None;
                 loop {
                     match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                        Ok(Some(chunk)) => {
+                        Ok(Some(AgentStreamEvent::Content(chunk))) => {
                             final_buffer.push_str(&chunk);
                             yield ServerEvent::Chunk {
                                 agent: final_agent_name.clone(),
@@ -1528,6 +1571,7 @@ pub fn run_agent_stream(
                                 phase: Some("final".into()),
                             }
                         },
+                        Ok(Some(AgentStreamEvent::Metadata(metadata))) => response_metadata = Some(metadata),
                         Ok(None) => break,
                         Err(_) => {
                             if final_buffer.trim().is_empty() {
@@ -1546,11 +1590,7 @@ pub fn run_agent_stream(
                 if final_buffer.trim().is_empty() {
                     return;
                 }
-                yield ServerEvent::Done {
-                    agent: final_agent_name,
-                    round: None,
-                    phase: Some("final".into()),
-                };
+                yield done_event(final_agent_name, None, Some("final".into()), response_metadata);
                 append_debate_note(
                     project.root.as_deref(),
                     final_agent,
