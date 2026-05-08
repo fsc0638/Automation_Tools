@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { InsightsTab } from "@/components/InsightsTab";
 import { CostTab } from "@/components/CostTab";
+import { RoadmapTab } from "@/components/RoadmapTab";
 
 type ProjectTab = "chat" | "insights" | "cost" | "roadmap";
 
@@ -594,9 +595,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
         {activeTab === "insights" && <InsightsTab projectId={id} />}
         {activeTab === "cost" && <CostTab projectId={id} />}
-        {activeTab === "roadmap" && (
-          <div className="p-8 text-center text-[#94A3B8] text-sm">Roadmap tab — coming in Phase 4</div>
-        )}
+        {activeTab === "roadmap" && <RoadmapTab projectId={id} />}
 
         {activeTab === "chat" && (<>
         {/* Toolbar */}

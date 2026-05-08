@@ -11,6 +11,7 @@ pub mod git_identities;
 pub mod metrics;
 pub mod project_index;
 pub mod projects;
+pub mod tasks;
 pub mod ws;
 
 #[derive(Clone)]
@@ -31,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .merge(git_identities::routes())
         .merge(conversations::routes())
         .merge(metrics::routes())
+        .merge(tasks::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

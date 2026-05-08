@@ -106,6 +106,23 @@ export const projects = {
     }),
 };
 
+export const tasks = {
+  list: (projectId: string) =>
+    request<ProjectTask[]>(`/projects/${projectId}/tasks`),
+  create: (projectId: string, data: CreateTaskInput) =>
+    request<ProjectTask>(`/projects/${projectId}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (projectId: string, taskId: string, data: UpdateTaskInput) =>
+    request<ProjectTask>(`/projects/${projectId}/tasks/${taskId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  delete: (projectId: string, taskId: string) =>
+    request<void>(`/projects/${projectId}/tasks/${taskId}`, { method: "DELETE" }),
+};
+
 export const gitIdentities = {
   list: () => request<GitIdentity[]>("/git/identities"),
   create: (data: { name: string; provider?: string; username: string; access_token: string; repository_url?: string }) =>
@@ -223,6 +240,44 @@ export interface Message {
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
+}
+
+export type TaskStatus = "todo" | "in-progress" | "done" | "cancelled";
+export type TaskPriority = "low" | "medium" | "high" | "critical";
+
+export interface ProjectTask {
+  id: string;
+  project_id: string;
+  title: string;
+  why?: string | null;
+  affected_files?: string[] | null;
+  acceptance_criteria?: string | null;
+  estimated_effort?: string | null;
+  priority: TaskPriority;
+  status: TaskStatus;
+  source_message_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTaskInput {
+  title: string;
+  why?: string;
+  affected_files?: string[];
+  acceptance_criteria?: string;
+  estimated_effort?: string;
+  priority?: TaskPriority;
+  source_message_id?: string;
+}
+
+export interface UpdateTaskInput {
+  title?: string;
+  why?: string;
+  affected_files?: string[];
+  acceptance_criteria?: string;
+  estimated_effort?: string;
+  priority?: TaskPriority;
+  status?: TaskStatus;
 }
 
 export interface MetricsHealth {
