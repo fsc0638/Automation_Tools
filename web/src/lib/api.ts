@@ -131,6 +131,13 @@ export const tasks = {
     request<void>(`/projects/${projectId}/tasks/${taskId}`, { method: "DELETE" }),
   history: (projectId: string, taskId: string) =>
     request<TaskStatusEvent[]>(`/projects/${projectId}/tasks/${taskId}/history`),
+  attempts: (projectId: string, taskId: string) =>
+    request<TaskAttempt[]>(`/projects/${projectId}/tasks/${taskId}/attempts`),
+  dispatch: (projectId: string, taskId: string, data: DispatchTaskInput) =>
+    request<DispatchTaskResult>(`/projects/${projectId}/tasks/${taskId}/attempts`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 };
 
 export const gitIdentities = {
@@ -298,6 +305,13 @@ export interface ConversationWithMessages extends Conversation {
 export type TaskStatus = "todo" | "in-progress" | "done" | "cancelled";
 export type TaskPriority = "low" | "medium" | "high" | "critical";
 
+export interface AcceptanceCriteriaV2 {
+  tests?: string[];
+  commands?: string[];
+  diff_hints?: string[];
+  behavior?: string[];
+}
+
 export interface ProjectTask {
   id: string;
   project_id: string;
@@ -317,6 +331,11 @@ export interface ProjectTask {
   rollback_plan?: string | null;
   definition_of_done?: string | null;
   labels: string[];                     // always present, possibly empty
+  // P2 fields
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string | null;
+  linked_commit_sha?: string | null;
+  depends_on: string[];                 // always present, possibly empty
   created_at: string;
   updated_at: string;
 }
@@ -335,6 +354,10 @@ export interface CreateTaskInput {
   rollback_plan?: string;
   definition_of_done?: string;
   labels?: string[];
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string;
+  linked_commit_sha?: string;
+  depends_on?: string[];
 }
 
 export interface UpdateTaskInput {
@@ -351,7 +374,37 @@ export interface UpdateTaskInput {
   rollback_plan?: string;
   definition_of_done?: string;
   labels?: string[];
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string;
+  linked_commit_sha?: string;
+  depends_on?: string[];
   status_note?: string;
+}
+
+export interface TaskAttempt {
+  id: string;
+  task_id: string;
+  conversation_id: string;
+  mode: string;
+  status: "pending" | "running" | "complete" | "failed" | "cancelled";
+  dispatched_by?: string | null;
+  dispatched_by_name?: string | null;
+  note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DispatchTaskInput {
+  mode: string;
+  note?: string;
+  conversation_id?: string;
+  title?: string;
+}
+
+export interface DispatchTaskResult {
+  attempt: TaskAttempt;
+  conversation_id: string;
+  prompt: string;
 }
 
 export interface TaskStatusEvent {

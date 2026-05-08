@@ -431,6 +431,26 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     }
   }, [convs, activeConv, selectConv, id]);
 
+  /** Roadmap → workspace dispatch. The Roadmap drawer creates a new conv
+   *  and gets back a pre-built prompt; we switch tabs, open the conv,
+   *  and pre-fill the composer so the user can review then hit Send. */
+  const onDispatched = useCallback(async (conversationId: string, prompt: string) => {
+    setProjectTab("workspace");
+    try {
+      const list = await convsApi.list(id);
+      setConvs(list);
+      const target = list.find((c) => c.id === conversationId);
+      if (target) await selectConv(target);
+    } catch { /* best-effort */ }
+    setInput(prompt);
+    // Make sure the composer scrolls into view; users typically expect to
+    // see the prompt waiting for them.
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+  }, [id, selectConv]);
+
   useEffect(() => {
     if (!pendingScrollMessageId) return;
     if (!messages.some((m) => m.id === pendingScrollMessageId)) return;
@@ -940,7 +960,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
       {projectTab === "insights" && <InsightsTab projectId={id} />}
       {projectTab === "cost" && <CostTab projectId={id} />}
-      {projectTab === "roadmap" && <RoadmapTab projectId={id} onOpenSource={openSourceMessage} />}
+      {projectTab === "roadmap" && <RoadmapTab projectId={id} onOpenSource={openSourceMessage} onDispatched={onDispatched} />}
 
       {projectTab === "workspace" && (
       <div className="flex min-h-0 flex-1 bg-[#F8FAFC]">

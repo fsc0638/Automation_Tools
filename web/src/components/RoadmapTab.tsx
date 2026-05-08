@@ -1,9 +1,11 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLink, Filter, History, Plus, Search, Tag, Trash2, X } from "lucide-react";
+import { ExternalLink, Filter, GitBranch, GitPullRequest, History, Lock, Plus, Search, Send, Tag, Trash2, X } from "lucide-react";
 import {
   tasks as tasksApi,
+  type AcceptanceCriteriaV2,
   type ProjectTask,
+  type TaskAttempt,
   type TaskPriority,
   type TaskStatus,
   type TaskStatusEvent,
@@ -36,9 +38,13 @@ export interface RoadmapTabProps {
   /** When set, clicking the source-message link on a task opens that
    *  conversation in the workspace tab and scrolls to the message. */
   onOpenSource?: (conversationId: string, messageId: string) => void;
+  /** When set, a "Send to Agent" button appears in the drawer. The page
+   *  is responsible for switching to the workspace tab, opening the
+   *  conversation, and pre-filling the composer with `prompt`. */
+  onDispatched?: (conversationId: string, prompt: string) => void;
 }
 
-export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
+export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTabProps) {
   const [items, setItems] = useState<ProjectTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -430,6 +436,7 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
                   <TaskCard
                     key={tk.id}
                     task={tk}
+                    allTasks={items}
                     onMove={moveTask}
                     onDelete={deleteTask}
                     onDragStart={onCardDragStart}
@@ -446,15 +453,26 @@ export function RoadmapTab({ projectId, onOpenSource }: RoadmapTabProps) {
         <TaskDetailDrawer
           key={activeTask.id}
           task={activeTask}
+          allTasks={items}
           projectId={projectId}
           onClose={() => setActiveId(null)}
           onUpdate={updateTask}
           onDelete={deleteTask}
           onOpenSource={onOpenSource}
+          onDispatched={onDispatched}
         />
       )}
     </div>
   );
+}
+
+/** Open dependencies that are not yet done/cancelled — i.e. real blockers. */
+function findBlockers(task: ProjectTask, all: ProjectTask[]): ProjectTask[] {
+  if (!task.depends_on || task.depends_on.length === 0) return [];
+  const map = new Map(all.map((t) => [t.id, t]));
+  return task.depends_on
+    .map((id) => map.get(id))
+    .filter((t): t is ProjectTask => !!t && t.status !== "done" && t.status !== "cancelled");
 }
 
 function isOverdue(task: ProjectTask): boolean {
@@ -478,12 +496,14 @@ function formatDueRel(due: string): string {
 
 function TaskCard({
   task,
+  allTasks,
   onMove,
   onDelete,
   onDragStart,
   onOpen,
 }: {
   task: ProjectTask;
+  allTasks: ProjectTask[];
   onMove: (t: ProjectTask, s: TaskStatus) => void | Promise<void>;
   onDelete: (t: ProjectTask) => void | Promise<void>;
   onDragStart: (e: React.DragEvent<HTMLDivElement>, t: ProjectTask) => void;
@@ -491,6 +511,8 @@ function TaskCard({
 }) {
   const next = STATUS_NEXT[task.status];
   const overdue = isOverdue(task);
+  const blockers = findBlockers(task, allTasks);
+  const blocked = blockers.length > 0 && task.status !== "done" && task.status !== "cancelled";
   return (
     <div
       draggable
@@ -552,6 +574,16 @@ function TaskCard({
         {task.source_message_id && (
           <span className="text-[10px] text-[#0EA5E9]" title="Has source message">↩</span>
         )}
+        {task.linked_pr_url && (
+          <span className="inline-flex items-center gap-0.5 rounded-full bg-purple-50 px-1.5 py-0.5 text-[10px] text-purple-700" title={task.linked_pr_url}>
+            <GitPullRequest size={9} /> PR
+          </span>
+        )}
+        {blocked && (
+          <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-800" title={blockers.map((b) => b.title).join("\n")}>
+            <Lock size={9} /> blocked × {blockers.length}
+          </span>
+        )}
         <div className="flex-1" />
         {next && (
           <button
@@ -575,26 +607,41 @@ function TaskCard({
   );
 }
 
+function joinList(items?: string[] | null): string {
+  return (items ?? []).filter(Boolean).join("\n");
+}
+function splitList(value: string): string[] {
+  return value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
 function TaskDetailDrawer({
   task,
+  allTasks,
   projectId,
   onClose,
   onUpdate,
   onDelete,
   onOpenSource,
+  onDispatched,
 }: {
   task: ProjectTask;
+  allTasks: ProjectTask[];
   projectId: string;
   onClose: () => void;
   onUpdate: (taskId: string, patch: UpdateTaskInput) => Promise<ProjectTask>;
   onDelete: (t: ProjectTask) => void | Promise<void>;
   onOpenSource?: (conversationId: string, messageId: string) => void;
+  onDispatched?: (conversationId: string, prompt: string) => void;
 }) {
   const t = useT();
   const [form, setForm] = useState({
     title: task.title,
     why: task.why ?? "",
     acceptance_criteria: task.acceptance_criteria ?? "",
+    ac_tests: joinList(task.acceptance_criteria_v2?.tests),
+    ac_commands: joinList(task.acceptance_criteria_v2?.commands),
+    ac_diff_hints: joinList(task.acceptance_criteria_v2?.diff_hints),
+    ac_behavior: joinList(task.acceptance_criteria_v2?.behavior),
     test_plan: task.test_plan ?? "",
     rollback_plan: task.rollback_plan ?? "",
     definition_of_done: task.definition_of_done ?? "",
@@ -605,19 +652,42 @@ function TaskDetailDrawer({
     assignee: task.assignee ?? "",
     due_date: task.due_date ?? "",
     labels: (task.labels ?? []).join(", "),
+    linked_pr_url: task.linked_pr_url ?? "",
+    linked_commit_sha: task.linked_commit_sha ?? "",
+    depends_on: task.depends_on ?? [],
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [history, setHistory] = useState<TaskStatusEvent[] | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [attempts, setAttempts] = useState<TaskAttempt[] | null>(null);
+  const [showAttempts, setShowAttempts] = useState(false);
+  const [dispatchMode, setDispatchMode] = useState<string>("openclaw");
+  const [dispatching, setDispatching] = useState(false);
+
+  const blockers = useMemo(() => findBlockers(task, allTasks), [task, allTasks]);
+  const dependencyOptions = useMemo(
+    () => allTasks.filter((other) => other.id !== task.id),
+    [allTasks, task.id],
+  );
 
   const dirty = useMemo(() => {
     const filesArr = form.affected_files.split(/[\s,]+/).map((f) => f.trim()).filter(Boolean);
     const labelsArr = form.labels.split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
     const currentFiles = task.affected_files ?? [];
     const currentLabels = task.labels ?? [];
+    const currentDeps = task.depends_on ?? [];
     const filesChanged = filesArr.length !== currentFiles.length || filesArr.some((f, i) => f !== currentFiles[i]);
     const labelsChanged = labelsArr.length !== currentLabels.length || labelsArr.some((l, i) => l !== currentLabels[i]);
+    const depsChanged = form.depends_on.length !== currentDeps.length ||
+      form.depends_on.some((id, i) => id !== currentDeps[i]);
+    const acV2 = task.acceptance_criteria_v2 ?? {};
+    const acV2Changed = (
+      form.ac_tests !== joinList(acV2.tests) ||
+      form.ac_commands !== joinList(acV2.commands) ||
+      form.ac_diff_hints !== joinList(acV2.diff_hints) ||
+      form.ac_behavior !== joinList(acV2.behavior)
+    );
     return (
       form.title !== task.title ||
       form.why !== (task.why ?? "") ||
@@ -630,7 +700,9 @@ function TaskDetailDrawer({
       form.status !== task.status ||
       form.assignee !== (task.assignee ?? "") ||
       form.due_date !== (task.due_date ?? "") ||
-      filesChanged || labelsChanged
+      form.linked_pr_url !== (task.linked_pr_url ?? "") ||
+      form.linked_commit_sha !== (task.linked_commit_sha ?? "") ||
+      filesChanged || labelsChanged || depsChanged || acV2Changed
     );
   }, [form, task]);
 
@@ -645,6 +717,44 @@ function TaskDetailDrawer({
     }
   }
 
+  async function loadAttempts() {
+    if (attempts !== null) { setShowAttempts(true); return; }
+    try {
+      const list = await tasksApi.attempts(projectId, task.id);
+      setAttempts(list);
+      setShowAttempts(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load attempts");
+    }
+  }
+
+  async function dispatch() {
+    if (!onDispatched || dispatching) return;
+    setDispatching(true);
+    setError("");
+    try {
+      const result = await tasksApi.dispatch(projectId, task.id, { mode: dispatchMode });
+      // Refresh attempts list (now includes the new one).
+      try {
+        const list = await tasksApi.attempts(projectId, task.id);
+        setAttempts(list);
+      } catch { /* best-effort */ }
+      onDispatched(result.conversation_id, result.prompt);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Dispatch failed");
+    } finally {
+      setDispatching(false);
+    }
+  }
+
+  function toggleDependency(id: string) {
+    setForm((prev) => {
+      const has = prev.depends_on.includes(id);
+      return { ...prev, depends_on: has ? prev.depends_on.filter((d) => d !== id) : [...prev.depends_on, id] };
+    });
+  }
+
   async function save() {
     if (!form.title.trim()) {
       setError("Title required");
@@ -655,10 +765,19 @@ function TaskDetailDrawer({
     try {
       const filesArr = form.affected_files.split(/[\s,]+/).map((f) => f.trim()).filter(Boolean);
       const labelsArr = form.labels.split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
+      const acV2: AcceptanceCriteriaV2 = {
+        tests: splitList(form.ac_tests),
+        commands: splitList(form.ac_commands),
+        diff_hints: splitList(form.ac_diff_hints),
+        behavior: splitList(form.ac_behavior),
+      };
+      const acV2HasContent = (acV2.tests?.length ?? 0) + (acV2.commands?.length ?? 0)
+        + (acV2.diff_hints?.length ?? 0) + (acV2.behavior?.length ?? 0) > 0;
       const patch: UpdateTaskInput = {
         title: form.title.trim(),
         why: form.why.trim(),
         acceptance_criteria: form.acceptance_criteria.trim(),
+        acceptance_criteria_v2: acV2HasContent ? acV2 : null,
         test_plan: form.test_plan.trim(),
         rollback_plan: form.rollback_plan.trim(),
         definition_of_done: form.definition_of_done.trim(),
@@ -668,6 +787,9 @@ function TaskDetailDrawer({
         status: form.status,
         assignee: form.assignee.trim(),
         labels: labelsArr,
+        linked_pr_url: form.linked_pr_url.trim(),
+        linked_commit_sha: form.linked_commit_sha.trim(),
+        depends_on: form.depends_on,
       };
       // Send due_date only when set; null clears it.
       if (form.due_date) patch.due_date = form.due_date;
@@ -804,10 +926,59 @@ function TaskDetailDrawer({
             <textarea
               value={form.acceptance_criteria}
               onChange={(e) => setForm({ ...form, acceptance_criteria: e.target.value })}
-              rows={4}
+              rows={3}
               className="mt-1 w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-sm leading-6"
               placeholder={t("roadmap.acHint")}
             />
+          </div>
+
+          <div className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-3 space-y-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#475569]">
+              {t("roadmap.acStructured")}
+              <span className="ml-2 font-normal normal-case text-[10px] text-[#94A3B8]">{t("roadmap.acStructuredHint")}</span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acTests")}</label>
+                <textarea
+                  value={form.ac_tests}
+                  onChange={(e) => setForm({ ...form, ac_tests: e.target.value })}
+                  rows={3}
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs font-mono leading-5"
+                  placeholder="cargo test --package backend api::tasks&#10;npm test"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acCommands")}</label>
+                <textarea
+                  value={form.ac_commands}
+                  onChange={(e) => setForm({ ...form, ac_commands: e.target.value })}
+                  rows={3}
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs font-mono leading-5"
+                  placeholder="cd backend && cargo check&#10;cd web && npm run build"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acDiff")}</label>
+                <textarea
+                  value={form.ac_diff_hints}
+                  onChange={(e) => setForm({ ...form, ac_diff_hints: e.target.value })}
+                  rows={3}
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs leading-5"
+                  placeholder={t("roadmap.acDiffHint")}
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acBehavior")}</label>
+                <textarea
+                  value={form.ac_behavior}
+                  onChange={(e) => setForm({ ...form, ac_behavior: e.target.value })}
+                  rows={3}
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs leading-5"
+                  placeholder={t("roadmap.acBehaviorHint")}
+                />
+              </div>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -854,6 +1025,155 @@ function TaskDetailDrawer({
               placeholder={t("roadmap.filesHint")}
             />
             <div className="mt-1 text-[11px] text-[#94A3B8]">{t("roadmap.filesSplitter")}</div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">
+                <GitPullRequest size={11} className="inline" /> {t("roadmap.prUrl")}
+              </label>
+              <input
+                value={form.linked_pr_url}
+                onChange={(e) => setForm({ ...form, linked_pr_url: e.target.value })}
+                placeholder="https://github.com/owner/repo/pull/123"
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-xs font-mono"
+              />
+              {form.linked_pr_url && (
+                <a href={form.linked_pr_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-[10px] text-[#0050A0] hover:underline">
+                  <ExternalLink size={9} /> {t("roadmap.openLink")}
+                </a>
+              )}
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">
+                <GitBranch size={11} className="inline" /> {t("roadmap.commitSha")}
+              </label>
+              <input
+                value={form.linked_commit_sha}
+                onChange={(e) => setForm({ ...form, linked_commit_sha: e.target.value })}
+                placeholder="abcd1234"
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-xs font-mono"
+              />
+            </div>
+          </div>
+
+          <div className="rounded-md border border-[#E2E8F0] bg-white">
+            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] px-3 py-2">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#475569]">
+                <Lock size={11} className="inline" /> {t("roadmap.dependencies")}
+                <span className="ml-2 text-[10px] font-normal text-[#94A3B8]">
+                  {form.depends_on.length} {t("roadmap.depsSelected")}
+                </span>
+              </div>
+              {blockers.length > 0 && (
+                <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] text-amber-800">
+                  {t("roadmap.blockedBy")} {blockers.length}
+                </span>
+              )}
+            </div>
+            <div className="max-h-40 overflow-auto px-3 py-2 space-y-1">
+              {dependencyOptions.length === 0 ? (
+                <div className="text-[11px] text-[#94A3B8]">{t("roadmap.depsEmpty")}</div>
+              ) : (
+                dependencyOptions.map((other) => {
+                  const checked = form.depends_on.includes(other.id);
+                  const closed = other.status === "done" || other.status === "cancelled";
+                  return (
+                    <label key={other.id} className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 hover:bg-[#F8FAFC]">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleDependency(other.id)}
+                        className="h-3 w-3"
+                      />
+                      <span className={`flex-1 truncate text-xs ${closed ? "text-[#94A3B8] line-through" : "text-[#1A1A2E]"}`}>
+                        {other.title}
+                      </span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${PRIORITY_BADGE[other.priority]}`}>{other.priority}</span>
+                      <span className="text-[10px] text-[#94A3B8] uppercase">{other.status}</span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* Send to Agent */}
+          {onDispatched && (
+            <div className="rounded-md border border-[#0050A0]/20 bg-[#EFF6FF] px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#0050A0]">
+                <Send size={11} className="inline" /> {t("roadmap.sendToAgent")}
+              </div>
+              <p className="mt-1 text-[11px] text-[#475569]">{t("roadmap.sendToAgentHint")}</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <select
+                  value={dispatchMode}
+                  onChange={(e) => setDispatchMode(e.target.value)}
+                  className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs"
+                >
+                  <option value="openclaw">OpenClaw</option>
+                  <option value="hermes">Hermes</option>
+                  <option value="debate">Debate</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void dispatch()}
+                  disabled={dispatching || dirty}
+                  className="inline-flex items-center gap-1 rounded-md bg-[#0050A0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
+                  title={dirty ? t("roadmap.saveBeforeDispatch") : ""}
+                >
+                  <Send size={11} /> {dispatching ? t("common.loading") : t("roadmap.dispatchBtn")}
+                </button>
+                {dirty && <span className="text-[11px] text-[#B45309]">{t("roadmap.saveBeforeDispatch")}</span>}
+              </div>
+            </div>
+          )}
+
+          {/* Past attempts */}
+          <div className="rounded-md border border-[#E2E8F0] bg-white">
+            <button
+              type="button"
+              onClick={() => { if (!showAttempts) void loadAttempts(); else setShowAttempts(false); }}
+              className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC]"
+            >
+              <span className="inline-flex items-center gap-2">
+                <History size={12} /> {t("roadmap.attempts")}
+              </span>
+              <span className="text-[#94A3B8]">{showAttempts ? "−" : "+"}</span>
+            </button>
+            {showAttempts && (
+              <div className="px-3 py-2">
+                {attempts === null ? (
+                  <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                ) : attempts.length === 0 ? (
+                  <div className="text-xs text-[#94A3B8]">{t("roadmap.attemptsEmpty")}</div>
+                ) : (
+                  <ul className="space-y-1 text-xs">
+                    {attempts.map((a) => (
+                      <li key={a.id} className="flex items-start gap-2">
+                        <span className="font-mono text-[10px] text-[#94A3B8]">
+                          {new Date(a.created_at).toLocaleString()}
+                        </span>
+                        <span className="text-[#475569]">
+                          <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px]">{a.mode}</span>
+                          <span className="ml-1 text-[10px] uppercase text-[#94A3B8]">{a.status}</span>
+                          {a.dispatched_by_name && <span className="ml-1 text-[#94A3B8]">by {a.dispatched_by_name}</span>}
+                        </span>
+                        {onOpenSource && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenSource(a.conversation_id, "")}
+                            className="ml-auto inline-flex items-center gap-0.5 text-[10px] text-[#0050A0] hover:underline"
+                          >
+                            <ExternalLink size={9} /> {t("roadmap.openConv")}
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
           </div>
 
           {task.source_message_id && (
