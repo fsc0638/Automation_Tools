@@ -19,8 +19,8 @@ pub struct Project {
     pub user_id: Uuid,
     pub name: String,
     pub description: Option<String>,
-    pub source_type: String, // "local" | "git"
-    pub source_path: String,  // local path or git URL
+    pub source_type: String,        // "local" | "git" | "upload"
+    pub source_path: String,        // local path, git URL, or uploaded project path
     pub local_path: Option<String>, // cloned path for git repos
     pub default_branch: Option<String>,
     pub git_identity_id: Option<Uuid>,
@@ -47,7 +47,7 @@ pub struct Conversation {
     pub project_id: Uuid,
     pub user_id: Uuid,
     pub title: String,
-    pub mode: String,      // "openclaw" | "hermes" | "debate"
+    pub mode: String, // "openclaw" | "hermes" | "debate"
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -56,7 +56,7 @@ pub struct Conversation {
 pub struct Message {
     pub id: Uuid,
     pub conversation_id: Uuid,
-    pub role: String,      // "user" | "hermes" | "openclaw" | "system"
+    pub role: String, // "user" | "hermes" | "openclaw" | "system"
     pub content: String,
     pub agent_name: Option<String>,
     pub file_path: Option<String>,

@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, GitBranch, FolderOpen, Trash2, Clock, KeyRound } from "lucide-react";
+import { Plus, GitBranch, FolderOpen, Trash2, Clock, KeyRound, Upload } from "lucide-react";
 import { gitIdentities, projects as projectsApi, type GitIdentity, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,6 +32,7 @@ export default function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [showIdentityCreate, setShowIdentityCreate] = useState(false);
   const [form, setForm] = useState(emptyProjectForm);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [identityForm, setIdentityForm] = useState(emptyIdentityForm);
   const [creating, setCreating] = useState(false);
   const [identityCreating, setIdentityCreating] = useState(false);
@@ -98,16 +99,26 @@ export default function ProjectsPage() {
     setError("");
     setCreating(true);
     try {
-      await projectsApi.create({
-        name: form.name,
-        description: form.description || undefined,
-        source_type: form.source_type,
-        source_path: form.source_path,
-        git_identity_id: form.source_type === "git" && form.git_identity_id ? form.git_identity_id : undefined,
-        default_branch: form.source_type === "git" ? form.default_branch || "main" : undefined,
-      });
+      if (form.source_type === "upload") {
+        if (!uploadFile) throw new Error("Please choose a zip file to upload");
+        await projectsApi.upload({
+          name: form.name,
+          description: form.description || undefined,
+          file: uploadFile,
+        });
+      } else {
+        await projectsApi.create({
+          name: form.name,
+          description: form.description || undefined,
+          source_type: form.source_type,
+          source_path: form.source_path,
+          git_identity_id: form.source_type === "git" && form.git_identity_id ? form.git_identity_id : undefined,
+          default_branch: form.source_type === "git" ? form.default_branch || "main" : undefined,
+        });
+      }
       setShowCreate(false);
       setForm(emptyProjectForm);
+      setUploadFile(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create project");
@@ -224,29 +235,47 @@ export default function ProjectsPage() {
             <div className="flex flex-col gap-1.5">
               <label className="text-sm font-medium text-[#1A1A2E]">Source Type</label>
               <div className="flex gap-3">
-                {["local", "git"].map((t) => (
-                  <button key={t} type="button"
-                    onClick={() => setForm((f) => ({ ...f, source_type: t }))}
+                {[
+                  { key: "local", label: "Local Folder", icon: FolderOpen },
+                  { key: "git", label: "Git Repository", icon: GitBranch },
+                  { key: "upload", label: "Upload Zip", icon: Upload },
+                ].map(({ key, label, icon: Icon }) => (
+                  <button key={key} type="button"
+                    onClick={() => setForm((f) => ({ ...f, source_type: key, source_path: f.source_type === "upload" || key === "upload" ? "" : f.source_path }))}
                     className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm transition-colors ${
-                      form.source_type === t
+                      form.source_type === key
                         ? "border-[#0050A0] bg-blue-50 text-[#0050A0]"
                         : "border-[#E2E8F0] text-[#64748B] hover:border-[#94A3B8]"
                     }`}>
-                    {t === "local" ? <FolderOpen size={14} /> : <GitBranch size={14} />}
-                    {t === "local" ? "Local Folder" : "Git Repository"}
+                    <Icon size={14} />
+                    {label}
                   </button>
                 ))}
               </div>
             </div>
 
-            <Input id="path" label={form.source_type === "local" ? "Folder Path" : "Git URL"}
-              placeholder={form.source_type === "local" ? "C:/Projects/my-app" : "https://github.com/org/repo.git"}
-              value={form.source_path}
-              onChange={(e) => {
-                setForm((f) => ({ ...f, source_path: e.target.value }));
-                setRemoteBranches([]);
-                setBranchFetchError("");
-              }} required />
+            {form.source_type === "upload" ? (
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-[#1A1A2E]">Project Zip File</label>
+                <input
+                  type="file"
+                  accept=".zip,application/zip,application/x-zip-compressed"
+                  onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                  required
+                  className="rounded-lg border border-[#E2E8F0] px-4 py-2.5 text-sm text-[#1A1A2E] file:mr-3 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-1.5 file:text-[#0050A0]"
+                />
+                <p className="text-xs text-[#94A3B8]">Zip contents are extracted server-side, indexed, and used as project context for OpenClaw / Hermes.</p>
+              </div>
+            ) : (
+              <Input id="path" label={form.source_type === "local" ? "Folder Path" : "Git URL"}
+                placeholder={form.source_type === "local" ? "C:/Projects/my-app" : "https://github.com/org/repo.git"}
+                value={form.source_path}
+                onChange={(e) => {
+                  setForm((f) => ({ ...f, source_path: e.target.value }));
+                  setRemoteBranches([]);
+                  setBranchFetchError("");
+                }} required />
+            )}
 
             {form.source_type === "git" && (
               <div className="grid grid-cols-2 gap-4">
@@ -334,6 +363,8 @@ export default function ProjectsPage() {
                   <div className="w-9 h-9 rounded-lg bg-[#F1F5F9] flex items-center justify-center flex-shrink-0">
                     {p.source_type === "git" ? (
                       <GitBranch size={16} className="text-[#0050A0]" />
+                    ) : p.source_type === "upload" ? (
+                      <Upload size={16} className="text-[#0050A0]" />
                     ) : (
                       <FolderOpen size={16} className="text-[#0050A0]" />
                     )}

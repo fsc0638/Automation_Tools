@@ -58,6 +58,25 @@ export const projects = {
   list: () => request<Project[]>("/projects"),
   create: (data: CreateProjectInput) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(data) }),
+  upload: async (data: { name: string; description?: string; file: File }) => {
+    const token = getToken();
+    const form = new FormData();
+    form.append("name", data.name);
+    if (data.description) form.append("description", data.description);
+    form.append("file", data.file);
+    const res = await fetch(`${API_BASE}/projects/upload`, {
+      method: "POST",
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: form,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error ?? "Upload failed");
+    }
+    return res.json() as Promise<Project>;
+  },
   get: (id: string) => request<Project>(`/projects/${id}`),
   delete: (id: string) => request<void>(`/projects/${id}`, { method: "DELETE" }),
   fileTree: (id: string) => request<FileNode[]>(`/projects/${id}/files`),
@@ -72,6 +91,8 @@ export const projects = {
       `/projects/${id}/git/sync`,
       { method: "POST" },
     ),
+  reindex: (id: string) =>
+    request<{ indexed_files: number }>(`/projects/${id}/index`, { method: "POST" }),
   remoteBranches: (url: string, git_identity_id?: string) =>
     request<{ branches: string[] }>("/git/remote-branches", {
       method: "POST",
