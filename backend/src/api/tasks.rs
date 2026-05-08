@@ -522,10 +522,11 @@ async fn dispatch_task(
             .map(str::to_string)
             .unwrap_or_else(|| format!("Task: {}", task.title));
         let new_conv: (Uuid,) = sqlx::query_as(
-            "INSERT INTO conversations (project_id, title, agent_mode)
-             VALUES ($1, $2, $3) RETURNING id",
+            "INSERT INTO conversations (project_id, user_id, title, mode)
+             VALUES ($1, $2, $3, $4) RETURNING id",
         )
         .bind(project_id)
+        .bind(auth_user.id)
         .bind(title)
         .bind(conv_mode)
         .fetch_one(&state.db)
