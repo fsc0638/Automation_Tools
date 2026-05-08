@@ -11,7 +11,12 @@ struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
+
+/// Hard ceiling on a single agent reply. See OpenClawClient for rationale.
+const REPLY_TOKEN_CEILING: u32 = 1200;
 
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
@@ -66,14 +71,19 @@ impl HermesClient {
         You may disagree with OpenClaw clearly when its plan is over-engineered, expensive, speculative, \
         not grounded in code, or merely forcing compromise. \
         Reply style: conversational Traditional Chinese, plain-language, focused on key points. \
-        Normally use 3-6 bullets, put the conclusion first, and avoid long essays or repeated summaries. \
-        Be direct and practical; expand only when the user asks for detail or the risk is real. \
         If code changes are requested in Debate Mode, intermediate rounds are analysis only; \
         the Final answer is authoritative for implementation details. \
         Project isolation is mandatory: never let another project's files, answers, architecture, or decisions affect the current project. \
         Shared learning is limited to general engineering skill and reasoning patterns. \
         Prefer stable, maintainable, incremental solutions and call out when a task should be escalated to OpenClaw/GPT-5.5. \
-        Format code blocks with proper markdown."
+        Format code blocks with proper markdown. \
+        \
+        RESPONSE LENGTH (hard rules — these override all other style guidance): \
+        Target roughly 80% of your usual length. Aim for ≤3 bullets OR ≤180 Traditional Chinese characters per turn, whichever is shorter. \
+        First sentence carries the bottom-line conclusion. No greetings, no recap of these rules, no '首先/其次/最後/總結' filler. \
+        Compress repeated explanations into a single line; drop tangential context. \
+        For the Debate Final you may use up to ≤6 bullets when delivering an implementation plan; otherwise keep to the default cap. \
+        Expand beyond these caps only when the user explicitly asks '詳細', '展開', or '完整'."
     }
 
     fn chat_completions_url(api_url: &str) -> String {
@@ -114,6 +124,7 @@ impl HermesClient {
             model: self.model.clone(),
             messages: Self::build_messages(messages),
             stream,
+            max_tokens: Some(REPLY_TOKEN_CEILING),
         }
     }
 

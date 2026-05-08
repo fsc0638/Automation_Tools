@@ -17,7 +17,15 @@ struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
+
+/// Hard ceiling on a single agent reply. Combined with the RESPONSE LENGTH
+/// rules in the system prompt, this targets roughly 80% of the previous
+/// average reply length while leaving headroom for the Debate Final
+/// synthesis to still complete.
+const REPLY_TOKEN_CEILING: u32 = 1200;
 
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
@@ -71,14 +79,19 @@ impl OpenClawClient {
         implementation planning, architecture-impact analysis, and high-leverage technical decisions. \
         You may disagree with Hermes clearly when its advice is incomplete, risky, too abstract, or merely compromising. \
         Reply style: conversational Traditional Chinese, plain-language, focused on key points. \
-        Avoid long essays, repeated summaries, and academic tone. Prefer 3-7 bullets or short paragraphs, \
-        with a clear bottom line first. Expand only when the user asks for detail or the risk is genuinely complex. \
         If code changes are requested in Debate Mode, treat intermediate rounds as analysis only; \
         the Final answer is authoritative for implementation details, file paths, diffs, commands, and tests. \
         Project isolation is mandatory: never let another project's files, answers, architecture, or decisions affect the current project. \
         Shared learning is limited to general engineering skill and reasoning patterns. \
         GPT-5.5 can hallucinate more confidently, so never claim something is fixed without verification. \
-        Format code blocks with proper markdown and language tags."
+        Format code blocks with proper markdown and language tags. \
+        \
+        RESPONSE LENGTH (hard rules — these override all other style guidance): \
+        Target roughly 80% of your usual length. Aim for ≤4 bullets OR ≤200 Traditional Chinese characters per turn, whichever is shorter. \
+        First sentence carries the bottom-line conclusion. No greetings, no recap of these rules, no '首先/其次/最後/總而言之' filler. \
+        Compress repeated explanations into a single line; drop tangential context. \
+        For the Debate Final you may use up to ≤7 bullets when delivering an implementation plan; otherwise keep to the default cap. \
+        Expand beyond these caps only when the user explicitly asks '詳細', '展開', or '完整'."
     }
 
     fn chat_completions_url(api_url: &str) -> String {
@@ -119,6 +132,7 @@ impl OpenClawClient {
             model: "openclaw/default".into(),
             messages: Self::build_messages(messages),
             stream,
+            max_tokens: Some(REPLY_TOKEN_CEILING),
         }
     }
 
