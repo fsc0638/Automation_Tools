@@ -247,6 +247,27 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
 
   const activeTask = useMemo(() => items.find((t) => t.id === activeId) ?? null, [items, activeId]);
 
+  // Sprint task counts are computed client-side from `items` so they stay
+  // in sync whenever a task is dragged between status columns, has its
+  // sprint changed, or is created/deleted — without an extra refetch of
+  // /sprints. The backend SPRINT_SELECT also returns task_total/task_done
+  // for the initial load, but we override here so drag-drop reflects
+  // instantly in the filter dropdown and the sprint manager.
+  const sprintsWithLiveCounts: Sprint[] = useMemo(() => {
+    const counts = new Map<string, { total: number; done: number }>();
+    for (const tk of items) {
+      if (!tk.sprint_id) continue;
+      const c = counts.get(tk.sprint_id) ?? { total: 0, done: 0 };
+      c.total += 1;
+      if (tk.status === "done") c.done += 1;
+      counts.set(tk.sprint_id, c);
+    }
+    return sprintList.map((s) => {
+      const c = counts.get(s.id);
+      return c ? { ...s, task_total: c.total, task_done: c.done } : { ...s, task_total: 0, task_done: 0 };
+    });
+  }, [sprintList, items]);
+
   if (loading && items.length === 0) {
     return <div className="p-8 text-center text-[#94A3B8]">{t("common.loading")}</div>;
   }
@@ -355,7 +376,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           >
             <option value="all">{t("roadmap.allSprints")}</option>
             <option value="none">{t("roadmap.sprintBacklog")}</option>
-            {sprintList.map((s) => (
+            {sprintsWithLiveCounts.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name} ({s.task_done}/{s.task_total})
               </option>
@@ -459,7 +480,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               className="h-8 px-2 text-xs rounded-md border border-[#E2E8F0] max-w-[160px]"
             >
               <option value="">{t("roadmap.sprintBacklog")}</option>
-              {sprintList.filter((s) => s.status !== "closed").map((s) => (
+              {sprintsWithLiveCounts.filter((s) => s.status !== "closed").map((s) => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
@@ -513,7 +534,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           key={activeTask.id}
           task={activeTask}
           allTasks={items}
-          sprintList={sprintList}
+          sprintList={sprintsWithLiveCounts}
           projectId={projectId}
           onClose={() => setActiveId(null)}
           onUpdate={updateTask}
@@ -526,7 +547,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
       {showSprintMgr && (
         <SprintManagerModal
           projectId={projectId}
-          sprints={sprintList}
+          sprints={sprintsWithLiveCounts}
           onClose={() => setShowSprintMgr(false)}
           onChanged={() => void reloadSprints()}
         />
