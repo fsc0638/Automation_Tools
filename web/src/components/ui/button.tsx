@@ -18,7 +18,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         // controls between SSR and hydration. Suppress the resulting noise.
         suppressHydrationWarning
         className={cn(
-          "inline-flex items-center justify-center gap-2 rounded-xl font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+          "inline-flex items-center justify-center gap-2 rounded-xl font-medium tracking-[-0.01em] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
           "shadow-[0_1px_2px_rgba(15,23,42,0.03)]",
           {
             "bg-[#0050A0] text-white hover:bg-[#003d7a] focus-visible:ring-[#0050A0]": variant === "primary",
@@ -29,9 +29,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
             "bg-[#F8FAFC] text-[#475569] hover:bg-[#F1F5F9] hover:text-[#1A1A2E] focus-visible:ring-[#0050A0] shadow-none": variant === "subtle",
           },
           {
-            "h-9 px-3.5 text-sm": size === "sm",
-            "h-10 px-4 text-sm": size === "md",
-            "h-11 px-6 text-base": size === "lg",
+            "h-9 px-3.5 text-[13px]": size === "sm",
+            "h-10 px-4 text-[14px]": size === "md",
+            "h-11 px-6 text-[15px]": size === "lg",
           },
           className
         )}

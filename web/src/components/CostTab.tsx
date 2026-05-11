@@ -61,8 +61,8 @@ export function CostTab({ projectId }: { projectId: string }) {
   return (
     <div className="p-6 space-y-6 overflow-auto">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("cost.title")}</h2>
-        <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">{t("common.refresh")}</button>
+        <h2 className="type-section-title text-[1.4rem]">{t("cost.title")}</h2>
+        <button onClick={() => void refresh()} className="text-[13px] text-[#0050A0] hover:underline">{t("common.refresh")}</button>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -73,7 +73,7 @@ export function CostTab({ projectId }: { projectId: string }) {
         <Kpi label={t("cost.avgPerCall")} value={totalCalls > 0 ? `$${(data.total_cost_usd / totalCalls).toFixed(4)}` : "—"} />
       </div>
 
-      <div className="text-xs text-[#94A3B8] bg-[#FEF3C7] border border-[#FCD34D] rounded-md px-3 py-2">
+      <div className="rounded-xl border border-[#FCD34D] bg-[#FEF3C7] px-4 py-3 text-[13px] leading-6 text-[#92400E]">
         ⚠️ {t("cost.note")}
       </div>
 
@@ -133,13 +133,13 @@ export function CostTab({ projectId }: { projectId: string }) {
       </div>
 
       <Card title={t("cost.pricingInUse")}>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 text-xs">
+        <div className="grid grid-cols-2 gap-3 pt-2 text-[13px] md:grid-cols-4">
           <Stat label="OpenClaw in" value={`$${data.pricing.openclaw_per_1k_in}/1k`} />
           <Stat label="OpenClaw out" value={`$${data.pricing.openclaw_per_1k_out}/1k`} />
           <Stat label="Hermes in" value={`$${data.pricing.hermes_per_1k_in}/1k`} />
           <Stat label="Hermes out" value={`$${data.pricing.hermes_per_1k_out}/1k`} />
         </div>
-        <div className="text-[11px] text-[#94A3B8] mt-2">
+        <div className="mt-2 text-[13px] leading-6 text-[#94A3B8]">
           Tune via env: OPENCLAW_PRICE_PER_1K_INPUT/OUTPUT, HERMES_PRICE_PER_1K_INPUT/OUTPUT.
         </div>
       </Card>
@@ -149,18 +149,18 @@ export function CostTab({ projectId }: { projectId: string }) {
 
 function Kpi({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="rounded-lg border border-[#E2E8F0] bg-white p-4">
-      <div className="text-xs text-[#94A3B8] uppercase tracking-wider">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-[#1A1A2E]">{value}</div>
+    <div className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-sm">
+      <div className="text-[12px] text-[#94A3B8] tracking-[0.05em]">{label}</div>
+      <div className="mt-2 text-[1.75rem] font-semibold tracking-[-0.02em] text-[#1A1A2E]">{value}</div>
     </div>
   );
 }
 function Card({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-[#E2E8F0] bg-white p-4">
+    <div className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-sm">
       <div className="mb-2">
-        <div className="text-sm font-semibold text-[#1A1A2E]">{title}</div>
-        {subtitle && <div className="text-[11px] text-[#94A3B8]">{subtitle}</div>}
+        <div className="text-[16px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">{title}</div>
+        {subtitle && <div className="mt-1 text-[13px] leading-6 text-[#94A3B8]">{subtitle}</div>}
       </div>
       {children}
     </div>
@@ -168,9 +168,9 @@ function Card({ title, subtitle, children }: { title: string; subtitle?: string;
 }
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md bg-[#F8FAFC] p-3">
-      <div className="text-[11px] text-[#94A3B8] uppercase">{label}</div>
-      <div className="text-base font-semibold text-[#1A1A2E] mt-0.5">{value}</div>
+    <div className="rounded-xl bg-[#F8FAFC] p-3">
+      <div className="text-[12px] text-[#94A3B8] tracking-[0.05em]">{label}</div>
+      <div className="mt-1 text-[15px] font-semibold text-[#1A1A2E]">{value}</div>
     </div>
   );
 }

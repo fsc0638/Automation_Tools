@@ -4,7 +4,13 @@ use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-use crate::{agents::openclaw::ChatMessage, config::Config};
+use crate::{
+    agents::{
+        openclaw::ChatMessage,
+        telemetry::{parse_openai_stream_chunk, AgentResponseMetadata, AgentStreamEvent, OpenAiUsage},
+    },
+    config::Config,
+};
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -13,34 +19,29 @@ struct ChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 /// Hard ceiling on a single agent reply. See OpenClawClient for rationale.
 const REPLY_TOKEN_CEILING: u32 = 1200;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    usage: Option<OpenAiUsage>,
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ChatMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChunk {
-    choices: Option<Vec<StreamChoice>>,
 }
 
 #[derive(Clone)]
@@ -125,6 +126,7 @@ impl HermesClient {
             messages: Self::build_messages(messages),
             stream,
             max_tokens: Some(REPLY_TOKEN_CEILING),
+            stream_options: stream.then_some(StreamOptions { include_usage: true }),
         }
     }
 
@@ -160,10 +162,11 @@ impl HermesClient {
     pub fn chat_stream(
         &self,
         messages: Vec<ChatMessage>,
-    ) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>> {
         let client = self.client.clone();
         let url = self.chat_completions_url.clone();
         let api_key = self.api_key.clone();
+        let provider_model = self.model.clone();
         let request = self.request(messages, true);
 
         Box::pin(async_stream::stream! {
@@ -176,12 +179,12 @@ impl HermesClient {
                 Ok(response) => match response.error_for_status() {
                     Ok(response) => response,
                     Err(error) => {
-                        yield format!("[Hermes error: Agent returned an error status: {error}]");
+                        yield AgentStreamEvent::Content(format!("[Hermes error: Agent returned an error status: {error}]"));
                         return;
                     }
                 },
                 Err(error) => {
-                    yield format!("[Hermes error: failed to send request to Agent: {error}]");
+                    yield AgentStreamEvent::Content(format!("[Hermes error: failed to send request to Agent: {error}]"));
                     return;
                 }
             };
@@ -194,7 +197,7 @@ impl HermesClient {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield format!("[Hermes stream error: {error}]");
+                        yield AgentStreamEvent::Content(format!("[Hermes stream error: {error}]"));
                         return;
                     }
                 };
@@ -228,14 +231,22 @@ impl HermesClient {
                         continue;
                     }
 
-                    match serde_json::from_str::<StreamChunk>(data) {
+                    match parse_openai_stream_chunk(data) {
                         Ok(parsed) => {
                             if let Some(choices) = parsed.choices {
                                 for choice in choices {
                                     if let Some(content) = choice.delta.content {
-                                        yield content;
+                                        yield AgentStreamEvent::Content(content);
                                     }
                                 }
+                            }
+                            if let Some(usage) = parsed.usage {
+                                yield AgentStreamEvent::Metadata(AgentResponseMetadata {
+                                    provider: "hermes_agent".into(),
+                                    model: parsed.model.unwrap_or_else(|| provider_model.clone()),
+                                    input_tokens: usage.prompt_tokens,
+                                    output_tokens: usage.completion_tokens,
+                                });
                             }
                         }
                         Err(_) => {

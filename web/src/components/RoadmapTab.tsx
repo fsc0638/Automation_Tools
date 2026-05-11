@@ -401,28 +401,28 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
     <div className="p-6 space-y-4 overflow-auto">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("roadmap.title")}</h2>
-          <p className="text-xs text-[#94A3B8]">{t("roadmap.subtitle")}</p>
+          <h2 className="type-section-title text-[1.4rem]">{t("roadmap.title")}</h2>
+          <p className="mt-1 text-[13px] leading-6 text-[#94A3B8]">{t("roadmap.subtitle")}</p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">{t("common.refresh")}</button>
+          <button onClick={() => void refresh()} className="text-[13px] text-[#0050A0] hover:underline">{t("common.refresh")}</button>
           <button
             onClick={() => exportTasks("csv")}
-            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-xs text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 py-1.5 text-[13px] text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
             title={t("roadmap.exportCsv")}
           >
             <Download size={12} /> CSV
           </button>
           <button
             onClick={() => exportTasks("json")}
-            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-xs text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 py-1.5 text-[13px] text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
             title={t("roadmap.exportJson")}
           >
             <Download size={12} /> JSON
           </button>
           <button
             onClick={() => setShowNew((v) => !v)}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium hover:bg-[#003B7A]"
+            className="flex items-center gap-1 rounded-lg bg-[#0050A0] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#003B7A]"
           >
             <Plus size={12} /> {t("roadmap.newTask")}
           </button>
@@ -449,7 +449,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t("roadmap.searchPlaceholder")}
-              className="flex-1 bg-transparent text-xs outline-none placeholder:text-[#94A3B8]"
+              className="flex-1 bg-transparent text-[14px] outline-none placeholder:text-[#94A3B8]"
             />
             {search && (
               <button onClick={() => setSearch("")} className="text-[#94A3B8] hover:text-[#1A1A2E]">
@@ -460,7 +460,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           <select
             value={sortKey}
             onChange={(e) => setSortKey(e.target.value as SortKey)}
-            className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs"
+            className="h-9 rounded-lg border border-[#E2E8F0] bg-white px-3 text-[13px]"
             title={t("roadmap.sortBy")}
           >
             <option value="priority">{t("roadmap.sortPriority")}</option>
@@ -470,7 +470,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
             <option value="updated">{t("roadmap.sortUpdated")}</option>
           </select>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2 text-[13px]">
           <Filter size={11} className="text-[#94A3B8]" />
           <select
             value={filterPriority}
@@ -541,7 +541,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
                 setFilterLabelRaw("all"); setFilterOverdueRaw(false); setFilterSprintRaw("all");
                 resetPersistedFilters(projectId);
               }}
-              className="text-[11px] text-[#0050A0] hover:underline"
+              className="text-[13px] text-[#0050A0] hover:underline"
             >
               {t("roadmap.clearFilters")}
             </button>
@@ -586,45 +586,45 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               value={draft.assignee}
               onChange={(e) => setDraft({ ...draft, assignee: e.target.value })}
               placeholder={t("roadmap.assigneeHint")}
-              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+              className="h-10 rounded-lg border border-[#E2E8F0] px-3 text-[14px]"
             />
             <input
               type="date"
               value={draft.due_date}
               onChange={(e) => setDraft({ ...draft, due_date: e.target.value })}
-              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+              className="h-10 rounded-lg border border-[#E2E8F0] px-3 text-[14px]"
             />
             <input
               value={draft.labels}
               onChange={(e) => setDraft({ ...draft, labels: e.target.value })}
               placeholder={t("roadmap.labelsHint")}
-              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+              className="h-10 rounded-lg border border-[#E2E8F0] px-3 text-[14px]"
             />
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-xs text-[#64748B]">{t("roadmap.priority")}:</label>
+            <label className="text-[13px] text-[#64748B]">{t("roadmap.priority")}:</label>
             <select
               value={draft.priority}
               onChange={(e) => setDraft({ ...draft, priority: e.target.value as TaskPriority })}
-              className="h-8 px-2 text-xs rounded-md border border-[#E2E8F0]"
+              className="h-9 rounded-lg border border-[#E2E8F0] px-3 text-[13px]"
             >
               <option value="low">{t("roadmap.priorityLow")}</option>
               <option value="medium">{t("roadmap.priorityMedium")}</option>
               <option value="high">{t("roadmap.priorityHigh")}</option>
               <option value="critical">{t("roadmap.priorityCritical")}</option>
             </select>
-            <label className="text-xs text-[#64748B]">{t("roadmap.effort")}:</label>
+            <label className="text-[13px] text-[#64748B]">{t("roadmap.effort")}:</label>
             <input
               value={draft.estimated_effort}
               onChange={(e) => setDraft({ ...draft, estimated_effort: e.target.value })}
               placeholder="S / M / L / 2d"
-              className="h-8 w-24 px-2 text-xs rounded-md border border-[#E2E8F0]"
+              className="h-9 w-24 rounded-lg border border-[#E2E8F0] px-3 text-[13px]"
             />
-            <label className="text-xs text-[#64748B]">{t("roadmap.sprint")}:</label>
+            <label className="text-[13px] text-[#64748B]">{t("roadmap.sprint")}:</label>
             <select
               value={draft.sprint_id}
               onChange={(e) => setDraft({ ...draft, sprint_id: e.target.value })}
-              className="h-8 px-2 text-xs rounded-md border border-[#E2E8F0] max-w-[160px]"
+              className="h-9 max-w-[160px] rounded-lg border border-[#E2E8F0] px-3 text-[13px]"
             >
               <option value="">{t("roadmap.sprintBacklog")}</option>
               {sprintsWithLiveCounts.filter((s) => s.status !== "closed").map((s) => (
@@ -632,8 +632,8 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               ))}
             </select>
             <div className="flex-1" />
-            <button type="button" onClick={() => setShowNew(false)} className="text-xs text-[#64748B] hover:text-[#1A1A2E]">{t("common.cancel")}</button>
-            <button type="submit" className="px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium">{t("common.create")}</button>
+            <button type="button" onClick={() => setShowNew(false)} className="text-[13px] text-[#64748B] hover:text-[#1A1A2E]">{t("common.cancel")}</button>
+            <button type="submit" className="px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-[13px] font-medium">{t("common.create")}</button>
           </div>
         </form>
       )}
@@ -655,8 +655,8 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               }`}
             >
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">{col.label}</span>
-                <span className="text-xs text-[#94A3B8]">{grouped[col.key].length}</span>
+                <span className="text-[12px] font-semibold text-[#64748B] tracking-[0.05em]">{col.label}</span>
+                <span className="text-[12px] text-[#94A3B8]">{grouped[col.key].length}</span>
               </div>
               <div className="space-y-2">
                 {grouped[col.key].map((tk) => (
@@ -787,14 +787,14 @@ function TaskCard({
           <Trash2 size={12} />
         </button>
       </div>
-      {task.why && <div className="text-xs text-[#64748B] mt-1 line-clamp-3">{task.why}</div>}
+      {task.why && <div className="mt-1 text-[13px] leading-6 text-[#64748B] line-clamp-3">{task.why}</div>}
       {task.acceptance_criteria && (
-        <div className="mt-2 rounded-sm border-l-2 border-emerald-300 bg-emerald-50/60 px-2 py-1 text-[11px] text-emerald-900 line-clamp-2">
+        <div className="mt-2 rounded-md border-l-2 border-emerald-300 bg-emerald-50/60 px-3 py-2 text-[12px] leading-5 text-emerald-900 line-clamp-2">
           AC: {task.acceptance_criteria}
         </div>
       )}
       {task.affected_files && task.affected_files.length > 0 && (
-        <div className="mt-2 text-[10px] text-[#0050A0] font-mono">
+        <div className="mt-2 text-[12px] text-[#0050A0] font-mono">
           {task.affected_files.slice(0, 3).join(", ")}
           {task.affected_files.length > 3 && ` +${task.affected_files.length - 3}`}
         </div>
@@ -802,60 +802,60 @@ function TaskCard({
       {task.labels && task.labels.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1">
           {task.labels.slice(0, 4).map((l) => (
-            <span key={l} className="inline-flex items-center gap-0.5 rounded-full bg-[#EEF2FF] px-1.5 py-0.5 text-[10px] text-[#3730A3]">
+            <span key={l} className="inline-flex items-center gap-0.5 rounded-full bg-[#EEF2FF] px-2 py-1 text-[12px] text-[#3730A3]">
               <Tag size={9} /> {l}
             </span>
           ))}
           {task.labels.length > 4 && (
-            <span className="text-[10px] text-[#94A3B8]">+{task.labels.length - 4}</span>
+            <span className="text-[12px] text-[#94A3B8]">+{task.labels.length - 4}</span>
           )}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-1.5 mt-2">
-        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>
+        <span className={`rounded-full px-2 py-1 text-[12px] ${PRIORITY_BADGE[task.priority]}`}>
           {task.priority}
         </span>
         {task.estimated_effort && (
-          <span className="text-[10px] text-[#94A3B8]">{task.estimated_effort}</span>
+          <span className="text-[12px] text-[#94A3B8]">{task.estimated_effort}</span>
         )}
         {task.assignee && (
-          <span className="text-[10px] rounded-full bg-slate-100 px-1.5 py-0.5 text-slate-700">
+          <span className="rounded-full bg-slate-100 px-2 py-1 text-[12px] text-slate-700">
             @{task.assignee}
           </span>
         )}
         {task.due_date && (
-          <span className={`text-[10px] rounded-full px-1.5 py-0.5 ${overdue ? "bg-red-100 text-red-700" : "bg-blue-50 text-blue-700"}`}>
+          <span className={`rounded-full px-2 py-1 text-[12px] ${overdue ? "bg-red-100 text-red-700" : "bg-blue-50 text-blue-700"}`}>
             ⏱ {formatDueRel(task.due_date)}
           </span>
         )}
         {task.source_message_id && (
-          <span className="text-[10px] text-[#0EA5E9]" title="Has source message">↩</span>
+          <span className="text-[12px] text-[#0EA5E9]" title="Has source message">↩</span>
         )}
         {task.linked_pr_url && (
-          <span className="inline-flex items-center gap-0.5 rounded-full bg-purple-50 px-1.5 py-0.5 text-[10px] text-purple-700" title={task.linked_pr_url}>
-            <GitPullRequest size={9} /> PR
+          <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-1 text-[12px] text-purple-700" title={task.linked_pr_url}>
+            <GitPullRequest size={10} /> PR
           </span>
         )}
         {task.sprint_name && (
-          <span className="inline-flex items-center gap-0.5 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700" title={task.sprint_name}>
-            <CalendarRange size={9} /> {task.sprint_name}
+          <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-1 text-[12px] text-indigo-700" title={task.sprint_name}>
+            <CalendarRange size={10} /> {task.sprint_name}
           </span>
         )}
         {!!task.comment_count && task.comment_count > 0 && (
-          <span className="inline-flex items-center gap-0.5 rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700" title={`${task.comment_count} comments`}>
-            <MessageCircle size={9} /> {task.comment_count}
+          <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-1 text-[12px] text-sky-700" title={`${task.comment_count} comments`}>
+            <MessageCircle size={10} /> {task.comment_count}
           </span>
         )}
         {blocked && (
-          <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-800" title={blockers.map((b) => b.title).join("\n")}>
-            <Lock size={9} /> blocked × {blockers.length}
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[12px] text-amber-800" title={blockers.map((b) => b.title).join("\n")}>
+            <Lock size={10} /> blocked × {blockers.length}
           </span>
         )}
         <div className="flex-1" />
         {next && (
           <button
             onClick={(e) => { e.stopPropagation(); void onMove(task, next); }}
-            className="text-[11px] text-[#0050A0] hover:underline"
+            className="text-[13px] text-[#0050A0] hover:underline"
           >
             → {next}
           </button>
@@ -863,7 +863,7 @@ function TaskCard({
         {task.status !== "cancelled" && task.status !== "done" && (
           <button
             onClick={(e) => { e.stopPropagation(); void onMove(task, "cancelled"); }}
-            className="text-[11px] text-[#94A3B8] hover:text-[#C8102E]"
+            className="text-[12px] text-[#94A3B8] hover:text-[#C8102E]"
             title="Cancel"
           >
             ✕
@@ -1164,8 +1164,8 @@ function TaskDetailDrawer({
       >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[#E2E8F0] bg-white/95 px-5 py-3 backdrop-blur">
           <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">{t("roadmap.detailTitle")}</div>
-            <div className="mt-0.5 text-xs text-[#64748B]">
+            <div className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.detailTitle")}</div>
+            <div className="mt-1 text-[13px] leading-6 text-[#64748B]">
               {t("roadmap.created")}: {new Date(task.created_at).toLocaleString()}
               {" · "}
               {t("roadmap.updated")}: {new Date(task.updated_at).toLocaleString()}
@@ -1178,7 +1178,7 @@ function TaskDetailDrawer({
 
         <div className="space-y-4 px-5 py-4">
           <div>
-            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">
+            <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">
               {t("roadmap.taskTitle")}
             </label>
             <input
@@ -1190,7 +1190,7 @@ function TaskDetailDrawer({
 
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.priority")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.priority")}</label>
               <select
                 value={form.priority}
                 onChange={(e) => setForm({ ...form, priority: e.target.value as TaskPriority })}
@@ -1203,7 +1203,7 @@ function TaskDetailDrawer({
               </select>
             </div>
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.status")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.status")}</label>
               <select
                 value={form.status}
                 onChange={(e) => setForm({ ...form, status: e.target.value as TaskStatus })}
@@ -1216,7 +1216,7 @@ function TaskDetailDrawer({
               </select>
             </div>
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.effort")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.effort")}</label>
               <input
                 value={form.estimated_effort}
                 onChange={(e) => setForm({ ...form, estimated_effort: e.target.value })}
@@ -1228,7 +1228,7 @@ function TaskDetailDrawer({
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.assignee")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.assignee")}</label>
               <input
                 value={form.assignee}
                 onChange={(e) => setForm({ ...form, assignee: e.target.value })}
@@ -1237,7 +1237,7 @@ function TaskDetailDrawer({
               />
             </div>
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.dueDate")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.dueDate")}</label>
               <input
                 type="date"
                 value={form.due_date ?? ""}
@@ -1249,7 +1249,7 @@ function TaskDetailDrawer({
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.labels")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.labels")}</label>
               <input
                 value={form.labels}
                 onChange={(e) => setForm({ ...form, labels: e.target.value })}
@@ -1258,7 +1258,7 @@ function TaskDetailDrawer({
               />
             </div>
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">
                 <CalendarRange size={11} className="inline" /> {t("roadmap.sprint")}
               </label>
               <select
@@ -1277,7 +1277,7 @@ function TaskDetailDrawer({
           </div>
 
           <div>
-            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.why")}</label>
+            <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.why")}</label>
             <textarea
               value={form.why}
               onChange={(e) => setForm({ ...form, why: e.target.value })}
@@ -1288,7 +1288,7 @@ function TaskDetailDrawer({
           </div>
 
           <div>
-            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.ac")}</label>
+            <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.ac")}</label>
             <textarea
               value={form.acceptance_criteria}
               onChange={(e) => setForm({ ...form, acceptance_criteria: e.target.value })}
@@ -1299,48 +1299,48 @@ function TaskDetailDrawer({
           </div>
 
           <div className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-3 space-y-3">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#475569]">
+            <div className="text-[12px] font-semibold tracking-[0.08em] text-[#475569]">
               {t("roadmap.acStructured")}
-              <span className="ml-2 font-normal normal-case text-[10px] text-[#94A3B8]">{t("roadmap.acStructuredHint")}</span>
+              <span className="ml-2 font-normal normal-case text-[12px] text-[#94A3B8]">{t("roadmap.acStructuredHint")}</span>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div>
-                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acTests")}</label>
+                <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.acTests")}</label>
                 <textarea
                   value={form.ac_tests}
                   onChange={(e) => setForm({ ...form, ac_tests: e.target.value })}
                   rows={3}
-                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs font-mono leading-5"
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-3 py-2 text-[13px] font-mono leading-6"
                   placeholder="cargo test --package backend api::tasks&#10;npm test"
                 />
               </div>
               <div>
-                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acCommands")}</label>
+                <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.acCommands")}</label>
                 <textarea
                   value={form.ac_commands}
                   onChange={(e) => setForm({ ...form, ac_commands: e.target.value })}
                   rows={3}
-                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs font-mono leading-5"
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-3 py-2 text-[13px] font-mono leading-6"
                   placeholder="cd backend && cargo check&#10;cd web && npm run build"
                 />
               </div>
               <div>
-                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acDiff")}</label>
+                <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.acDiff")}</label>
                 <textarea
                   value={form.ac_diff_hints}
                   onChange={(e) => setForm({ ...form, ac_diff_hints: e.target.value })}
                   rows={3}
-                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs leading-5"
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-3 py-2 text-[13px] leading-6"
                   placeholder={t("roadmap.acDiffHint")}
                 />
               </div>
               <div>
-                <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.acBehavior")}</label>
+                <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.acBehavior")}</label>
                 <textarea
                   value={form.ac_behavior}
                   onChange={(e) => setForm({ ...form, ac_behavior: e.target.value })}
                   rows={3}
-                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs leading-5"
+                  className="mt-1 w-full rounded-md border border-[#E2E8F0] bg-white px-3 py-2 text-[13px] leading-6"
                   placeholder={t("roadmap.acBehaviorHint")}
                 />
               </div>
@@ -1349,7 +1349,7 @@ function TaskDetailDrawer({
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.testPlan")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.testPlan")}</label>
               <textarea
                 value={form.test_plan}
                 onChange={(e) => setForm({ ...form, test_plan: e.target.value })}
@@ -1359,7 +1359,7 @@ function TaskDetailDrawer({
               />
             </div>
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.rollback")}</label>
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.rollback")}</label>
               <textarea
                 value={form.rollback_plan}
                 onChange={(e) => setForm({ ...form, rollback_plan: e.target.value })}
@@ -1371,7 +1371,7 @@ function TaskDetailDrawer({
           </div>
 
           <div>
-            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.dod")}</label>
+            <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.dod")}</label>
             <textarea
               value={form.definition_of_done}
               onChange={(e) => setForm({ ...form, definition_of_done: e.target.value })}
@@ -1382,64 +1382,64 @@ function TaskDetailDrawer({
           </div>
 
           <div>
-            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.affectedFiles")}</label>
+            <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">{t("roadmap.affectedFiles")}</label>
             <textarea
               value={form.affected_files}
               onChange={(e) => setForm({ ...form, affected_files: e.target.value })}
               rows={2}
-              className="mt-1 w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-xs font-mono leading-6"
+              className="mt-1 w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-[13px] font-mono leading-6"
               placeholder={t("roadmap.filesHint")}
             />
-            <div className="mt-1 text-[11px] text-[#94A3B8]">{t("roadmap.filesSplitter")}</div>
+            <div className="mt-1 text-[12px] leading-5 text-[#94A3B8]">{t("roadmap.filesSplitter")}</div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">
                 <GitPullRequest size={11} className="inline" /> {t("roadmap.prUrl")}
               </label>
               <input
                 value={form.linked_pr_url}
                 onChange={(e) => setForm({ ...form, linked_pr_url: e.target.value })}
                 placeholder="https://github.com/owner/repo/pull/123"
-                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-xs font-mono"
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-[13px] font-mono"
               />
               {form.linked_pr_url && (
-                <a href={form.linked_pr_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-[10px] text-[#0050A0] hover:underline">
+                <a href={form.linked_pr_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-[12px] text-[#0050A0] hover:underline">
                   <ExternalLink size={9} /> {t("roadmap.openLink")}
                 </a>
               )}
             </div>
             <div>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">
+              <label className="text-[12px] font-semibold tracking-[0.08em] text-[#94A3B8]">
                 <GitBranch size={11} className="inline" /> {t("roadmap.commitSha")}
               </label>
               <input
                 value={form.linked_commit_sha}
                 onChange={(e) => setForm({ ...form, linked_commit_sha: e.target.value })}
                 placeholder="abcd1234"
-                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-xs font-mono"
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-[13px] font-mono"
               />
             </div>
           </div>
 
           <div className="rounded-md border border-[#E2E8F0] bg-white">
             <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] px-3 py-2">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#475569]">
+              <div className="text-[12px] font-semibold tracking-[0.08em] text-[#475569]">
                 <Lock size={11} className="inline" /> {t("roadmap.dependencies")}
-                <span className="ml-2 text-[10px] font-normal text-[#94A3B8]">
+                <span className="ml-2 text-[12px] font-normal text-[#94A3B8]">
                   {form.depends_on.length} {t("roadmap.depsSelected")}
                 </span>
               </div>
               {blockers.length > 0 && (
-                <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] text-amber-800">
+                <span className="rounded-full bg-amber-50 px-2 py-1 text-[12px] text-amber-800">
                   {t("roadmap.blockedBy")} {blockers.length}
                 </span>
               )}
             </div>
             <div className="max-h-40 overflow-auto px-3 py-2 space-y-1">
               {dependencyOptions.length === 0 ? (
-                <div className="text-[11px] text-[#94A3B8]">{t("roadmap.depsEmpty")}</div>
+                <div className="text-[12px] leading-5 text-[#94A3B8]">{t("roadmap.depsEmpty")}</div>
               ) : (
                 dependencyOptions.map((other) => {
                   const checked = form.depends_on.includes(other.id);
@@ -1452,11 +1452,11 @@ function TaskDetailDrawer({
                         onChange={() => toggleDependency(other.id)}
                         className="h-3 w-3"
                       />
-                      <span className={`flex-1 truncate text-xs ${closed ? "text-[#94A3B8] line-through" : "text-[#1A1A2E]"}`}>
+                      <span className={`flex-1 truncate text-[13px] leading-5 ${closed ? "text-[#94A3B8] line-through" : "text-[#1A1A2E]"}`}>
                         {other.title}
                       </span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${PRIORITY_BADGE[other.priority]}`}>{other.priority}</span>
-                      <span className="text-[10px] text-[#94A3B8] uppercase">{other.status}</span>
+                      <span className={`rounded-full px-2 py-1 text-[12px] ${PRIORITY_BADGE[other.priority]}`}>{other.priority}</span>
+                      <span className="text-[12px] text-[#94A3B8]">{other.status}</span>
                     </label>
                   );
                 })
@@ -1467,15 +1467,15 @@ function TaskDetailDrawer({
           {/* Send to Agent */}
           {onDispatched && (
             <div className="rounded-md border border-[#0050A0]/20 bg-[#EFF6FF] px-3 py-3">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#0050A0]">
+              <div className="text-[12px] font-semibold tracking-[0.08em] text-[#0050A0]">
                 <Send size={11} className="inline" /> {t("roadmap.sendToAgent")}
               </div>
-              <p className="mt-1 text-[11px] text-[#475569]">{t("roadmap.sendToAgentHint")}</p>
+              <p className="mt-1 text-[13px] leading-6 text-[#475569]">{t("roadmap.sendToAgentHint")}</p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <select
                   value={dispatchMode}
                   onChange={(e) => setDispatchMode(e.target.value)}
-                  className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs"
+                  className="h-9 rounded-lg border border-[#E2E8F0] bg-white px-3 text-[13px]"
                 >
                   <option value="openclaw">OpenClaw</option>
                   <option value="hermes">Hermes</option>
@@ -1485,12 +1485,12 @@ function TaskDetailDrawer({
                   type="button"
                   onClick={() => void dispatch()}
                   disabled={dispatching || dirty}
-                  className="inline-flex items-center gap-1 rounded-md bg-[#0050A0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
+                  className="inline-flex items-center gap-1 rounded-md bg-[#0050A0] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
                   title={dirty ? t("roadmap.saveBeforeDispatch") : ""}
                 >
                   <Send size={11} /> {dispatching ? t("common.loading") : t("roadmap.dispatchBtn")}
                 </button>
-                {dirty && <span className="text-[11px] text-[#B45309]">{t("roadmap.saveBeforeDispatch")}</span>}
+                {dirty && <span className="text-[12px] text-[#B45309]">{t("roadmap.saveBeforeDispatch")}</span>}
               </div>
             </div>
           )}
@@ -1500,7 +1500,7 @@ function TaskDetailDrawer({
             <button
               type="button"
               onClick={() => { if (!showAttempts) void loadAttempts(); else setShowAttempts(false); }}
-              className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC]"
+              className="flex w-full items-center justify-between px-3 py-2 text-[13px] font-semibold text-[#475569] hover:bg-[#F8FAFC]"
             >
               <span className="inline-flex items-center gap-2">
                 <History size={12} /> {t("roadmap.attempts")}
@@ -1510,11 +1510,11 @@ function TaskDetailDrawer({
             {showAttempts && (
               <div className="px-3 py-2">
                 {attempts === null ? (
-                  <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("common.loading")}</div>
                 ) : attempts.length === 0 ? (
-                  <div className="text-xs text-[#94A3B8]">{t("roadmap.attemptsEmpty")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("roadmap.attemptsEmpty")}</div>
                 ) : (
-                  <ul className="space-y-1 text-xs">
+                  <ul className="space-y-2 text-[13px] leading-6">
                     {attempts.map((a) => {
                       const isFailed = a.status === "failed" || a.status === "cancelled";
                       const statusTone =
@@ -1524,12 +1524,12 @@ function TaskDetailDrawer({
                         : "text-[#94A3B8]";
                       return (
                         <li key={a.id} className="flex items-start gap-2">
-                          <span className="font-mono text-[10px] text-[#94A3B8]">
+                          <span className="font-mono text-[12px] text-[#94A3B8]">
                             {new Date(a.created_at).toLocaleString()}
                           </span>
                           <span className="text-[#475569]">
-                            <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px]">{a.mode}</span>
-                            <span className={`ml-1 text-[10px] uppercase font-semibold ${statusTone}`}>{a.status}</span>
+                            <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[12px]">{a.mode}</span>
+                            <span className={`ml-1 text-[12px] uppercase font-semibold ${statusTone}`}>{a.status}</span>
                             {a.dispatched_by_name && <span className="ml-1 text-[#94A3B8]">by {a.dispatched_by_name}</span>}
                           </span>
                           <div className="ml-auto flex gap-2">
@@ -1538,7 +1538,7 @@ function TaskDetailDrawer({
                                 type="button"
                                 onClick={() => { setDispatchMode(a.mode); void dispatch(); }}
                                 disabled={dispatching}
-                                className="inline-flex items-center gap-0.5 text-[10px] text-[#0050A0] hover:underline disabled:opacity-50"
+                                className="inline-flex items-center gap-0.5 text-[12px] text-[#0050A0] hover:underline disabled:opacity-50"
                                 title={t("roadmap.retryDispatch")}
                               >
                                 <RefreshCcw size={9} /> {t("roadmap.retry")}
@@ -1548,7 +1548,7 @@ function TaskDetailDrawer({
                               <button
                                 type="button"
                                 onClick={() => onOpenSource(a.conversation_id, "")}
-                                className="inline-flex items-center gap-0.5 text-[10px] text-[#0050A0] hover:underline"
+                                className="inline-flex items-center gap-0.5 text-[12px] text-[#0050A0] hover:underline"
                               >
                                 <ExternalLink size={9} /> {t("roadmap.openConv")}
                               </button>
@@ -1565,26 +1565,26 @@ function TaskDetailDrawer({
 
           {/* Comments thread */}
           <div className="rounded-md border border-[#E2E8F0] bg-white">
-            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] px-3 py-2 text-xs font-semibold text-[#475569]">
+            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] px-3 py-2 text-[13px] font-semibold text-[#475569]">
               <span className="inline-flex items-center gap-2">
                 <MessageCircle size={12} /> {t("roadmap.comments")}
               </span>
-              <span className="text-[10px] font-normal text-[#94A3B8]">
+              <span className="text-[12px] font-normal text-[#94A3B8]">
                 {comments === null ? "…" : `${comments.length} ${t("roadmap.commentCount")}`}
               </span>
             </div>
             <div className="px-3 py-2 space-y-2">
               {comments === null ? (
-                <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                <div className="text-[12px] text-[#94A3B8]">{t("common.loading")}</div>
               ) : comments.length === 0 ? (
-                <div className="text-xs text-[#94A3B8]">{t("roadmap.commentsEmpty")}</div>
+                <div className="text-[12px] text-[#94A3B8]">{t("roadmap.commentsEmpty")}</div>
               ) : (
                 <ul className="space-y-2">
                   {comments.map((c) => (
                     <li key={c.id} className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
-                      <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                      <div className="flex items-baseline justify-between gap-2 text-[12px]">
                         <span className="font-semibold text-[#1A1A2E]">{c.author_name ?? t("roadmap.unknownAuthor")}</span>
-                        <span className="text-[10px] text-[#94A3B8]">
+                        <span className="text-[12px] text-[#94A3B8]">
                           {new Date(c.created_at).toLocaleString()}
                           {c.updated_at !== c.created_at && (
                             <span className="ml-1 italic">({t("roadmap.edited")})</span>
@@ -1597,21 +1597,21 @@ function TaskDetailDrawer({
                             value={editingCommentDraft}
                             onChange={(e) => setEditingCommentDraft(e.target.value)}
                             rows={3}
-                            className="w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs leading-5"
+                            className="w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-[13px] leading-5"
                           />
                           <div className="flex gap-1">
-                            <button type="button" onClick={() => void saveEditComment(c)} className="rounded-md bg-[#0050A0] px-2 py-1 text-[11px] text-white hover:bg-[#003B7A]">
+                            <button type="button" onClick={() => void saveEditComment(c)} className="rounded-md bg-[#0050A0] px-2 py-1 text-[12px] text-white hover:bg-[#003B7A]">
                               {t("common.save")}
                             </button>
-                            <button type="button" onClick={() => setEditingCommentId(null)} className="rounded-md border border-[#E2E8F0] px-2 py-1 text-[11px] text-[#64748B] hover:bg-[#F1F5F9]">
+                            <button type="button" onClick={() => setEditingCommentId(null)} className="rounded-md border border-[#E2E8F0] px-2 py-1 text-[12px] text-[#64748B] hover:bg-[#F1F5F9]">
                               {t("common.cancel")}
                             </button>
                           </div>
                         </div>
                       ) : (
                         <>
-                          <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[#1A1A2E]">{c.content}</div>
-                          <div className="mt-1 flex gap-2 text-[10px]">
+                          <div className="mt-1 whitespace-pre-wrap text-[13px] leading-5 text-[#1A1A2E]">{c.content}</div>
+                          <div className="mt-1 flex gap-2 text-[12px]">
                             <button type="button" onClick={() => startEditComment(c)} className="text-[#0050A0] hover:underline">
                               {t("common.edit")}
                             </button>
@@ -1632,13 +1632,13 @@ function TaskDetailDrawer({
                   onChange={(e) => setCommentDraft(e.target.value)}
                   placeholder={t("roadmap.commentPlaceholder")}
                   rows={2}
-                  className="w-full rounded-md border border-[#E2E8F0] px-2 py-1.5 text-xs leading-5"
+                  className="w-full rounded-md border border-[#E2E8F0] px-2 py-1.5 text-[13px] leading-5"
                 />
                 <button
                   type="button"
                   onClick={() => void submitComment()}
                   disabled={!commentDraft.trim() || submittingComment}
-                  className="rounded-md bg-[#0050A0] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
+                  className="rounded-md bg-[#0050A0] px-3 py-1 text-[12px] font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
                 >
                   {submittingComment ? t("common.loading") : t("roadmap.addComment")}
                 </button>
@@ -1647,18 +1647,18 @@ function TaskDetailDrawer({
           </div>
 
           {task.source_message_id && (
-            <div className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs text-[#475569]">
+            <div className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[13px] text-[#475569]">
               <div className="flex items-center justify-between gap-2">
                 <span>
                   <span className="font-semibold">{t("roadmap.sourceMsg")}</span>
                   {": "}
-                  <span className="font-mono text-[10px] text-[#94A3B8]">{task.source_message_id.slice(0, 8)}…</span>
+                  <span className="font-mono text-[12px] text-[#94A3B8]">{task.source_message_id.slice(0, 8)}…</span>
                 </span>
                 {task.source_conversation_id && onOpenSource && (
                   <button
                     type="button"
                     onClick={() => onOpenSource(task.source_conversation_id!, task.source_message_id!)}
-                    className="inline-flex items-center gap-1 rounded-md border border-[#0050A0] px-2 py-1 text-[11px] text-[#0050A0] hover:bg-[#EFF6FF]"
+                    className="inline-flex items-center gap-1 rounded-md border border-[#0050A0] px-2 py-1 text-[12px] text-[#0050A0] hover:bg-[#EFF6FF]"
                   >
                     <ExternalLink size={11} /> {t("roadmap.viewSource")}
                   </button>
@@ -1672,7 +1672,7 @@ function TaskDetailDrawer({
             <button
               type="button"
               onClick={() => { if (!showHistory) void loadHistory(); else setShowHistory(false); }}
-              className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC]"
+              className="flex w-full items-center justify-between px-3 py-2 text-[13px] font-semibold text-[#475569] hover:bg-[#F8FAFC]"
             >
               <span className="inline-flex items-center gap-2">
                 <History size={12} /> {t("roadmap.history")}
@@ -1682,14 +1682,14 @@ function TaskDetailDrawer({
             {showHistory && (
               <div className="px-3 py-2">
                 {history === null ? (
-                  <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("common.loading")}</div>
                 ) : history.length === 0 ? (
-                  <div className="text-xs text-[#94A3B8]">{t("roadmap.historyEmpty")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("roadmap.historyEmpty")}</div>
                 ) : (
-                  <ul className="space-y-1 text-xs">
+                  <ul className="space-y-2 text-[13px] leading-6">
                     {history.map((h) => (
                       <li key={h.id} className="flex items-start gap-2">
-                        <span className="font-mono text-[10px] text-[#94A3B8]">
+                        <span className="font-mono text-[12px] text-[#94A3B8]">
                           {new Date(h.changed_at).toLocaleString()}
                         </span>
                         <span className="text-[#475569]">
@@ -1709,14 +1709,14 @@ function TaskDetailDrawer({
             )}
           </div>
 
-          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
+          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700">{error}</div>}
         </div>
 
         <div className="sticky bottom-0 flex items-center justify-between gap-2 border-t border-[#E2E8F0] bg-white/95 px-5 py-3 backdrop-blur">
           <button
             type="button"
             onClick={() => void onDelete(task)}
-            className="inline-flex items-center gap-1 rounded-md border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+            className="inline-flex items-center gap-1 rounded-md border border-red-200 px-3 py-1.5 text-[13px] font-medium text-red-700 hover:bg-red-50"
           >
             <Trash2 size={12} /> {t("common.delete")}
           </button>
@@ -1724,7 +1724,7 @@ function TaskDetailDrawer({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-md px-3 py-1.5 text-xs text-[#64748B] hover:bg-[#F1F5F9] hover:text-[#1A1A2E]"
+              className="rounded-md px-3 py-1.5 text-[13px] text-[#64748B] hover:bg-[#F1F5F9] hover:text-[#1A1A2E]"
             >
               {t("common.close")}
             </button>
@@ -1732,7 +1732,7 @@ function TaskDetailDrawer({
               type="button"
               onClick={() => void save()}
               disabled={!dirty || saving}
-              className="rounded-md bg-[#0050A0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
+              className="rounded-md bg-[#0050A0] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
             >
               {saving ? t("common.loading") : t("common.save")}
             </button>
@@ -1824,7 +1824,7 @@ function SprintManagerModal({
 
         <div className="max-h-[420px] overflow-y-auto px-5 py-4 space-y-3">
           {sprints.length === 0 ? (
-            <div className="text-xs text-[#94A3B8]">{t("roadmap.sprintsEmpty")}</div>
+            <div className="text-[12px] text-[#94A3B8]">{t("roadmap.sprintsEmpty")}</div>
           ) : (
             <ul className="space-y-2">
               {sprints.map((s) => (
@@ -1833,31 +1833,31 @@ function SprintManagerModal({
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium text-[#1A1A2E] truncate">{s.name}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                        <span className={`text-[12px] px-1.5 py-0.5 rounded-full ${
                           s.status === "active" ? "bg-emerald-50 text-emerald-700"
                           : s.status === "closed" ? "bg-slate-100 text-slate-500"
                           : "bg-amber-50 text-amber-700"
                         }`}>{s.status}</span>
                       </div>
-                      <div className="mt-0.5 text-[11px] text-[#64748B]">
+                      <div className="mt-0.5 text-[12px] text-[#64748B]">
                         {s.start_date ?? "—"} → {s.end_date ?? "—"} · {s.task_done}/{s.task_total} {t("roadmap.tasksDoneLabel")}
                       </div>
-                      {s.goal && <div className="mt-1 text-xs text-[#475569] line-clamp-2">{s.goal}</div>}
+                      {s.goal && <div className="mt-1 text-[13px] text-[#475569] line-clamp-2">{s.goal}</div>}
                     </div>
                     <div className="flex shrink-0 gap-1">
                       <select
                         value={s.status}
                         onChange={(e) => void updateStatus(s, e.target.value as Sprint["status"])}
-                        className="h-7 rounded-md border border-[#E2E8F0] bg-white px-1.5 text-[11px]"
+                        className="h-7 rounded-md border border-[#E2E8F0] bg-white px-1.5 text-[12px]"
                       >
                         <option value="planned">planned</option>
                         <option value="active">active</option>
                         <option value="closed">closed</option>
                       </select>
-                      <button type="button" onClick={() => void rename(s)} className="rounded-md border border-[#E2E8F0] px-2 py-1 text-[11px] text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]">
+                      <button type="button" onClick={() => void rename(s)} className="rounded-md border border-[#E2E8F0] px-2 py-1 text-[12px] text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]">
                         {t("common.edit")}
                       </button>
-                      <button type="button" onClick={() => void removeSprint(s)} className="rounded-md border border-red-200 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50">
+                      <button type="button" onClick={() => void removeSprint(s)} className="rounded-md border border-red-200 px-2 py-1 text-[12px] text-red-700 hover:bg-red-50">
                         {t("common.delete")}
                       </button>
                     </div>
@@ -1869,7 +1869,7 @@ function SprintManagerModal({
         </div>
 
         <form onSubmit={create} className="border-t border-[#E2E8F0] px-5 py-3 space-y-2 bg-[#FBFCFE]">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#475569]">{t("roadmap.sprintNew")}</div>
+          <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-[#475569]">{t("roadmap.sprintNew")}</div>
           <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
             <input
               required
@@ -1907,10 +1907,10 @@ function SprintManagerModal({
             rows={2}
             className="w-full rounded-md border border-[#E2E8F0] px-2 py-1.5 text-sm"
           />
-          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
+          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700">{error}</div>}
           <div className="flex items-center justify-end gap-2">
-            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs text-[#64748B] hover:bg-[#F1F5F9]">{t("common.close")}</button>
-            <button type="submit" disabled={!draft.name.trim() || creating} className="rounded-md bg-[#0050A0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-[13px] text-[#64748B] hover:bg-[#F1F5F9]">{t("common.close")}</button>
+            <button type="submit" disabled={!draft.name.trim() || creating} className="rounded-md bg-[#0050A0] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]">
               {creating ? t("common.loading") : t("roadmap.sprintCreate")}
             </button>
           </div>
@@ -1937,7 +1937,7 @@ function BulkActionBar({
 }) {
   const t = useT();
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#BFDBFE] bg-[#EFF6FF] px-3 py-2 text-xs">
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#BFDBFE] bg-[#EFF6FF] px-3 py-2 text-[13px]">
       <span className="font-semibold text-[#0050A0]">
         {count} {t("roadmap.bulkSelected")}
       </span>

@@ -15,67 +15,28 @@ export function Sidebar() {
   const t = useT();
 
   const nav = [
-    {
-      href: "/projects",
-      label: t("sidebar.projects"),
-      description: t("sidebar.projectsDesc"),
-      icon: FolderOpen,
-    },
-    {
-      href: "/roadmap",
-      label: t("sidebar.globalRoadmap"),
-      description: t("sidebar.globalRoadmapDesc"),
-      icon: MapIcon,
-    },
-    {
-      href: "/insights",
-      label: t("sidebar.globalInsights"),
-      description: t("sidebar.globalInsightsDesc"),
-      icon: BarChart3,
-    },
-    {
-      href: "/search",
-      label: t("sidebar.globalSearch"),
-      description: t("sidebar.globalSearchDesc"),
-      icon: Search,
-    },
-    {
-      href: "/epics",
-      label: t("sidebar.epics"),
-      description: t("sidebar.epicsDesc"),
-      icon: Target,
-    },
-    {
-      href: "/memory",
-      label: t("sidebar.sharedMemory"),
-      description: t("sidebar.sharedMemoryDesc"),
-      icon: NotebookPen,
-    },
-    {
-      href: "/agents",
-      label: t("sidebar.agents"),
-      description: t("sidebar.agentsDesc"),
-      icon: UserCog,
-    },
-    {
-      href: "/access",
-      label: "Access",
-      description: "Organizations, workspaces, and sharing",
-      icon: ShieldCheck,
-    },
+    { href: "/projects", label: t("sidebar.projects"), description: t("sidebar.projectsDesc"), icon: FolderOpen },
+    { href: "/roadmap", label: t("sidebar.globalRoadmap"), description: t("sidebar.globalRoadmapDesc"), icon: MapIcon },
+    { href: "/insights", label: t("sidebar.globalInsights"), description: t("sidebar.globalInsightsDesc"), icon: BarChart3 },
+    { href: "/search", label: t("sidebar.globalSearch"), description: t("sidebar.globalSearchDesc"), icon: Search },
+    { href: "/epics", label: t("sidebar.epics"), description: t("sidebar.epicsDesc"), icon: Target },
+    { href: "/memory", label: t("sidebar.sharedMemory"), description: t("sidebar.sharedMemoryDesc"), icon: NotebookPen },
+    { href: "/agents", label: t("sidebar.agents"), description: t("sidebar.agentsDesc"), icon: UserCog },
+    // /access is the project ACL / org-workspace surface added by the
+    // openclaw merge — Hermes never saw it, so the label stays English
+    // until i18n keys land. Slot it at the end so existing muscle memory
+    // for the top entries stays intact.
+    { href: "/access", label: "Access", description: "Organizations, workspaces, and sharing", icon: ShieldCheck },
   ];
 
   function handleLogout() {
-    // Fire-and-forget server-side invalidation so the refresh token
-    // becomes useless even if it's somehow exfiltrated; don't block
-    // the redirect on the network round-trip.
     void auth.logout();
     logout();
     router.push("/login");
   }
 
   return (
-    <aside className="flex h-full w-72 flex-shrink-0 flex-col border-r border-white/10 bg-[radial-gradient(circle_at_top,_rgba(58,126,204,0.22),_transparent_38%),linear-gradient(180deg,#061936_0%,#08142B_100%)] text-white">
+    <aside className="flex h-full w-[17.5rem] flex-shrink-0 flex-col border-r border-white/10 bg-[radial-gradient(circle_at_top,_rgba(58,126,204,0.18),_transparent_38%),linear-gradient(180deg,#061936_0%,#08142B_100%)] text-white">
       <div className="border-b border-white/10 px-5 py-5">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -83,8 +44,8 @@ export function Sidebar() {
               <span className="text-sm font-bold text-white">K</span>
             </div>
             <div>
-              <div className="text-sm font-semibold tracking-wide text-white">{t("sidebar.title")}</div>
-              <div className="mt-0.5 text-xs text-blue-100/70">{t("sidebar.subtitle")}</div>
+              <div className="text-[15px] font-semibold tracking-[-0.015em] text-white">{t("sidebar.title")}</div>
+              <div className="mt-1 text-[13px] leading-5 text-blue-100/72">{t("sidebar.subtitle")}</div>
             </div>
           </div>
           <LocaleSwitcher tone="dark" />
@@ -96,17 +57,15 @@ export function Sidebar() {
               <Sparkles size={15} />
             </div>
             <div>
-              <div className="text-sm font-medium text-white">{t("sidebar.workspaceStatus")}</div>
-              <p className="mt-1 text-xs leading-5 text-blue-100/75">
-                {t("sidebar.workspaceStatusDesc")}
-              </p>
+              <div className="text-[14px] font-medium tracking-[-0.01em] text-white">{t("sidebar.workspaceStatus")}</div>
+              <p className="mt-1 text-[13px] leading-6 text-blue-100/76">{t("sidebar.workspaceStatusDesc")}</p>
             </div>
           </div>
         </div>
       </div>
 
       <nav className="flex-1 px-3 py-4">
-        <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-100/45">
+        <div className="mb-2 px-3 text-[12px] font-semibold tracking-[0.08em] text-blue-100/48">
           {t("sidebar.navigation")}
         </div>
         <div className="space-y-1.5">
@@ -120,7 +79,7 @@ export function Sidebar() {
                   "group flex items-start gap-3 rounded-2xl border px-3 py-3 transition-all",
                   active
                     ? "border-[#3A7ECC]/40 bg-white/10 shadow-[0_16px_40px_rgba(0,0,0,0.18)]"
-                    : "border-transparent text-blue-100/70 hover:border-white/10 hover:bg-white/6 hover:text-white"
+                    : "border-transparent text-blue-100/74 hover:border-white/10 hover:bg-white/6 hover:text-white"
                 )}
               >
                 <div className={cn(
@@ -130,8 +89,8 @@ export function Sidebar() {
                   <Icon size={15} />
                 </div>
                 <div className="min-w-0">
-                  <div className={cn("text-sm font-medium", active ? "text-white" : "text-current")}>{label}</div>
-                  <div className="mt-1 text-xs leading-5 text-blue-100/55">{description}</div>
+                  <div className={cn("text-[14px] font-medium tracking-[-0.01em]", active ? "text-white" : "text-current")}>{label}</div>
+                  <div className="mt-1 text-[12px] leading-5 text-blue-100/58">{description}</div>
                 </div>
               </Link>
             );
@@ -146,8 +105,8 @@ export function Sidebar() {
               {user?.display_name?.charAt(0).toUpperCase() ?? "U"}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-white">{user?.display_name}</p>
-              <p className="truncate text-xs text-blue-100/60">{user?.email}</p>
+              <p className="truncate text-[14px] font-medium tracking-[-0.01em] text-white">{user?.display_name}</p>
+              <p className="truncate text-[12px] text-blue-100/62">{user?.email}</p>
             </div>
             <div className="rounded-xl bg-white/8 p-2 text-blue-100/70">
               <Bot size={14} />
@@ -155,7 +114,7 @@ export function Sidebar() {
           </div>
           <button
             onClick={handleLogout}
-            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/6 px-3 py-2.5 text-sm font-medium text-blue-100/80 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/6 px-3 py-2.5 text-[14px] font-medium text-blue-100/82 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
             title={t("common.signOut")}
           >
             <LogOut size={15} />

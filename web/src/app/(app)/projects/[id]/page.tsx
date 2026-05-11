@@ -440,11 +440,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
   /** Roadmap → workspace deep-link. Switches to the workspace tab, opens the
    *  conversation that owns the message, and scrolls to it once messages
-   *  load (handled by the effect below via pendingScrollMessageId). */
-  const [pendingScrollMessageId, setPendingScrollMessageId] = useState<string | null>(null);
+   *  load (handled by the effect below via a pending-scroll ref + tick). */
+  const pendingScrollMessageIdRef = useRef<string | null>(null);
+  const [pendingScrollTick, setPendingScrollTick] = useState(0);
   const openSourceMessage = useCallback(async (conversationId: string, messageId: string) => {
     setProjectTab("workspace");
-    setPendingScrollMessageId(messageId);
+    pendingScrollMessageIdRef.current = messageId;
+    setPendingScrollTick((tick) => tick + 1);
     const target = convs.find((c) => c.id === conversationId);
     if (target && (!activeConv || activeConv.id !== conversationId)) {
       await selectConv(target);
@@ -480,6 +482,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   }, [id, selectConv]);
 
   useEffect(() => {
+    const pendingScrollMessageId = pendingScrollMessageIdRef.current;
     if (!pendingScrollMessageId) return;
     if (!messages.some((m) => m.id === pendingScrollMessageId)) return;
     const el = document.querySelector<HTMLDivElement>(`[data-message-id="${pendingScrollMessageId}"]`);
@@ -488,8 +491,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       el.classList.add("ring-2", "ring-[#0050A0]");
       window.setTimeout(() => el.classList.remove("ring-2", "ring-[#0050A0]"), 2200);
     }
-    window.setTimeout(() => setPendingScrollMessageId(null), 0);
-  }, [messages, pendingScrollMessageId]);
+    pendingScrollMessageIdRef.current = null;
+  }, [messages, pendingScrollTick]);
 
   useEffect(() => {
     setShowAppSidebar(!focusMode);
@@ -936,19 +939,19 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </button>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-xl font-semibold text-[#1A1A2E]">{project?.name ?? t("project.workspace")}</h1>
+                <h1 className="type-section-title text-[1.6rem]">{project?.name ?? t("project.workspace")}</h1>
                 {project && <StatusPill>{project.source_type === "git" ? t("project.gitRepository") : project.source_type === "upload" ? t("project.uploadProject") : t("project.localFolder")}</StatusPill>}
                 <StatusPill className={modeStyle(mode)}>{modeLabel(mode, agentProfiles, t)}</StatusPill>
                 {focusMode && <StatusPill className="bg-[#EAF2FF] text-[#0050A0]">{t("chat.focusMode")}</StatusPill>}
               </div>
-              <p className="mt-1 text-sm text-[#64748B]">
+              <p className="mt-2 type-body-muted">
                 {t("project.repoSummary")}
               </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
-                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Branch: {project?.default_branch ?? "—"}</span>
-                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Conversations: {convs.length}</span>
-                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Dirty files: {dirtyCount}</span>
-                {selectedFilePath && <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Focused file: {selectedFilePath.split("/").pop() ?? selectedFilePath}</span>}
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px] text-[#64748B]">
+                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5">Branch: {project?.default_branch ?? "—"}</span>
+                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5">Conversations: {convs.length}</span>
+                <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5">Dirty files: {dirtyCount}</span>
+                {selectedFilePath && <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5">Focused file: {selectedFilePath.split("/").pop() ?? selectedFilePath}</span>}
               </div>
             </div>
           </div>
@@ -1028,12 +1031,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       {projectTab === "workspace" && (
       <div className="flex min-h-0 flex-1 bg-[#F8FAFC]">
         {showConversationRail && !focusMode && (
-        <aside className="flex w-[280px] flex-shrink-0 flex-col border-r border-[#E2E8F0] bg-white">
+        <aside className="flex w-[300px] flex-shrink-0 flex-col border-r border-[#E2E8F0] bg-white/96">
           <div className="flex-shrink-0 border-b border-[#E2E8F0] px-4 py-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">{t("convList.title")}</p>
-                <p className="mt-1 text-sm text-[#64748B]">{t("convList.subtitle")}</p>
+                <p className="text-[12px] font-semibold tracking-[0.06em] text-[#94A3B8]">{t("convList.title")}</p>
+                <p className="mt-2 type-body-muted">{t("convList.subtitle")}</p>
               </div>
               <div className="flex items-center gap-1">
                 <button
@@ -1060,7 +1063,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 value={conversationQuery}
                 onChange={(e) => setConversationQuery(e.target.value)}
                 placeholder={t("convList.searchPlaceholder")}
-                className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
+                className="w-full bg-transparent text-[15px] text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
               />
             </div>
           </div>
@@ -1096,15 +1099,15 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     <button className="min-w-0 flex-1 text-left" onClick={() => void selectConv(conv)}>
                       <div className="flex items-center gap-2">
                         <MessageSquarePlus size={14} className={activeConv?.id === conv.id ? "text-[#0050A0]" : "text-[#94A3B8]"} />
-                        <span className="truncate text-sm font-medium text-[#1A1A2E]">{conv.title}</span>
+                        <span className="truncate text-[15px] font-medium tracking-[-0.01em] text-[#1A1A2E]">{conv.title}</span>
                         {activeConv?.id === conv.id && <span className="rounded-full bg-white/90 px-2 py-0.5 text-[11px] font-semibold text-[#0050A0]">{t("convList.active")}</span>}
                       </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-[#64748B]">
                         <span className={cn("rounded-full px-2 py-0.5", MODE_STYLES[conv.mode])}>{MODE_LABELS[conv.mode]}</span>
                         <span>{formatRelativeTime(conv.updated_at)}</span>
                         {streaming && activeConv?.id === conv.id && <span className="rounded-full border border-[#BFDBFE] bg-white px-2 py-0.5 text-[#1D4ED8]">Live</span>}
                       </div>
-                      <div className="mt-2 line-clamp-2 text-xs text-[#64748B]">
+                      <div className="mt-2 line-clamp-2 text-[13px] leading-6 text-[#64748B]">
                         {activeConv?.id === conv.id
                           ? t("convDesc.threadSummary").replace("{count}", String(activeThreadSummary.messageCount))
                             + (activeThreadSummary.lastAgent
@@ -1142,8 +1145,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         )}
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="border-b border-[#E2E8F0] bg-white/85 px-5 py-3 backdrop-blur-sm">
-            <div className="mx-auto flex w-full max-w-5xl flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div className="border-b border-[#E2E8F0] bg-white/85 px-5 py-4 backdrop-blur-md">
+            <div className="mx-auto flex w-full max-w-[72rem] flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
               <div className="min-w-0 space-y-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1152,7 +1155,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         <ChevronRight size={14} /> {t("convList.title")}
                       </Button>
                     )}
-                    <h2 className="truncate text-sm font-semibold text-[#1A1A2E]">{activeConv?.title ?? t("chat.placeholderEmpty")}</h2>
+                    <h2 className="truncate text-[18px] font-semibold tracking-[-0.02em] text-[#1A1A2E]">{activeConv?.title ?? t("chat.placeholderEmpty")}</h2>
                     {activeConv && <StatusPill className={modeStyle(activeConv.mode)}>{modeLabel(activeConv.mode, agentProfiles, t)}</StatusPill>}
                     {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">{t("chat.streaming")}</StatusPill>}
                   </div>
@@ -1162,14 +1165,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 </div>
 
                 {activeConv && (
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
-                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Thread: {activeThreadSummary.messageCount} messages</span>
-                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Last agent: {activeThreadSummary.lastAgent ?? "Waiting for first reply"}</span>
-                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1">Last user: {activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</span>
+                  <div className="flex flex-wrap items-center gap-2 text-[13px] text-[#64748B]">
+                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5">Thread: {activeThreadSummary.messageCount} messages</span>
+                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5">Last agent: {activeThreadSummary.lastAgent ?? "Waiting for first reply"}</span>
+                    <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5">Last user: {activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</span>
                     <button
                       type="button"
                       onClick={() => setShowConversationSummary((value) => !value)}
-                      className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
+                      className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-[13px] text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
                     >
                       {showConversationSummary ? "Hide details" : "Show details"}
                     </button>
@@ -1177,21 +1180,23 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 )}
 
                 {showConversationSummary && activeConv && (
+                  {/* Outer space-y-2 stacks the 3-card grid above the per-conv
+                      summary chip (fsc-only addition). Typography inside the
+                      cards follows Hermes's [12px]/[14px] scale. */}
                   <div className="space-y-2">
-                    <div className="grid gap-2 sm:grid-cols-3">
-                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Thread size</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
+                        <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Thread size</div>
+                        <div className="mt-1.5 text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
                       </div>
-                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last agent</div>
-                        <div className="mt-1 truncate text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
+                        <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Last agent</div>
+                        <div className="mt-1 truncate text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
                       </div>
-                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last user turn</div>
-                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
+                        <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Last user turn</div>
+                        <div className="mt-1.5 text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
                       </div>
-                    </div>
 
                     {/* LLM-generated per-conversation summary. Backend refreshes
                         this after each turn; the chip is hidden until the first
@@ -1322,11 +1327,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </div>
 
             {mode === "debate" && showDebateWorkflow && (
-              <div className="mt-4 rounded-3xl border border-[#FDE68A] bg-[linear-gradient(180deg,#FFFDF5_0%,#FFFBEB_100%)] p-4 text-sm text-[#92400E] shadow-sm">
+              <div className="mt-4 rounded-3xl border border-[#FDE68A] bg-[linear-gradient(180deg,#FFFDF5_0%,#FFFBEB_100%)] p-5 text-[14px] leading-7 text-[#92400E] shadow-sm">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <div className="font-semibold text-[#92400E]">Debate workflow</div>
-                    <p className="mt-1 text-xs text-[#A16207]">Structured disagreement first, synthesis second. Use this when trade-offs or correctness matter more than speed.</p>
+                    <p className="mt-2 text-[13px] leading-6 text-[#A16207]">Structured disagreement first, synthesis second. Use this when trade-offs or correctness matter more than speed.</p>
                   </div>
                   <StatusPill className="bg-white/90 text-[#B45309]">{streaming ? "Debate running" : "Ready for next round"}</StatusPill>
                 </div>
@@ -1342,7 +1347,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           <div
             ref={messagesScrollRef}
             onScroll={handleMessagesScroll}
-            className="relative flex-1 overflow-auto px-4 py-6 sm:px-5"
+            className="relative flex-1 overflow-auto px-4 py-7 sm:px-6"
           >
             {!activeConv ? (
               <div className="flex h-full items-center justify-center">
@@ -1354,12 +1359,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 />
               </div>
             ) : (
-              <div className="mx-auto w-full max-w-5xl space-y-5">
+              <div className="mx-auto w-full max-w-[72rem] space-y-6">
                 {streaming && (
-                  <div className="rounded-3xl border border-[#DBEAFE] bg-[linear-gradient(180deg,#FFFFFF_0%,#F8FBFF_42%,#EFF6FF_100%)] px-5 py-4 shadow-[0_16px_40px_rgba(59,130,246,0.08)]">
+                  <div className="max-w-[56rem] rounded-3xl border border-[#DBEAFE] bg-[linear-gradient(180deg,#FFFFFF_0%,#F8FBFF_42%,#EFF6FF_100%)] px-5 py-4 shadow-[0_16px_40px_rgba(59,130,246,0.08)]">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
-                        <div className="text-sm font-semibold text-[#1D4ED8]">Live agent activity</div>
+                        <div className="text-[15px] font-semibold tracking-[-0.01em] text-[#1D4ED8]">Live agent activity</div>
                         <div className="mt-1 text-xs leading-6 text-[#64748B]">
                           {mode === "debate"
                             ? "Debate mode streams partial reasoning from each side before synthesis."
@@ -1411,7 +1416,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               <button
                 type="button"
                 onClick={jumpToBottom}
-                className="sticky bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-[#BFDBFE] bg-white px-3 py-1.5 text-xs font-medium text-[#0050A0] shadow-sm hover:bg-blue-50"
+                className="sticky bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-[#BFDBFE] bg-white px-3.5 py-2 text-[13px] font-medium text-[#0050A0] shadow-sm hover:bg-blue-50"
               >
                 <span className="inline-flex items-center gap-1.5">
                   <ArrowDown size={13} /> New output
@@ -1420,9 +1425,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             )}
           </div>
 
-          <div className="border-t border-[#E2E8F0] bg-white/92 px-5 py-3 shadow-[0_-10px_30px_rgba(15,23,42,0.04)] backdrop-blur-sm">
-            <form onSubmit={handleSubmit} className="mx-auto w-full max-w-5xl space-y-3">
-              <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B]">
+          <div className="border-t border-[#E2E8F0] bg-white/92 px-5 py-4 shadow-[0_-10px_30px_rgba(15,23,42,0.04)] backdrop-blur-md">
+            <form onSubmit={handleSubmit} className="mx-auto w-full max-w-[72rem] space-y-3">
+              <div className="flex flex-wrap items-center gap-2 text-[13px] text-[#64748B]">
                 <span className={cn("rounded-full px-2.5 py-1", modeStyle(mode))}>{modeLabel(mode, agentProfiles, t)}</span>
                 {selectedFilePath ? (
                   <button
@@ -1431,18 +1436,18 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       setSelectedFilePath("");
                       setSelectedFileContent("");
                     }}
-                    className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8]"
+                    className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-[13px] text-[#475569] transition hover:border-[#94A3B8]"
                   >
                     Focused file: {focusedFileName} ×
                   </button>
                 ) : (
-                  <span className="rounded-full border border-dashed border-[#CBD5E1] bg-white px-2.5 py-1 text-[#94A3B8]">{t("chat.noFocusedFile")}</span>
+                  <span className="rounded-full border border-dashed border-[#CBD5E1] bg-white px-3 py-1.5 text-[13px] text-[#94A3B8]">{t("chat.noFocusedFile")}</span>
                 )}
                 {streaming && <span className="rounded-full border border-[#BFDBFE] bg-[#EFF6FF] px-2.5 py-1 text-[#1D4ED8]">Agents are responding…</span>}
                 <button
                   type="button"
                   onClick={() => setShowComposerTools((value) => !value)}
-                  className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
+                  className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-[13px] text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
                 >
                   {showComposerTools ? t("chat.hideSuggestions") : t("chat.showSuggestions")}
                 </button>
@@ -1457,7 +1462,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         type="button"
                         onClick={() => appendPrompt(prompt)}
                         disabled={streaming || (key === "patch" && !activeConv)}
-                        className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                        className="rounded-full border border-[#E2E8F0] bg-white px-3.5 py-1.5 text-[13px] font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <span className="inline-flex items-center gap-1.5">
                           <Icon size={12} />
@@ -1469,7 +1474,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       type="button"
                       onClick={() => selectedFilePath && appendPrompt(`Please analyze file: ${selectedFilePath}\nExplain purpose, important logic, and likely change points.`)}
                       disabled={!selectedFilePath || streaming}
-                      className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-full border border-[#E2E8F0] bg-white px-3.5 py-1.5 text-[13px] font-medium text-[#475569] transition hover:border-[#0050A0] hover:text-[#0050A0] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {t("chat.analyzeFocused")}
                     </button>
@@ -1505,7 +1510,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         <Send size={15} /> {t("chat.send")}
                       </Button>
                     )}
-                    <div className="text-[11px] text-[#94A3B8]">{input.trim().length} {t("chat.chars")}</div>
+                    <div className="text-[12px] text-[#94A3B8]">{input.trim().length} {t("chat.chars")}</div>
                   </div>
                 </div>
               </div>
@@ -1514,11 +1519,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         </main>
 
         {showContextRail && !focusMode && (
-        <aside className="flex w-[320px] flex-shrink-0 flex-col border-l border-[#E2E8F0] bg-white">
+        <aside className="flex w-[320px] flex-shrink-0 flex-col border-l border-[#E2E8F0] bg-white/96">
           <div className="flex-shrink-0 border-b border-[#E2E8F0] px-4 py-4">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">{t("context.title")}</p>
+                <p className="text-[12px] font-semibold tracking-[0.06em] text-[#94A3B8]">{t("context.title")}</p>
               </div>
               <button
                 type="button"
@@ -1568,7 +1573,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       value={fileQuery}
                       onChange={(e) => setFileQuery(e.target.value)}
                       placeholder={t("context.findPlaceholder")}
-                      className="w-full bg-transparent text-sm text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
+                      className="w-full bg-transparent text-[15px] text-[#1A1A2E] outline-none placeholder:text-[#94A3B8]"
                     />
                   </div>
                   <div className="mt-3 space-y-2">
@@ -2076,7 +2081,7 @@ function StatusMessage({ label, status, now }: { label: string; status: StreamSt
       <div className="max-w-[52rem] min-w-0">
         <div className="mb-1 flex flex-wrap items-center gap-2">
           <span className={cn(
-            "block text-xs font-semibold",
+            "block text-[12px] font-semibold tracking-[-0.01em]",
             isHermes ? "text-[#7C3AED]" : "text-[#0050A0]"
           )}>
             {label}
@@ -2179,7 +2184,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
   }
 
   return (
-    <div className={cn("flex gap-3", isUser && "flex-row-reverse")}>
+    <div className={cn("flex gap-3", isUser && "flex-row-reverse justify-start")}>
       <div className={cn(
         "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold text-white",
         isUser && "bg-[#002D62]",
@@ -2189,11 +2194,11 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
         {isUser ? <User size={14} /> : isHermes ? <Bot size={14} /> : <Cpu size={14} />}
       </div>
 
-      <div className={cn(isUser ? "min-w-0 max-w-[42rem] flex flex-col items-end" : "min-w-0 max-w-[52rem]")}>
+      <div className={cn(isUser ? "min-w-0 max-w-[38rem] flex flex-col items-end" : "min-w-0 max-w-[56rem]")}>
         <div className={cn("mb-1 flex flex-wrap items-center gap-2", isUser && "justify-end")}>
           {!isUser && (
             <span className={cn(
-              "block text-xs font-semibold",
+              "block text-[12px] font-semibold tracking-[-0.01em]",
               isHermes ? "text-[#7C3AED]" : "text-[#0050A0]"
             )}>
               {message.agent_name ?? (isHermes ? "Hermes" : "OpenClaw")}
@@ -2205,7 +2210,8 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
               collaborators — show the display name so threads stay
               attributable. Falls back to "You" for the current viewer
               when the joined name is missing (e.g. very fresh INSERTs
-              that haven't been re-fetched yet). */}
+              that haven't been re-fetched yet). Typography mirrors the
+              agent label above (text-[12px] tracking-[-0.01em]). */}
           {isUser && (() => {
             const isMe = !!currentUserId && message.user_id === currentUserId;
             const label = message.author_name
@@ -2214,16 +2220,16 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
                 ? "You"
                 : "User";
             return (
-              <span className="block text-xs font-semibold text-[#002D62]">
+              <span className="block text-[12px] font-semibold tracking-[-0.01em] text-[#002D62]">
                 {label}
               </span>
             );
           })()}
-          {streaming && <span className="rounded-full border border-[#E2E8F0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#64748B]">Streaming</span>}
-          {timestamp && <span className="text-[11px] text-[#94A3B8]">{timestamp}</span>}
+          {streaming && <span className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[12px] font-medium text-[#64748B]">Streaming</span>}
+          {timestamp && <span className="text-[12px] text-[#94A3B8]">{timestamp}</span>}
         </div>
         <div className={cn(
-          "rounded-[24px] px-4 py-3 text-[13px] leading-6 shadow-[0_10px_30px_rgba(15,23,42,0.05)]",
+          "rounded-[28px] px-5 py-4 text-[15px] leading-7 shadow-[0_12px_32px_rgba(15,23,42,0.06)]",
           isUser
             ? "rounded-tr-md bg-[#002D62] text-white"
             : isHermes
@@ -2231,9 +2237,9 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
               : "rounded-tl-md border border-[#BFDBFE] bg-[linear-gradient(180deg,#FFFFFF_0%,#EFF6FF_100%)] text-[#1A1A2E]"
         )}>
           {isUser || streaming ? (
-            <p className="whitespace-pre-wrap">{visibleContent}</p>
+            <p className="whitespace-pre-wrap text-[15px] leading-7">{visibleContent}</p>
           ) : (
-            <div className="prose prose-sm max-w-none text-[13px] leading-6 prose-headings:text-[#1A1A2E] prose-p:text-[#1A1A2E] prose-p:my-2 prose-li:text-[#334155] prose-li:my-0.5 prose-strong:text-[#0F172A] prose-code:text-[#1E293B] prose-pre:rounded-2xl prose-pre:border prose-pre:border-[#E2E8F0] prose-pre:bg-[#F8FAFC] prose-pre:text-[#0F172A]">
+            <div className="prose max-w-none text-[15px] leading-7 prose-headings:text-[#1A1A2E] prose-p:text-[#1A1A2E] prose-p:my-2 prose-li:text-[#334155] prose-li:my-0.5 prose-strong:text-[#0F172A] prose-code:text-[#1E293B] prose-pre:rounded-2xl prose-pre:border prose-pre:border-[#E2E8F0] prose-pre:bg-[#F8FAFC] prose-pre:text-[#0F172A]">
               <ReactMarkdown
                 components={{
                   code({ className, children, ...props }) {
@@ -2241,7 +2247,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
                     return match ? (
                       <SyntaxHighlighter language={match[1]}>{String(children)}</SyntaxHighlighter>
                     ) : (
-                      <code className="rounded bg-black/10 px-1 py-0.5 font-mono text-xs" {...props}>
+                      <code className="rounded bg-black/10 px-1.5 py-0.5 font-mono text-[12px]" {...props}>
                         {children}
                       </code>
                     );
@@ -2254,7 +2260,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
           )}
         </div>
         {(canRate || canAddToRoadmap) && (
-          <div className="mt-1.5 flex items-center gap-1 opacity-50 transition-opacity hover:opacity-100">
+          <div className="mt-2 flex items-center gap-1.5 opacity-60 transition-opacity hover:opacity-100">
             {canRate && (
               <>
                 <button
@@ -2285,7 +2291,7 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, c
                 disabled={adding || added}
                 title={added ? t("chat.added") : t("chat.addToRoadmap")}
                 className={cn(
-                  "ml-1 flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-[#F1F5F9]",
+                  "ml-1 flex items-center gap-1 rounded px-2.5 py-1.5 text-[12px] hover:bg-[#F1F5F9]",
                   added && "text-[#10B981]"
                 )}
               >
