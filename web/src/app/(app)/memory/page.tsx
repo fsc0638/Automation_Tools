@@ -1,8 +1,16 @@
 "use client";
 
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { NotebookPen, Plus, Pin, PinOff, Trash2 } from "lucide-react";
-import { sharedMemory, type CreateNoteInput, type SharedMemoryNote } from "@/lib/api";
+import { CheckCircle2, NotebookPen, Plus, Pin, PinOff, Trash2, XCircle } from "lucide-react";
+import {
+  projectMemory,
+  projects,
+  sharedMemory,
+  type CreateNoteInput,
+  type Project,
+  type ProjectMemoryCandidate,
+  type SharedMemoryNote,
+} from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -19,6 +27,12 @@ export default function MemoryPage() {
   const [draft, setDraft] = useState<CreateNoteInput>({ title: "", body: "", tags: [], scope_projects: [], pinned: false });
   const [tagInput, setTagInput] = useState("");
   const [error, setError] = useState("");
+  const [projectList, setProjectList] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [candidates, setCandidates] = useState<ProjectMemoryCandidate[]>([]);
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  const [reviewBusyId, setReviewBusyId] = useState("");
+  const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -33,6 +47,34 @@ export default function MemoryPage() {
     const timer = window.setTimeout(() => { void refresh(); }, 250);
     return () => window.clearTimeout(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void projects.list().then((items) => {
+        setProjectList(items);
+        setSelectedProjectId((current) => current || items[0]?.id || "");
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const refreshCandidates = useCallback(async () => {
+    if (!selectedProjectId) {
+      setCandidates([]);
+      return;
+    }
+    setCandidateLoading(true);
+    try {
+      setCandidates(await projectMemory.candidates(selectedProjectId, "pending"));
+    } finally {
+      setCandidateLoading(false);
+    }
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void refreshCandidates(); }, 150);
+    return () => window.clearTimeout(timer);
+  }, [refreshCandidates]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -72,6 +114,29 @@ export default function MemoryPage() {
     setTagInput("");
   }
 
+  async function approveCandidate(candidate: ProjectMemoryCandidate) {
+    if (!selectedProjectId) return;
+    setReviewBusyId(candidate.id);
+    try {
+      await projectMemory.approveCandidate(selectedProjectId, candidate.id, "Approved from memory review page");
+      await refreshCandidates();
+    } finally {
+      setReviewBusyId("");
+    }
+  }
+
+  async function rejectCandidate(candidate: ProjectMemoryCandidate) {
+    if (!selectedProjectId) return;
+    if (!confirm("Reject this memory candidate?")) return;
+    setReviewBusyId(candidate.id);
+    try {
+      await projectMemory.rejectCandidate(selectedProjectId, candidate.id, "Rejected from memory review page");
+      await refreshCandidates();
+    } finally {
+      setReviewBusyId("");
+    }
+  }
+
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-4 p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
@@ -88,6 +153,66 @@ export default function MemoryPage() {
           <Plus size={12} /> {t("memory.newNote")}
         </button>
       </header>
+
+      <section className="rounded-lg border border-[#E2E8F0] bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-[#1A1A2E]">
+              Project memory review
+              <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                {pendingCount} pending
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-[#64748B]">Approve AI-generated project memory before it becomes durable context.</p>
+          </div>
+          <select
+            value={selectedProjectId}
+            onChange={(e) => setSelectedProjectId(e.target.value)}
+            className="h-9 min-w-56 rounded-md border border-[#E2E8F0] bg-white px-3 text-xs"
+          >
+            {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </div>
+        {candidateLoading ? (
+          <div className="mt-4 rounded-md border border-dashed border-[#E2E8F0] p-6 text-center text-xs text-[#94A3B8]">Loading candidates…</div>
+        ) : candidates.length === 0 ? (
+          <div className="mt-4 rounded-md border border-dashed border-[#E2E8F0] p-6 text-center text-xs text-[#94A3B8]">No pending memory candidates for this project.</div>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {candidates.map((candidate) => (
+              <article key={candidate.id} className="rounded-lg border border-amber-200 bg-amber-50/35 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">Pending project summary</div>
+                    <div className="mt-1 text-[10px] text-[#94A3B8]">
+                      {candidate.source_message_count} source messages · {new Date(candidate.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      disabled={reviewBusyId === candidate.id}
+                      onClick={() => void approveCandidate(candidate)}
+                      className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+                    >
+                      <CheckCircle2 size={13} /> Approve
+                    </button>
+                    <button
+                      disabled={reviewBusyId === candidate.id}
+                      onClick={() => void rejectCandidate(candidate)}
+                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
+                    >
+                      <XCircle size={13} /> Reject
+                    </button>
+                  </div>
+                </div>
+                <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-white p-3 text-xs leading-5 text-[#334155]">
+                  {candidate.proposed_content}
+                </pre>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <input
         value={search}

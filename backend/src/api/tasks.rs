@@ -223,15 +223,19 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-async fn verify_access(state: &AppState, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
-    let exists: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM projects WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
-    )
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?;
-    if exists.is_none() {
+async fn verify_access(
+    state: &AppState,
+    project_id: Uuid,
+    user_id: Uuid,
+    min_role: &str,
+) -> AppResult<()> {
+    let allowed: bool = sqlx::query_scalar("SELECT user_can_access_project($1, $2, $3)")
+        .bind(project_id)
+        .bind(user_id)
+        .bind(min_role)
+        .fetch_one(&state.db)
+        .await?;
+    if !allowed {
         return Err(AppError::NotFound("Project not found".into()));
     }
     Ok(())
@@ -250,7 +254,7 @@ async fn list_tasks(
     Path(project_id): Path<Uuid>,
     Query(query): Query<ListTaskQuery>,
 ) -> AppResult<Json<Vec<ProjectTask>>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "viewer").await?;
 
     let (where_extra, sprint_bind): (&str, Option<Uuid>) = match query.sprint_id.as_deref() {
         Some("none") | Some("backlog") => (" AND t.sprint_id IS NULL", None),
@@ -283,7 +287,7 @@ async fn create_task(
     Path(project_id): Path<Uuid>,
     Json(req): Json<CreateTask>,
 ) -> AppResult<(StatusCode, Json<ProjectTask>)> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     if req.title.trim().is_empty() {
         return Err(AppError::BadRequest("title is required".into()));
     }
@@ -356,7 +360,7 @@ async fn update_task(
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateTask>,
 ) -> AppResult<Json<ProjectTask>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
 
     if let Some(s) = req.status.as_deref() {
         if !matches!(s, "todo" | "in-progress" | "done" | "cancelled") {
@@ -575,7 +579,7 @@ async fn delete_task(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     let result = sqlx::query("DELETE FROM project_tasks WHERE id = $1 AND project_id = $2")
         .bind(task_id)
         .bind(project_id)
@@ -677,7 +681,7 @@ async fn dispatch_task(
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<DispatchTask>,
 ) -> AppResult<(StatusCode, Json<DispatchResult>)> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     let mode_trim = req.mode.trim();
     if mode_trim.is_empty() {
         return Err(AppError::BadRequest("mode is required".into()));
@@ -772,7 +776,7 @@ async fn list_task_attempts(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Vec<TaskAttempt>>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "viewer").await?;
 
     let exists: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM project_tasks WHERE id = $1 AND project_id = $2",
@@ -833,7 +837,7 @@ async fn list_task_comments(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Vec<TaskComment>>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "viewer").await?;
     let exists: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM project_tasks WHERE id = $1 AND project_id = $2",
     )
@@ -858,7 +862,7 @@ async fn create_task_comment(
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<CreateTaskComment>,
 ) -> AppResult<(StatusCode, Json<TaskComment>)> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     let trimmed = req.content.trim();
     if trimmed.is_empty() {
         return Err(AppError::BadRequest("content is required".into()));
@@ -896,7 +900,7 @@ async fn update_task_comment(
     Path((project_id, task_id, comment_id)): Path<(Uuid, Uuid, Uuid)>,
     Json(req): Json<UpdateTaskComment>,
 ) -> AppResult<Json<TaskComment>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     let trimmed = req.content.trim();
     if trimmed.is_empty() {
         return Err(AppError::BadRequest("content is required".into()));
@@ -927,7 +931,7 @@ async fn delete_task_comment(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, task_id, comment_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     let result = sqlx::query(
         "DELETE FROM task_comments
          WHERE id = $1 AND task_id = $2 AND user_id = $3",
@@ -960,7 +964,7 @@ async fn list_task_audit(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Vec<TaskAuditEntry>>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "viewer").await?;
     let exists: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM project_tasks WHERE id = $1 AND project_id = $2",
     )
@@ -990,7 +994,7 @@ async fn list_task_history(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Vec<TaskStatusEvent>>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "viewer").await?;
 
     // Confirm task belongs to this project (avoid leaking other projects' history).
     let exists: Option<(Uuid,)> = sqlx::query_as(
