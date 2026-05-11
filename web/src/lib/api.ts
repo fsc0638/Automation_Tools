@@ -250,6 +250,21 @@ export const agentProfiles = {
   delete: (id: string) => request<void>(`/agents/${id}`, { method: "DELETE" }),
 };
 
+export const projectMemory = {
+  candidates: (projectId: string, status: "pending" | "approved" | "rejected" | "all" = "pending") =>
+    request<ProjectMemoryCandidate[]>(`/projects/${projectId}/memory/candidates?status=${status}`),
+  approveCandidate: (projectId: string, candidateId: string, review_note?: string) =>
+    request<ProjectMemoryCandidate>(`/projects/${projectId}/memory/candidates/${candidateId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ review_note }),
+    }),
+  rejectCandidate: (projectId: string, candidateId: string, review_note?: string) =>
+    request<void>(`/projects/${projectId}/memory/candidates/${candidateId}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ review_note }),
+    }),
+};
+
 // Conversations
 export const conversations = {
   list: (projectId: string, mode?: AgentMode) =>
@@ -419,6 +434,21 @@ export interface Message {
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
+}
+
+export interface ProjectMemoryCandidate {
+  id: string;
+  project_id: string;
+  candidate_type: "project_summary";
+  proposed_content: string;
+  source_message_count: number;
+  source_context_hash: string;
+  status: "pending" | "approved" | "rejected";
+  review_note?: string | null;
+  reviewed_by?: string | null;
+  created_at: string;
+  reviewed_at?: string | null;
+  applied_at?: string | null;
 }
 
 export type TaskStatus = "todo" | "in-progress" | "done" | "cancelled";

@@ -1,4 +1,14 @@
 use anyhow::Result as AnyResult;
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::Json,
+    routing::{get, post},
+    Extension, Router,
+};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -8,8 +18,10 @@ use crate::{
         openclaw::{ChatMessage, OpenClawClient},
         orchestrator::ProjectScope,
     },
+    api::{auth::AuthUser, AppState},
     config::Config,
     db::models::{Message, ProjectMemorySummary},
+    error::{AppError, AppResult},
     security::redaction::redact_secrets,
 };
 
@@ -17,6 +29,48 @@ const PROJECT_HISTORY_LIMIT: i64 = 120;
 const SUMMARY_SOURCE_LIMIT: i64 = 40;
 const SUMMARY_CHAR_BUDGET: usize = 14_000;
 const SUMMARY_MAX_CHARS: usize = 2_400;
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ProjectMemoryCandidate {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub candidate_type: String,
+    pub proposed_content: String,
+    pub source_message_count: i32,
+    pub source_context_hash: String,
+    pub status: String,
+    pub review_note: Option<String>,
+    pub reviewed_by: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub applied_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CandidateQuery {
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ReviewCandidateRequest {
+    pub review_note: Option<String>,
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/projects/:project_id/memory/candidates",
+            get(list_memory_candidates),
+        )
+        .route(
+            "/projects/:project_id/memory/candidates/:candidate_id/approve",
+            post(approve_memory_candidate),
+        )
+        .route(
+            "/projects/:project_id/memory/candidates/:candidate_id/reject",
+            post(reject_memory_candidate),
+        )
+}
 
 pub async fn load_project_history(
     db: &PgPool,
@@ -71,23 +125,138 @@ pub async fn refresh_project_summary(
         return Ok(existing);
     }
 
+    if existing.as_ref().map(|s| s.summary.trim()) == Some(normalized.trim()) {
+        return Ok(existing);
+    }
+
     let source_message_count = recent_messages.len() as i32;
-    let record: ProjectMemorySummary = sqlx::query_as(
+    let source_context_hash = memory_candidate_hash(project.id, &normalized, source_message_count);
+    let pending_exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM project_memory_candidates
+         WHERE project_id = $1 AND source_context_hash = $2 AND status = 'pending'
+         LIMIT 1",
+    )
+    .bind(project.id)
+    .bind(&source_context_hash)
+    .fetch_optional(db)
+    .await?;
+
+    if pending_exists.is_none() {
+        sqlx::query(
+            "INSERT INTO project_memory_candidates
+             (project_id, candidate_type, proposed_content, source_message_count, source_context_hash)
+             VALUES ($1, 'project_summary', $2, $3, $4)",
+        )
+        .bind(project.id)
+        .bind(&normalized)
+        .bind(source_message_count)
+        .bind(&source_context_hash)
+        .execute(db)
+        .await?;
+    }
+
+    Ok(existing)
+}
+
+async fn list_memory_candidates(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+    Query(query): Query<CandidateQuery>,
+) -> AppResult<Json<Vec<ProjectMemoryCandidate>>> {
+    verify_project_access(&state.db, project_id, auth_user.id).await?;
+    let status = normalize_candidate_status(query.status.as_deref())?;
+
+    let rows: Vec<ProjectMemoryCandidate> = sqlx::query_as(
+        "SELECT * FROM project_memory_candidates
+         WHERE project_id = $1
+           AND ($2::text IS NULL OR status = $2)
+         ORDER BY created_at DESC
+         LIMIT 100",
+    )
+    .bind(project_id)
+    .bind(status)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows))
+}
+
+async fn approve_memory_candidate(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, candidate_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<ReviewCandidateRequest>,
+) -> AppResult<Json<ProjectMemoryCandidate>> {
+    verify_project_access(&state.db, project_id, auth_user.id).await?;
+
+    let candidate: ProjectMemoryCandidate = sqlx::query_as(
+        "SELECT * FROM project_memory_candidates
+         WHERE id = $1 AND project_id = $2 AND status = 'pending'",
+    )
+    .bind(candidate_id)
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Pending memory candidate not found".into()))?;
+
+    sqlx::query(
         "INSERT INTO project_memory_summaries (project_id, summary, source_message_count, updated_at)
          VALUES ($1, $2, $3, NOW())
          ON CONFLICT (project_id)
          DO UPDATE SET summary = EXCLUDED.summary,
                        source_message_count = EXCLUDED.source_message_count,
-                       updated_at = NOW()
-         RETURNING project_id, summary, source_message_count, updated_at",
+                       updated_at = NOW()",
     )
-    .bind(project.id)
-    .bind(&normalized)
-    .bind(source_message_count)
-    .fetch_one(db)
+    .bind(project_id)
+    .bind(&candidate.proposed_content)
+    .bind(candidate.source_message_count)
+    .execute(&state.db)
     .await?;
 
-    Ok(Some(record))
+    let updated: ProjectMemoryCandidate = sqlx::query_as(
+        "UPDATE project_memory_candidates
+         SET status = 'approved', review_note = $3, reviewed_by = $4,
+             reviewed_at = NOW(), applied_at = NOW()
+         WHERE id = $1 AND project_id = $2
+         RETURNING *",
+    )
+    .bind(candidate_id)
+    .bind(project_id)
+    .bind(clean_optional(req.review_note.as_deref()))
+    .bind(auth_user.id)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(updated))
+}
+
+async fn reject_memory_candidate(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, candidate_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<ReviewCandidateRequest>,
+) -> AppResult<StatusCode> {
+    verify_project_access(&state.db, project_id, auth_user.id).await?;
+    let result = sqlx::query(
+        "UPDATE project_memory_candidates
+         SET status = 'rejected', review_note = $3, reviewed_by = $4, reviewed_at = NOW()
+         WHERE id = $1 AND project_id = $2 AND status = 'pending'",
+    )
+    .bind(candidate_id)
+    .bind(project_id)
+    .bind(clean_optional(req.review_note.as_deref()))
+    .bind(auth_user.id)
+    .execute(&state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(
+            "Pending memory candidate not found".into(),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn load_recent_project_messages_for_summary(
@@ -179,4 +348,44 @@ fn normalize_summary(summary: &str) -> String {
             .trim()
             .to_string()
     }
+}
+
+fn memory_candidate_hash(project_id: Uuid, content: &str, source_message_count: i32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.as_bytes());
+    hasher.update(source_message_count.to_le_bytes());
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+async fn verify_project_access(db: &PgPool, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
+    let exists: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
+            .bind(project_id)
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?;
+
+    exists
+        .map(|_| ())
+        .ok_or_else(|| AppError::NotFound("Project not found".into()))
+}
+
+fn normalize_candidate_status(value: Option<&str>) -> AppResult<Option<&'static str>> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None | Some("all") => Ok(None),
+        Some("pending") => Ok(Some("pending")),
+        Some("approved") => Ok(Some("approved")),
+        Some("rejected") => Ok(Some("rejected")),
+        _ => Err(AppError::BadRequest(
+            "status must be pending, approved, rejected, or all".into(),
+        )),
+    }
+}
+
+fn clean_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
