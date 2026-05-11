@@ -16,16 +16,22 @@ use uuid::Uuid;
 use crate::{
     agents::{
         generic::AgentProfileRuntime,
-        orchestrator::{build_project_scope, run_agent_stream, AgentMode, ServerEvent},
+        orchestrator::{
+            build_project_scope, run_agent_stream, strip_role_prefix, AgentMode, ServerEvent,
+        },
     },
     api::{
         auth::verify_token,
-        conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
+        conversation_memory::{
+            get_project_summary, load_project_history, refresh_conversation_summary,
+            refresh_project_summary,
+        },
         project_index::relevant_file_context,
         AppState,
     },
     db::models::{AgentProfile, Project},
     error::AppError,
+    security::context_firewall::{secure_agent_context, AgentDataPolicy},
 };
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +66,10 @@ async fn ws_handler(
         Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
 
     let conversation_exists: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3",
+        "SELECT c.id
+         FROM conversations c
+         WHERE c.id = $1 AND c.project_id = $2
+           AND (c.user_id = $3 OR user_can_access_project(c.project_id, $3, 'viewer'))",
     )
     .bind(query.conversation_id)
     .bind(query.project_id)
@@ -78,10 +87,13 @@ async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
 
-    let project: Project = match sqlx::query_as("SELECT * FROM projects WHERE id = $1")
-        .bind(query.project_id)
-        .fetch_one(&state.db)
-        .await
+    let project: Project = match sqlx::query_as(
+        "SELECT * FROM projects WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
+    )
+    .bind(query.project_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await
     {
         Ok(project) => project,
         Err(_) => {
@@ -126,13 +138,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             .ok()
             .flatten();
 
+        // user_id (mig 0021) lets the chat UI display the author's name
+        // when the conversation lives in a shared project.
         let user_saved = sqlx::query(
-            "INSERT INTO messages (conversation_id, role, content, file_path)
-             VALUES ($1, 'user', $2, $3)",
+            "INSERT INTO messages (conversation_id, role, content, file_path, user_id)
+             VALUES ($1, 'user', $2, $3, $4)",
         )
         .bind(query.conversation_id)
         .bind(&content)
         .bind(&file_path)
+        .bind(user_id)
         .execute(&state.db)
         .await;
 
@@ -156,7 +171,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         let agent_mode = match agent_mode_from_str(&state, user_id, mode.as_deref()).await {
             Ok(mode) => mode,
             Err(error) => {
-                let error = ServerEvent::Error { message: error.to_string() };
+                let error = ServerEvent::Error {
+                    message: error.to_string(),
+                };
                 let _ = sender
                     .send(WsMessage::Text(
                         serde_json::to_string(&error).unwrap_or_default().into(),
@@ -173,12 +190,50 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                 .flatten();
 
         let mode_label = mode_label(&agent_mode);
-        let mut stream = run_agent_stream(
-            &state.config,
+        let data_policy = AgentDataPolicy::for_mode(&agent_mode);
+        let secured_context = match secure_agent_context(
+            &state.db,
+            user_id,
+            query.project_id,
+            query.conversation_id,
+            mode_label,
+            &data_policy,
             &project_scope,
             &history,
             project_summary.map(|summary| summary.summary),
             &content,
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(error) => {
+                let error = ServerEvent::Error {
+                    message: format!("Context firewall failed: {error}"),
+                };
+                let _ = sender
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&error).unwrap_or_default().into(),
+                    ))
+                    .await;
+                continue;
+            }
+        };
+        tracing::info!(
+            project_id = %query.project_id,
+            conversation_id = %query.conversation_id,
+            mode = mode_label,
+            redacted_count = secured_context.report.redacted_count,
+            blocked_count = secured_context.report.blocked_items.len(),
+            classification_max = %secured_context.report.classification_max,
+            "context firewall applied"
+        );
+
+        let mut stream = run_agent_stream(
+            &state.config,
+            &secured_context.project_scope,
+            &secured_context.history,
+            secured_context.project_summary.clone(),
+            &secured_context.user_message,
             agent_mode,
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
@@ -249,6 +304,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                     });
                     if let Some(content) = buffers.remove(&key) {
                         if !content.trim().is_empty() {
+                            // Models occasionally mimic the `[Hermes]: ...` envelope
+                            // we use to label history turns. Strip it before persisting
+                            // so chat UI doesn't show the prefix to the user.
+                            let content = strip_role_prefix(&content);
                             let role = agent_role(agent);
                             let display_name = display_agent_name(agent, *round, phase.as_deref());
                             let saved_id: Option<(Uuid,)> = sqlx::query_as(
@@ -314,7 +373,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         // own latest attempt. An error anywhere in the stream wins
         // over a partial success.
         if stream_had_error || stream_had_done {
-            let new_status = if stream_had_error { "failed" } else { "complete" };
+            let new_status = if stream_had_error {
+                "failed"
+            } else {
+                "complete"
+            };
             let _ = sqlx::query(
                 "UPDATE task_attempts
                  SET status = $1, updated_at = NOW()
@@ -327,10 +390,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         }
 
         let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;
+        // Per-conversation summary is a UI nice-to-have; ignore failures so
+        // they never bubble back to the user (the chat itself already
+        // succeeded by this point).
+        let _ = refresh_conversation_summary(&state.db, &state.config, query.conversation_id).await;
     }
 }
 
-async fn agent_mode_from_str(state: &AppState, user_id: Uuid, mode: Option<&str>) -> Result<AgentMode, AppError> {
+async fn agent_mode_from_str(
+    state: &AppState,
+    user_id: Uuid,
+    mode: Option<&str>,
+) -> Result<AgentMode, AppError> {
     let mode = match mode {
         Some("hermes") => AgentMode::HermesOnly,
         Some("debate") => AgentMode::Debate,
@@ -342,7 +413,9 @@ async fn agent_mode_from_str(state: &AppState, user_id: Uuid, mode: Option<&str>
                 .take(4)
                 .collect::<Vec<_>>();
             if ids.len() < 2 {
-                return Err(AppError::BadRequest("Custom debate requires at least 2 agent profiles".into()));
+                return Err(AppError::BadRequest(
+                    "Custom debate requires at least 2 agent profiles".into(),
+                ));
             }
             let mut profiles = Vec::new();
             for id in ids {
@@ -386,6 +459,13 @@ async fn load_agent_profile_runtime(
         base_url: profile.base_url,
         role_prompt: profile.role_prompt,
         api_key,
+        allowed_classification_max: profile.allowed_classification_max,
+        allow_code_context: profile.allow_code_context,
+        allow_project_memory: profile.allow_project_memory,
+        allow_conversation_history: profile.allow_conversation_history,
+        require_redaction: profile.require_redaction,
+        external_processing_allowed: profile.external_processing_allowed,
+        retention_policy: profile.retention_policy,
     })
 }
 
@@ -481,9 +561,8 @@ fn detect_consensus_marker(content: &str) -> bool {
 /// Conservative on extensions to avoid false positives from prose.
 fn detect_file_citation(content: &str) -> bool {
     static EXTS: &[&str] = &[
-        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".sql", ".toml",
-        ".json", ".yaml", ".yml", ".swift", ".kt", ".java", ".go", ".html",
-        ".css",
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".sql", ".toml", ".json", ".yaml",
+        ".yml", ".swift", ".kt", ".java", ".go", ".html", ".css",
     ];
     let lower = content.to_lowercase();
     EXTS.iter().any(|ext| lower.contains(ext))

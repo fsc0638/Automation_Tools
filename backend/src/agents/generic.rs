@@ -20,6 +20,13 @@ pub struct AgentProfileRuntime {
     pub base_url: Option<String>,
     pub role_prompt: String,
     pub api_key: String,
+    pub allowed_classification_max: String,
+    pub allow_code_context: bool,
+    pub allow_project_memory: bool,
+    pub allow_conversation_history: bool,
+    pub require_redaction: bool,
+    pub external_processing_allowed: bool,
+    pub retention_policy: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,7 +150,10 @@ pub struct GenericAgentClient {
 
 impl GenericAgentClient {
     pub fn new(profile: AgentProfileRuntime) -> Self {
-        Self { client: Client::new(), profile }
+        Self {
+            client: Client::new(),
+            profile,
+        }
     }
 
     pub fn system_prompt(&self) -> String {
@@ -161,14 +171,20 @@ impl GenericAgentClient {
     }
 
     fn build_messages(&self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-        let mut full = vec![ChatMessage { role: "system".into(), content: self.system_prompt() }];
+        let mut full = vec![ChatMessage {
+            role: "system".into(),
+            content: self.system_prompt(),
+        }];
         full.extend(messages.into_iter().filter_map(|msg| {
             let role = match msg.role.as_str() {
                 "system" | "developer" | "user" | "assistant" => msg.role,
                 "openclaw" | "hermes" | "agent" => "assistant".into(),
                 _ => return None,
             };
-            Some(ChatMessage { role, content: msg.content })
+            Some(ChatMessage {
+                role,
+                content: msg.content,
+            })
         }));
         full
     }
@@ -179,7 +195,12 @@ impl GenericAgentClient {
         } else {
             ""
         };
-        let base = self.profile.base_url.as_deref().unwrap_or(default_base).trim_end_matches('/');
+        let base = self
+            .profile
+            .base_url
+            .as_deref()
+            .unwrap_or(default_base)
+            .trim_end_matches('/');
         if base.ends_with("/chat/completions") {
             base.to_string()
         } else {
@@ -245,13 +266,27 @@ impl GenericAgentClient {
                 system.push_str("\n\n");
             } else {
                 converted.push(AnthropicMessage {
-                    role: if msg.role == "assistant" { "assistant".into() } else { "user".into() },
+                    role: if msg.role == "assistant" {
+                        "assistant".into()
+                    } else {
+                        "user".into()
+                    },
                     content: msg.content,
                 });
             }
         }
-        let body = AnthropicRequest { model: self.profile.model.clone(), max_tokens: REPLY_TOKEN_CEILING, system, messages: converted };
-        let url = self.profile.base_url.as_deref().unwrap_or("https://api.anthropic.com/v1/messages").to_string();
+        let body = AnthropicRequest {
+            model: self.profile.model.clone(),
+            max_tokens: REPLY_TOKEN_CEILING,
+            system,
+            messages: converted,
+        };
+        let url = self
+            .profile
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com/v1/messages")
+            .to_string();
         let response = self
             .client
             .post(url)
@@ -287,7 +322,11 @@ impl GenericAgentClient {
                 system_text.push_str("\n\n");
             } else {
                 contents.push(GeminiContent {
-                    role: if msg.role == "assistant" { "model".into() } else { "user".into() },
+                    role: if msg.role == "assistant" {
+                        "model".into()
+                    } else {
+                        "user".into()
+                    },
                     parts: vec![GeminiPart { text: msg.content }],
                 });
             }
@@ -295,11 +334,28 @@ impl GenericAgentClient {
         let system_instruction = if system_text.trim().is_empty() {
             None
         } else {
-            Some(GeminiContent { role: "user".into(), parts: vec![GeminiPart { text: system_text }] })
+            Some(GeminiContent {
+                role: "user".into(),
+                parts: vec![GeminiPart { text: system_text }],
+            })
         };
-        let body = GeminiRequest { system_instruction, contents, generation_config: GeminiGenerationConfig { max_output_tokens: REPLY_TOKEN_CEILING } };
-        let base = self.profile.base_url.as_deref().unwrap_or("https://generativelanguage.googleapis.com/v1beta").trim_end_matches('/');
-        let url = format!("{base}/models/{}:generateContent?key={}", self.profile.model, self.profile.api_key);
+        let body = GeminiRequest {
+            system_instruction,
+            contents,
+            generation_config: GeminiGenerationConfig {
+                max_output_tokens: REPLY_TOKEN_CEILING,
+            },
+        };
+        let base = self
+            .profile
+            .base_url
+            .as_deref()
+            .unwrap_or("https://generativelanguage.googleapis.com/v1beta")
+            .trim_end_matches('/');
+        let url = format!(
+            "{base}/models/{}:generateContent?key={}",
+            self.profile.model, self.profile.api_key
+        );
         let response = self
             .client
             .post(url)

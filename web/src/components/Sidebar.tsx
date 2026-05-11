@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, Sparkles, Target, UserCog } from "lucide-react";
+import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Sparkles, Target, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { auth } from "@/lib/api";
@@ -22,6 +22,11 @@ export function Sidebar() {
     { href: "/epics", label: t("sidebar.epics"), description: t("sidebar.epicsDesc"), icon: Target },
     { href: "/memory", label: t("sidebar.sharedMemory"), description: t("sidebar.sharedMemoryDesc"), icon: NotebookPen },
     { href: "/agents", label: t("sidebar.agents"), description: t("sidebar.agentsDesc"), icon: UserCog },
+    // /access is the project ACL / org-workspace surface added by the
+    // openclaw merge — Hermes never saw it, so the label stays English
+    // until i18n keys land. Slot it at the end so existing muscle memory
+    // for the top entries stays intact.
+    { href: "/access", label: "Access", description: "Organizations, workspaces, and sharing", icon: ShieldCheck },
   ];
 
   function handleLogout() {

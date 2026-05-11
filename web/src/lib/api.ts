@@ -182,6 +182,42 @@ export const projects = {
     }),
 };
 
+export const organizations = {
+  list: () => request<Organization[]>("/organizations"),
+  workspaces: (organizationId: string) =>
+    request<Workspace[]>(`/organizations/${organizationId}/workspaces`),
+  members: (organizationId: string) =>
+    request<AclMember[]>(`/organizations/${organizationId}/members`),
+  addMember: (organizationId: string, data: { email: string; role: OrgRole }) =>
+    request<AclMember>(`/organizations/${organizationId}/members`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateMember: (organizationId: string, userId: string, role: OrgRole) =>
+    request<AclMember>(`/organizations/${organizationId}/members/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  removeMember: (organizationId: string, userId: string) =>
+    request<void>(`/organizations/${organizationId}/members/${userId}`, { method: "DELETE" }),
+};
+
+export const projectAcl = {
+  list: (projectId: string) => request<AclMember[]>(`/projects/${projectId}/acl`),
+  add: (projectId: string, data: { email: string; role: ProjectRole }) =>
+    request<AclMember>(`/projects/${projectId}/acl`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (projectId: string, userId: string, role: ProjectRole) =>
+    request<AclMember>(`/projects/${projectId}/acl/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  remove: (projectId: string, userId: string) =>
+    request<void>(`/projects/${projectId}/acl/${userId}`, { method: "DELETE" }),
+};
+
 export const feedback = {
   submit: (messageId: string, rating: 1 | -1, note?: string) =>
     request<{ id: string; message_id: string; rating: number; note: string | null }>(
@@ -250,6 +286,21 @@ export const agentProfiles = {
   delete: (id: string) => request<void>(`/agents/${id}`, { method: "DELETE" }),
 };
 
+export const projectMemory = {
+  candidates: (projectId: string, status: "pending" | "approved" | "rejected" | "all" = "pending") =>
+    request<ProjectMemoryCandidate[]>(`/projects/${projectId}/memory/candidates?status=${status}`),
+  approveCandidate: (projectId: string, candidateId: string, review_note?: string) =>
+    request<ProjectMemoryCandidate>(`/projects/${projectId}/memory/candidates/${candidateId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ review_note }),
+    }),
+  rejectCandidate: (projectId: string, candidateId: string, review_note?: string) =>
+    request<void>(`/projects/${projectId}/memory/candidates/${candidateId}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ review_note }),
+    }),
+};
+
 // Conversations
 export const conversations = {
   list: (projectId: string, mode?: AgentMode) =>
@@ -268,7 +319,25 @@ export const conversations = {
     }),
   delete: (projectId: string, convId: string) =>
     request<void>(`/projects/${projectId}/conversations/${convId}`, { method: "DELETE" }),
+  /**
+   * Fetch the cached per-conversation summary. Null when the conversation
+   * is too new to have a summary yet (refreshed asynchronously after each
+   * turn server-side).
+   */
+  summary: (projectId: string, convId: string) =>
+    request<ConversationSummary | null>(
+      `/projects/${projectId}/conversations/${convId}/summary`,
+    ),
 };
+
+export interface ConversationSummary {
+  conversation_id: string;
+  summary: string;
+  highlights: string[];
+  keywords: string[];
+  source_message_count: number;
+  updated_at: string;
+}
 
 export function createWsConnection(conversationId: string, projectId: string): WebSocket {
   const token = getToken();
@@ -301,6 +370,8 @@ export interface CreateProjectInput {
 export interface Project {
   id: string;
   user_id: string;
+  organization_id: string;
+  workspace_id: string;
   name: string;
   description?: string;
   source_type: string;
@@ -308,6 +379,35 @@ export interface Project {
   local_path?: string;
   default_branch?: string;
   git_identity_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type OrgRole = "owner" | "admin" | "member" | "viewer";
+export type ProjectRole = "owner" | "admin" | "editor" | "viewer";
+
+export interface AclMember {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: OrgRole | ProjectRole;
+  created_at: string;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  owner_user_id: string;
+  role?: OrgRole | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Workspace {
+  id: string;
+  organization_id: string;
+  name: string;
+  role?: OrgRole | null;
   created_at: string;
   updated_at: string;
 }
@@ -350,6 +450,13 @@ export interface AgentProfile {
   enabled: boolean;
   /** B7: free-form labels for grouping agents on the /agents page. */
   labels: string[];
+  allowed_classification_max: "public" | "internal" | "confidential" | "restricted" | "secret";
+  allow_code_context: boolean;
+  allow_project_memory: boolean;
+  allow_conversation_history: boolean;
+  require_redaction: boolean;
+  external_processing_allowed: boolean;
+  retention_policy: "none" | "session" | "provider_default";
   created_at: string;
   updated_at: string;
 }
@@ -363,6 +470,13 @@ export interface CreateAgentProfileInput {
   api_key: string;
   enabled?: boolean;
   labels?: string[];
+  allowed_classification_max?: string;
+  allow_code_context?: boolean;
+  allow_project_memory?: boolean;
+  allow_conversation_history?: boolean;
+  require_redaction?: boolean;
+  external_processing_allowed?: boolean;
+  retention_policy?: string;
 }
 
 export interface UpdateAgentProfileInput {
@@ -374,6 +488,13 @@ export interface UpdateAgentProfileInput {
   api_key?: string;
   labels?: string[];
   enabled?: boolean;
+  allowed_classification_max?: string;
+  allow_code_context?: boolean;
+  allow_project_memory?: boolean;
+  allow_conversation_history?: boolean;
+  require_redaction?: boolean;
+  external_processing_allowed?: boolean;
+  retention_policy?: string;
 }
 
 export interface Conversation {
@@ -394,10 +515,36 @@ export interface Message {
   agent_name?: string;
   file_path?: string;
   created_at: string;
+  /**
+   * Author identity for `role: "user"` messages. Populated from migration
+   * 0021 onward; older rows backfilled to the conversation creator. Null
+   * on assistant / system rows.
+   */
+  user_id?: string | null;
+  /**
+   * Display name JOINed from `users` on read paths. May be absent on the
+   * immediate INSERT response — UI falls back to "You" when missing.
+   */
+  author_name?: string | null;
 }
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
+}
+
+export interface ProjectMemoryCandidate {
+  id: string;
+  project_id: string;
+  candidate_type: "project_summary";
+  proposed_content: string;
+  source_message_count: number;
+  source_context_hash: string;
+  status: "pending" | "approved" | "rejected";
+  review_note?: string | null;
+  reviewed_by?: string | null;
+  created_at: string;
+  reviewed_at?: string | null;
+  applied_at?: string | null;
 }
 
 export type TaskStatus = "todo" | "in-progress" | "done" | "cancelled";
@@ -664,13 +811,41 @@ export interface ProjectUsage {
   tokens_out: number;
   cost_usd: number;
 }
+export interface AgentUsage {
+  agent: string;
+  calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+}
 export interface UserUsage {
   by_project: ProjectUsage[];
+  by_agent: AgentUsage[];
   total_calls: number;
   total_tokens_in: number;
   total_tokens_out: number;
   total_cost_usd: number;
   daily: Array<{ day: string; calls: number; cost_usd: number }>;
+  days: number;
+}
+export interface ProjectDebateHealth {
+  project_id: string;
+  project_name: string;
+  debate_turns: number;
+  consensus_turns: number;
+  citation_turns: number;
+}
+export interface RoundBucket {
+  rounds: number;
+  count: number;
+}
+export interface DebateHealth {
+  days: number;
+  total_debate_turns: number;
+  consensus_rate: number;
+  file_citation_rate: number;
+  by_project: ProjectDebateHealth[];
+  round_distribution: RoundBucket[];
 }
 export interface ConvHit {
   conversation_id: string;
@@ -700,7 +875,10 @@ export const userViews = {
     const qs = params.toString();
     return request<UserTask[]>(`/user/tasks${qs ? `?${qs}` : ""}`);
   },
-  usage: () => request<UserUsage>("/user/usage"),
+  usage: (days?: number) =>
+    request<UserUsage>(`/user/usage${days ? `?days=${days}` : ""}`),
+  debateHealth: (days?: number) =>
+    request<DebateHealth>(`/user/debate-health${days ? `?days=${days}` : ""}`),
   conversations: (q: string, limit?: number) => {
     const params = new URLSearchParams({ q });
     if (limit) params.set("limit", String(limit));
@@ -753,13 +931,21 @@ export interface TaskStatusEvent {
 
 export interface MetricsHealth {
   score: number;
+  confidence?: number;
+  methodology?: string;
+  limitations?: string[];
   indexed_files: number;
+  signals?: Record<string, number>;
   dimensions: Array<{
     key: string;
     label: string;
     score: number;
     level: "Low" | "Medium" | "High";
+    confidence?: number;
+    measured_by?: string;
+    formula?: string;
     evidence: string;
+    evidence_items?: string[];
   }>;
 }
 

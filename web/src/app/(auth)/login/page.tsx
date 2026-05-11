@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Bot, GitBranch, Sparkles } from "lucide-react";
 import { auth } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
@@ -23,6 +23,12 @@ export default function LoginPage() {
   const [form, setForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // Render footer year on the client so a year roll-over between SSR and
+  // hydration cannot produce a "text content did not match" mismatch.
+  const [year, setYear] = useState<number | null>(null);
+  useEffect(() => {
+    setYear(new Date().getFullYear());
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -137,8 +143,8 @@ export default function LoginPage() {
             </p>
           </div>
 
-          <p className="mt-6 text-center text-[12px] leading-5 text-[#94A3B8]">
-            © {new Date().getFullYear()} Kway In-house Dev Platform
+          <p className="mt-6 text-center text-[12px] leading-5 text-[#94A3B8]" suppressHydrationWarning>
+            © {year ?? ""} Kway In-house Dev Platform
           </p>
         </div>
       </section>

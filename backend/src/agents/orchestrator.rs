@@ -341,6 +341,36 @@ fn messages_to_chat(
     messages
 }
 
+/// Strip a leading role-tag prefix (`[Hermes]:`, `[OpenClaw]:`, `[System]:`)
+/// from agent output. The model occasionally mimics the `[role]: ...` envelope
+/// used in `messages_to_chat` when constructing history. Tolerates leading
+/// whitespace, surrounding quotes/asterisks, and lowercase variants. Only
+/// removes ONE prefix so we don't accidentally eat legitimate `[Hermes]:`
+/// occurrences mid-message.
+pub fn strip_role_prefix(content: &str) -> String {
+    let prefixes = [
+        "[Hermes]:",
+        "[OpenClaw]:",
+        "[System]:",
+        "[hermes]:",
+        "[openclaw]:",
+        "[system]:",
+        "**[Hermes]:**",
+        "**[OpenClaw]:**",
+        "**[System]:**",
+        "Hermes:",
+        "OpenClaw:",
+    ];
+    let trimmed = content.trim_start();
+    for p in prefixes.iter() {
+        if let Some(rest) = trimmed.strip_prefix(p) {
+            // preserve internal newlines but drop one space after the prefix
+            return rest.trim_start_matches(' ').to_string();
+        }
+    }
+    content.to_string()
+}
+
 fn choose_debate_lead(history: &[Message], user_message: &str) -> DebateAgent {
     let text = format!(
         "{}\n{}",

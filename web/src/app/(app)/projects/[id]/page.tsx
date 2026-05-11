@@ -47,6 +47,7 @@ import {
   type ChatMode,
   type AgentMode,
   type Conversation,
+  type ConversationSummary,
   type FileNode,
   type GitStatus,
   type Message,
@@ -57,7 +58,7 @@ import { InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card"
 import { cn, formatDate } from "@/lib/utils";
 import { useToastStore } from "@/lib/toast-store";
 import { useT } from "@/lib/i18n";
-import { useWorkspaceChromeStore } from "@/lib/store";
+import { useAuthStore, useWorkspaceChromeStore } from "@/lib/store";
 import { InsightsTab } from "@/components/InsightsTab";
 import { CostTab } from "@/components/CostTab";
 import { RoadmapTab } from "@/components/RoadmapTab";
@@ -202,6 +203,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const pushToast = useToastStore((state) => state.pushToast);
   const t = useT();
   const setShowAppSidebar = useWorkspaceChromeStore((state) => state.setShowAppSidebar);
+  // Identity of the logged-in viewer. Used below to decide whether the
+  // conversation-row delete affordance should render: editors should only
+  // see it on conversations they authored. Project owners (matched by
+  // project.user_id) keep the affordance on every row.
+  const currentUserId = useAuthStore((state) => state.user?.id);
 
   const [project, setProject] = useState<Project | null>(null);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
@@ -235,6 +241,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [showContextRail, setShowContextRail] = useState(false);
   const [showWorkspaceOverview, setShowWorkspaceOverview] = useState(false);
   const [showConversationSummary, setShowConversationSummary] = useState(false);
+  // Cached per-conversation summary refreshed server-side after each turn.
+  // Null while loading / before the first turn has produced one.
+  const [convSummary, setConvSummary] = useState<ConversationSummary | null>(null);
   const [showDebateWorkflow, setShowDebateWorkflow] = useState(false);
   const [showComposerTools, setShowComposerTools] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
@@ -243,6 +252,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const streamStatusesRef = useRef<Record<string, StreamStatus>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const [wsReconnectKey, setWsReconnectKey] = useState(0);
+
+  /**
+   * Close a WebSocket safely under React 18+ StrictMode double-mount. When
+   * the effect cleanup fires while the socket is still CONNECTING, calling
+   * `close()` produces the "WebSocket closed before the connection is
+   * established" console warning. Defer the close to the `open` event so
+   * the handshake completes first, then close cleanly.
+   */
+  function safeCloseWs(ws: WebSocket | null) {
+    if (!ws) return;
+    if (ws.readyState === WebSocket.CONNECTING) {
+      ws.addEventListener("open", () => ws.close(), { once: true });
+      return;
+    }
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close();
+    }
+  }
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -524,9 +551,30 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     return () => { cancelled = true; };
   }, [id, activeConv?.id]);
 
+  // Pull the cached per-conversation summary whenever the active conversation
+  // changes, AND once more after streaming finishes (the backend refreshes
+  // the cache row at the end of each turn). Failures are silent — the
+  // summary chip simply doesn't appear.
   useEffect(() => {
     if (!activeConv) {
-      wsRef.current?.close();
+      setConvSummary(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await convsApi.summary(id, activeConv.id);
+        if (!cancelled) setConvSummary(s);
+      } catch {
+        if (!cancelled) setConvSummary(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [id, activeConv?.id, streaming]);
+
+  useEffect(() => {
+    if (!activeConv) {
+      safeCloseWs(wsRef.current);
       wsRef.current = null;
       return;
     }
@@ -645,7 +693,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     };
 
     return () => {
-      ws.close();
+      safeCloseWs(ws);
       if (wsRef.current === ws) wsRef.current = null;
       if (flushRafRef.current !== null) {
         cancelAnimationFrame(flushRafRef.current);
@@ -751,7 +799,21 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   async function deleteConv(conv: Conversation, e: MouseEvent) {
     e.stopPropagation();
     if (!confirm(`Delete conversation "${conv.title}"? All messages will be lost.`)) return;
-    await convsApi.delete(id, conv.id);
+    // Hit the backend first, then update local state only on success. The
+    // previous flow optimistically removed the conv and let the runtime
+    // overlay surface unrelated errors (e.g. "Project not found" when the
+    // caller's role is too low to delete) as crashes.
+    try {
+      await convsApi.delete(id, conv.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      pushToast({
+        tone: "error",
+        title: "Could not delete conversation",
+        description: message,
+      });
+      return;
+    }
     const remaining = convs.filter((c) => c.id !== conv.id);
     setConvs(remaining);
     if (activeConv?.id === conv.id) {
@@ -1058,14 +1120,22 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                               : t("convDesc.openclaw")}
                       </div>
                     </button>
-                    <button
-                      type="button"
-                      onClick={(e) => void deleteConv(conv, e)}
-                      title="Delete conversation"
-                      className="opacity-0 transition group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E]"
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    {/* Show delete only when the viewer authored the conv OR
+                        owns the project. Admins-on-the-project-but-not-owner
+                        currently lose the UI affordance; backend still
+                        accepts their request, so they can fall back to the
+                        API. Fixing this fully needs `effective_role` on the
+                        Project response — tracked in deferred backlog. */}
+                    {(conv.user_id === currentUserId || project?.user_id === currentUserId) && (
+                      <button
+                        type="button"
+                        onClick={(e) => void deleteConv(conv, e)}
+                        title="Delete conversation"
+                        className="opacity-0 transition group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E]"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
                   </div>
                 </div>
               ))
@@ -1110,19 +1180,55 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 )}
 
                 {showConversationSummary && activeConv && (
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
-                      <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Thread size</div>
-                      <div className="mt-1.5 text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                  // Outer space-y-2 stacks the 3-card grid above the per-conv
+                  // summary chip (fsc-only addition). Typography inside the
+                  // cards follows Hermes's [12px]/[14px] scale.
+                  <div className="space-y-2">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
+                        <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Thread size</div>
+                        <div className="mt-1.5 text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                      </div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
+                        <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Last agent</div>
+                        <div className="mt-1 truncate text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
+                      </div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
+                        <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Last user turn</div>
+                        <div className="mt-1.5 text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
+                      </div>
                     </div>
-                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
-                      <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Last agent</div>
-                      <div className="mt-1 truncate text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
-                    </div>
-                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
-                      <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Last user turn</div>
-                      <div className="mt-1.5 text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
-                    </div>
+
+                    {/* LLM-generated per-conversation summary. Backend refreshes
+                        this after each turn; the chip is hidden until the first
+                        successful refresh produces a row. */}
+                    {convSummary && convSummary.summary && (
+                      <div className="rounded-2xl border border-[#DBEAFE] bg-[#EFF6FF] px-4 py-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#1D4ED8]">Conversation summary</div>
+                          <div className="text-[11px] text-[#64748B]">
+                            {formatRelativeTime(convSummary.updated_at)} · {convSummary.source_message_count} msgs
+                          </div>
+                        </div>
+                        <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-6 text-[#1E3A8A]">{convSummary.summary}</p>
+                        {convSummary.highlights.length > 0 && (
+                          <ul className="mt-2 list-disc space-y-1 pl-5 text-[12px] leading-5 text-[#1E3A8A]">
+                            {convSummary.highlights.map((h, i) => (
+                              <li key={i}>{h}</li>
+                            ))}
+                          </ul>
+                        )}
+                        {convSummary.keywords.length > 0 && (
+                          <div className="mt-2.5 flex flex-wrap gap-1.5">
+                            {convSummary.keywords.map((k) => (
+                              <span key={k} className="rounded-full bg-white px-2 py-0.5 text-[11px] font-medium tracking-[-0.005em] text-[#1D4ED8] ring-1 ring-[#BFDBFE]">
+                                {k}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1278,7 +1384,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     style={{ contentVisibility: "auto", containIntrinsicSize: "0 200px" }}
                     className="rounded-[24px] transition-shadow"
                   >
-                    <ChatMessage message={msg} projectId={id} />
+                    <ChatMessage message={msg} projectId={id} currentUserId={currentUserId} />
                   </div>
                 ))}
 
@@ -2006,7 +2112,7 @@ function StatusMessage({ label, status, now }: { label: string; status: StreamSt
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }: { message: Message; projectId: string; streaming?: boolean }) {
+const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, currentUserId }: { message: Message; projectId: string; streaming?: boolean; currentUserId?: string }) {
   const isUser = message.role === "user";
   const isHermes = message.role === "hermes";
   const isOpenClaw = message.role === "openclaw";
@@ -2100,6 +2206,26 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
               {streaming && <span className="ml-1 animate-pulse">●</span>}
             </span>
           )}
+          {/* Author label for user-authored messages. With project sharing
+              live, a single conversation can carry turns from multiple
+              collaborators — show the display name so threads stay
+              attributable. Falls back to "You" for the current viewer
+              when the joined name is missing (e.g. very fresh INSERTs
+              that haven't been re-fetched yet). Typography mirrors the
+              agent label above (text-[12px] tracking-[-0.01em]). */}
+          {isUser && (() => {
+            const isMe = !!currentUserId && message.user_id === currentUserId;
+            const label = message.author_name
+              ? message.author_name + (isMe ? " (you)" : "")
+              : isMe
+                ? "You"
+                : "User";
+            return (
+              <span className="block text-[12px] font-semibold tracking-[-0.01em] text-[#002D62]">
+                {label}
+              </span>
+            );
+          })()}
           {streaming && <span className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[12px] font-medium text-[#64748B]">Streaming</span>}
           {timestamp && <span className="text-[12px] text-[#94A3B8]">{timestamp}</span>}
         </div>

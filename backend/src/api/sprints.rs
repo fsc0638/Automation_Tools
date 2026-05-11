@@ -73,14 +73,19 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-async fn verify_access(state: &AppState, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
-    let exists: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
-            .bind(project_id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?;
-    if exists.is_none() {
+async fn verify_access(
+    state: &AppState,
+    project_id: Uuid,
+    user_id: Uuid,
+    min_role: &str,
+) -> AppResult<()> {
+    let allowed: bool = sqlx::query_scalar("SELECT user_can_access_project($1, $2, $3)")
+        .bind(project_id)
+        .bind(user_id)
+        .bind(min_role)
+        .fetch_one(&state.db)
+        .await?;
+    if !allowed {
         return Err(AppError::NotFound("Project not found".into()));
     }
     Ok(())
@@ -95,7 +100,7 @@ async fn list_sprints(
     Extension(auth_user): Extension<AuthUser>,
     Path(project_id): Path<Uuid>,
 ) -> AppResult<Json<Vec<Sprint>>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "viewer").await?;
     // Active sprints first, then planned, then closed. Within a status,
     // newest first so recent work surfaces ahead of historical sprints.
     let sql = format!(
@@ -118,7 +123,7 @@ async fn create_sprint(
     Path(project_id): Path<Uuid>,
     Json(req): Json<CreateSprint>,
 ) -> AppResult<(StatusCode, Json<Sprint>)> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     let name = req.name.trim();
     if name.is_empty() {
         return Err(AppError::BadRequest("name is required".into()));
@@ -155,7 +160,7 @@ async fn update_sprint(
     Path((project_id, sprint_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateSprint>,
 ) -> AppResult<Json<Sprint>> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "editor").await?;
     if let Some(s) = req.status.as_deref() {
         if !valid_status(s) {
             return Err(AppError::BadRequest("invalid status".into()));
@@ -195,7 +200,7 @@ async fn delete_sprint(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, sprint_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
-    verify_access(&state, project_id, auth_user.id).await?;
+    verify_access(&state, project_id, auth_user.id, "admin").await?;
     let result = sqlx::query("DELETE FROM sprints WHERE id = $1 AND project_id = $2")
         .bind(sprint_id)
         .bind(project_id)

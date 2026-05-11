@@ -17,6 +17,13 @@ const emptyForm = {
   base_url: "",
   role_prompt: "",
   api_key: "",
+  allowed_classification_max: "confidential",
+  allow_code_context: true,
+  allow_project_memory: true,
+  allow_conversation_history: true,
+  require_redaction: true,
+  external_processing_allowed: true,
+  retention_policy: "provider_default",
 };
 
 export default function AgentsPage() {
@@ -71,6 +78,13 @@ export default function AgentsPage() {
         role_prompt: form.role_prompt || undefined,
         api_key: form.api_key,
         enabled: true,
+        allowed_classification_max: form.allowed_classification_max,
+        allow_code_context: form.allow_code_context,
+        allow_project_memory: form.allow_project_memory,
+        allow_conversation_history: form.allow_conversation_history,
+        require_redaction: form.require_redaction,
+        external_processing_allowed: form.external_processing_allowed,
+        retention_policy: form.retention_policy,
       });
       setProfiles((items) => [profile, ...items]);
       setForm(emptyForm);
@@ -182,6 +196,37 @@ export default function AgentsPage() {
               <Input id="agent-key" label={t("agents.apiKey")} type="password" placeholder={t("agents.apiKeyPlaceholder")} value={form.api_key} onChange={(e) => setForm((f) => ({ ...f, api_key: e.target.value }))} required />
             </div>
             <div className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3 text-xs text-[#64748B]">{providerHints[form.provider]}</div>
+            <div className="rounded-2xl border border-[#E2E8F0] bg-white p-4">
+              <div className="text-sm font-semibold text-[#1A1A2E]">Data policy</div>
+              <p className="mt-1 text-xs text-[#64748B]">Controls what this external/custom agent may receive after Context Firewall redaction.</p>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <label className="space-y-1 text-sm font-medium text-[#334155]">
+                  Max classification
+                  <select value={form.allowed_classification_max} onChange={(e) => setForm((f) => ({ ...f, allowed_classification_max: e.target.value }))} className="h-11 w-full rounded-xl border border-[#D6DFEA] bg-white px-3 text-sm outline-none focus:border-[#0050A0]">
+                    <option value="public">Public</option>
+                    <option value="internal">Internal</option>
+                    <option value="confidential">Confidential</option>
+                    <option value="restricted">Restricted</option>
+                    <option value="secret">Secret</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-sm font-medium text-[#334155]">
+                  Retention policy
+                  <select value={form.retention_policy} onChange={(e) => setForm((f) => ({ ...f, retention_policy: e.target.value }))} className="h-11 w-full rounded-xl border border-[#D6DFEA] bg-white px-3 text-sm outline-none focus:border-[#0050A0]">
+                    <option value="none">None / no retention requested</option>
+                    <option value="session">Session only</option>
+                    <option value="provider_default">Provider default</option>
+                  </select>
+                </label>
+              </div>
+              <div className="mt-4 grid gap-2 text-sm text-[#334155] md:grid-cols-2">
+                <PolicyCheckbox label="Allow code context" checked={form.allow_code_context} onChange={(value) => setForm((f) => ({ ...f, allow_code_context: value }))} />
+                <PolicyCheckbox label="Allow project memory" checked={form.allow_project_memory} onChange={(value) => setForm((f) => ({ ...f, allow_project_memory: value }))} />
+                <PolicyCheckbox label="Allow conversation history" checked={form.allow_conversation_history} onChange={(value) => setForm((f) => ({ ...f, allow_conversation_history: value }))} />
+                <PolicyCheckbox label="Require secret redaction" checked={form.require_redaction} onChange={(value) => setForm((f) => ({ ...f, require_redaction: value }))} />
+                <PolicyCheckbox label="External processing allowed" checked={form.external_processing_allowed} onChange={(value) => setForm((f) => ({ ...f, external_processing_allowed: value }))} />
+              </div>
+            </div>
             <label className="block space-y-1 text-sm font-medium text-[#334155]">
               {t("agents.rolePrompt")}
               <textarea value={form.role_prompt} onChange={(e) => setForm((f) => ({ ...f, role_prompt: e.target.value }))} placeholder={t("agents.rolePromptPlaceholder")} className="min-h-28 w-full rounded-xl border border-[#D6DFEA] bg-white px-3 py-2 text-sm outline-none focus:border-[#0050A0]" />
@@ -214,6 +259,14 @@ export default function AgentsPage() {
                 <p className="mt-1 text-sm text-[#64748B]">{t("agents.modelLabel")}: <span className="font-medium text-[#334155]">{profile.model}</span></p>
                 {profile.base_url && <p className="mt-1 truncate text-xs text-[#94A3B8]">{t("agents.baseUrl")}: {profile.base_url}</p>}
                 {profile.role_prompt && <p className="mt-3 line-clamp-2 text-sm text-[#475569]">{profile.role_prompt}</p>}
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-[#64748B]">
+                  <span className="rounded-full bg-[#F8FAFC] px-2.5 py-1">Max: {profile.allowed_classification_max}</span>
+                  {!profile.allow_code_context && <span className="rounded-full bg-amber-50 px-2.5 py-1 text-amber-700">No code context</span>}
+                  {!profile.allow_project_memory && <span className="rounded-full bg-amber-50 px-2.5 py-1 text-amber-700">No project memory</span>}
+                  {!profile.allow_conversation_history && <span className="rounded-full bg-amber-50 px-2.5 py-1 text-amber-700">No history</span>}
+                  {profile.require_redaction && <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700">Redaction required</span>}
+                  <span className="rounded-full bg-[#F8FAFC] px-2.5 py-1">Retention: {profile.retention_policy}</span>
+                </div>
                 <p className="mt-3 text-xs text-[#94A3B8]">{t("agents.updatedLabel")} {formatDate(profile.updated_at)}</p>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -261,6 +314,15 @@ export default function AgentsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function PolicyCheckbox({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <label className="flex items-center gap-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="h-4 w-4 rounded border-[#CBD5E1]" />
+      <span>{label}</span>
+    </label>
   );
 }
 

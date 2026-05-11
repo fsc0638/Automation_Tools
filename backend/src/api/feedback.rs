@@ -43,12 +43,12 @@ async fn submit_feedback(
         return Err(AppError::BadRequest("rating must be 1 or -1".into()));
     }
 
-    // Verify ownership transitively: the message must belong to a conversation
-    // owned by the requesting user.
+    // Verify access transitively: the message must belong to a conversation in
+    // a project visible to the requesting user.
     let owns: Option<(Uuid,)> = sqlx::query_as(
         "SELECT m.id FROM messages m
          JOIN conversations c ON c.id = m.conversation_id
-         WHERE m.id = $1 AND c.user_id = $2",
+         WHERE m.id = $1 AND user_can_access_project(c.project_id, $2, 'viewer')",
     )
     .bind(message_id)
     .bind(auth_user.id)

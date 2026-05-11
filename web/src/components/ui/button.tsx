@@ -14,6 +14,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       <button
         ref={ref}
         disabled={disabled || loading}
+        // Browser form-fill extensions inject `fdprocessedid` on focusable
+        // controls between SSR and hydration. Suppress the resulting noise.
+        suppressHydrationWarning
         className={cn(
           "inline-flex items-center justify-center gap-2 rounded-xl font-medium tracking-[-0.01em] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
           "shadow-[0_1px_2px_rgba(15,23,42,0.03)]",

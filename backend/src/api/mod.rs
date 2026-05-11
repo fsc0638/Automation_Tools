@@ -1,18 +1,19 @@
+use crate::config::Config;
+use crate::crypto::TokenCipher;
 use axum::{extract::State, http::StatusCode, middleware, response::Json, routing::get, Router};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::sync::Arc;
-use crate::config::Config;
-use crate::crypto::TokenCipher;
 
-pub mod auth;
 pub mod agent_profiles;
+pub mod auth;
 pub mod conversation_memory;
 pub mod conversations;
 pub mod epics;
 pub mod feedback;
 pub mod git_identities;
 pub mod metrics;
+pub mod organizations;
 pub mod project_index;
 pub mod projects;
 pub mod shared_memory;
@@ -40,7 +41,12 @@ async fn healthz() -> &'static str {
 /// this into the orchestrator's actual readiness gate — `/healthz` only
 /// confirms the binary is listening, not that downstream deps are up.
 async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
-    match sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&state.db).await {
+    // Postgres `SELECT 1` returns INT4. Use i32 to avoid a decode error
+    // that would otherwise turn a healthy DB into a false readiness fail.
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+    {
         Ok(_) => (StatusCode::OK, Json(json!({ "db": "ok" }))),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -52,7 +58,7 @@ async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
 pub fn router(state: AppState) -> Router {
     let public = Router::new()
         .merge(auth::public_routes())
-        .merge(ws::routes())  // WS handles its own token auth via query param
+        .merge(ws::routes()) // WS handles its own token auth via query param
         .with_state(state.clone());
 
     let protected = Router::new()
@@ -60,7 +66,9 @@ pub fn router(state: AppState) -> Router {
         .merge(agent_profiles::routes())
         .merge(git_identities::routes())
         .merge(conversations::routes())
+        .merge(conversation_memory::routes())
         .merge(metrics::routes())
+        .merge(organizations::routes())
         .merge(tasks::routes())
         .merge(sprints::routes())
         .merge(epics::routes())

@@ -71,11 +71,14 @@ async fn list_projects(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<Vec<Project>>> {
-    let projects: Vec<Project> =
-        sqlx::query_as("SELECT * FROM projects WHERE user_id = $1 ORDER BY updated_at DESC")
-            .bind(auth_user.id)
-            .fetch_all(&state.db)
-            .await?;
+    let projects: Vec<Project> = sqlx::query_as(
+        "SELECT * FROM projects
+         WHERE user_can_access_project(id, $1, 'viewer')
+         ORDER BY updated_at DESC",
+    )
+    .bind(auth_user.id)
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(projects))
 }
@@ -111,6 +114,7 @@ async fn create_project(
         Some(id) => Some(identity_credentials(id, &state.cipher)?),
         None => None,
     };
+    let (organization_id, workspace_id) = ensure_personal_workspace(&state, auth_user.id).await?;
 
     let local_path = if req.source_type == "git" {
         let clone_dir = build_clone_dir(
@@ -131,11 +135,13 @@ async fn create_project(
     };
 
     let project: Project = sqlx::query_as(
-        "INSERT INTO projects (user_id, name, description, source_type, source_path, local_path, default_branch, git_identity_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "INSERT INTO projects (user_id, organization_id, workspace_id, name, description, source_type, source_path, local_path, default_branch, git_identity_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING *",
     )
     .bind(auth_user.id)
+    .bind(organization_id)
+    .bind(workspace_id)
     .bind(req.name.trim())
     .bind(&req.description)
     .bind(&req.source_type)
@@ -145,6 +151,7 @@ async fn create_project(
     .bind(req.git_identity_id)
     .fetch_one(&state.db)
     .await?;
+    grant_project_owner(&state, project.id, auth_user.id).await?;
 
     let root = project_root_path(&project);
     let _ = rebuild_project_index(&state.db, project.id, &root).await;
@@ -204,6 +211,7 @@ async fn upload_project(
     if zip_bytes.is_empty() {
         return Err(AppError::BadRequest("zip file is empty".into()));
     }
+    let (organization_id, workspace_id) = ensure_personal_workspace(&state, auth_user.id).await?;
 
     let upload_id = Uuid::new_v4();
     let upload_dir = build_upload_dir(&state.config.project_data_root, &name, upload_id);
@@ -211,16 +219,19 @@ async fn upload_project(
     extract_zip_project(&zip_bytes, &upload_dir)?;
 
     let project: Project = sqlx::query_as(
-        "INSERT INTO projects (user_id, name, description, source_type, source_path, local_path, default_branch, git_identity_id)
-         VALUES ($1, $2, $3, 'upload', $4, $4, NULL, NULL)
+        "INSERT INTO projects (user_id, organization_id, workspace_id, name, description, source_type, source_path, local_path, default_branch, git_identity_id)
+         VALUES ($1, $2, $3, $4, $5, 'upload', $6, $6, NULL, NULL)
          RETURNING *",
     )
     .bind(auth_user.id)
+    .bind(organization_id)
+    .bind(workspace_id)
     .bind(&name)
     .bind(&description)
     .bind(&upload_dir)
     .fetch_one(&state.db)
     .await?;
+    grant_project_owner(&state, project.id, auth_user.id).await?;
 
     let _ = rebuild_project_index(&state.db, project.id, &upload_dir).await;
 
@@ -241,7 +252,7 @@ async fn delete_project(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    find_project(&state, id, auth_user.id).await?;
+    require_project_role(&state, id, auth_user.id, "admin").await?;
     sqlx::query("DELETE FROM projects WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -285,6 +296,7 @@ async fn reindex_project(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
+    require_project_role(&state, id, auth_user.id, "editor").await?;
     let project = find_project(&state, id, auth_user.id).await?;
     let root = project_root_path(&project);
     let indexed = rebuild_project_index(&state.db, project.id, &root)
@@ -323,6 +335,7 @@ async fn switch_git_branch(
     Path(id): Path<Uuid>,
     Json(req): Json<SwitchBranchRequest>,
 ) -> AppResult<Json<Project>> {
+    require_project_role(&state, id, auth_user.id, "editor").await?;
     let project = find_project(&state, id, auth_user.id).await?;
     require_git_project(&project)?;
     let root = project_root_path(&project);
@@ -340,7 +353,7 @@ async fn switch_git_branch(
         .map_err(|e| AppError::Git(e.to_string()))?;
 
     let updated: Project = sqlx::query_as(
-        "UPDATE projects SET default_branch = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3 RETURNING *",
+        "UPDATE projects SET default_branch = $1, updated_at = NOW() WHERE id = $2 AND user_can_access_project(id, $3, 'editor') RETURNING *",
     )
     .bind(req.branch.trim())
     .bind(id)
@@ -358,6 +371,7 @@ async fn sync_git_repo(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
+    require_project_role(&state, id, auth_user.id, "editor").await?;
     let project = find_project(&state, id, auth_user.id).await?;
     require_git_project(&project)?;
     let root = project_root_path(&project);
@@ -407,14 +421,110 @@ async fn get_remote_branches(
 }
 
 async fn find_project(state: &AppState, id: Uuid, user_id: Uuid) -> AppResult<Project> {
-    let project: Option<Project> =
-        sqlx::query_as("SELECT * FROM projects WHERE id = $1 AND user_id = $2")
-            .bind(id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let project: Option<Project> = sqlx::query_as(
+        "SELECT * FROM projects
+         WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
 
     project.ok_or_else(|| AppError::NotFound("Project not found".into()))
+}
+
+async fn require_project_role(
+    state: &AppState,
+    project_id: Uuid,
+    user_id: Uuid,
+    min_role: &str,
+) -> AppResult<()> {
+    let allowed: bool = sqlx::query_scalar("SELECT user_can_access_project($1, $2, $3)")
+        .bind(project_id)
+        .bind(user_id)
+        .bind(min_role)
+        .fetch_one(&state.db)
+        .await?;
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::NotFound("Project not found".into()))
+    }
+}
+
+async fn ensure_personal_workspace(state: &AppState, user_id: Uuid) -> AppResult<(Uuid, Uuid)> {
+    if let Some(row) = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT o.id, w.id
+         FROM organizations o
+         JOIN workspaces w ON w.organization_id = o.id
+         WHERE o.owner_user_id = $1
+         ORDER BY w.created_at ASC
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    {
+        return Ok(row);
+    }
+
+    let user: (String, String) =
+        sqlx::query_as("SELECT email, display_name FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await?;
+    let org_name = format!(
+        "{} Personal Org",
+        if user.1.trim().is_empty() {
+            user.0.as_str()
+        } else {
+            user.1.as_str()
+        }
+    );
+    let org_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO organizations (owner_user_id, name) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(org_name)
+    .fetch_one(&state.db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role)
+         VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+    let workspace_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (organization_id, name) VALUES ($1, 'Default Workspace') RETURNING id",
+    )
+    .bind(org_id)
+    .fetch_one(&state.db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role)
+         VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+    Ok((org_id, workspace_id))
+}
+
+async fn grant_project_owner(state: &AppState, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO project_acl (project_id, user_id, role)
+         VALUES ($1, $2, 'owner')
+         ON CONFLICT (project_id, user_id) DO UPDATE SET role = 'owner'",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
 }
 
 async fn find_git_identity(state: &AppState, id: Uuid, user_id: Uuid) -> AppResult<GitIdentity> {

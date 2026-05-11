@@ -82,39 +82,98 @@ export function InsightsTab({ projectId }: { projectId: string }) {
       </div>
 
       {health && (
-        <ChartCard title={t("insights.healthScore")} subtitle={`${t("insights.healthDesc")} · ${health.indexed_files} ${t("insights.indexedFiles")}`}>
-          <div className="flex flex-col md:flex-row items-center gap-6 pt-2">
-            <div className="flex flex-col items-center min-w-[140px]">
+        <ChartCard
+          title={t("insights.healthScore")}
+          subtitle={`${t("insights.healthDesc")} · ${health.indexed_files} ${t("insights.indexedFiles")} · Confidence ${health.confidence ?? "—"}/100`}
+        >
+          <div className="rounded-lg border border-[#DBEAFE] bg-[#F8FBFF] p-3 text-xs leading-5 text-[#475569]">
+            <div className="font-semibold text-[#1A1A2E]">Evidence-based methodology</div>
+            <div className="mt-1">{health.methodology ?? "Scores are calculated from indexed repository evidence."}</div>
+            {health.limitations && health.limitations.length > 0 && (
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-[#64748B]">
+                {health.limitations.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            )}
+          </div>
+
+          <div className="flex flex-col md:flex-row items-center gap-6 pt-4">
+            <div className="flex flex-col items-center min-w-[160px]">
               <div className={`text-5xl font-bold ${
                 health.score >= 80 ? "text-[#10B981]" : health.score >= 50 ? "text-[#F59E0B]" : "text-[#C8102E]"
               }`}>{health.score}</div>
-              <div className="mt-1 text-[12px] text-[#94A3B8]">/ 100</div>
+              <div className="mt-1 text-[12px] text-[#94A3B8]">Health / 100</div>
+              <div className={`mt-2 rounded-full px-2.5 py-1 text-[12px] font-semibold ${
+                (health.confidence ?? 0) >= 90 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+              }`}>Confidence {health.confidence ?? "—"}/100</div>
             </div>
             <div className="flex-1 w-full">
-              <ResponsiveContainer width="100%" height={220}>
-                <RadarChart data={health.dimensions.map(d => ({ label: d.label, score: d.score }))}>
+              <ResponsiveContainer width="100%" height={240}>
+                <RadarChart data={health.dimensions.map(d => ({ label: d.label, score: d.score, confidence: d.confidence ?? 0 }))}>
                   <PolarGrid />
                   <PolarAngleAxis dataKey="label" tick={{ fontSize: 11 }} />
                   <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
-                  <Radar name="Score" dataKey="score" stroke="#0050A0" fill="#0050A0" fillOpacity={0.4} />
+                  <Radar name="Score" dataKey="score" stroke="#0050A0" fill="#0050A0" fillOpacity={0.35} />
+                  <Radar name="Confidence" dataKey="confidence" stroke="#10B981" fill="#10B981" fillOpacity={0.15} />
                   <Tooltip />
                 </RadarChart>
               </ResponsiveContainer>
             </div>
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-3 text-[13px] md:grid-cols-5">
-            {health.dimensions.map((d) => (
-              <div key={d.key} className="rounded-xl bg-[#F8FAFC] p-3">
-                <div className="flex items-center justify-between mb-0.5">
-                  <span className="font-medium text-[#1A1A2E]">{d.label}</span>
-                  <span className={`rounded-full px-2 py-1 text-[12px] ${
-                    d.level === "Low" ? "bg-green-100 text-green-700"
-                    : d.level === "Medium" ? "bg-yellow-100 text-yellow-700"
-                    : "bg-red-100 text-red-700"
-                  }`}>{d.level}</span>
+
+          {/* Evidence-grade signals strip from the openclaw scoring upgrade.
+              Kept because Hermes never saw the v2 score shape; typography
+              upgraded to Hermes's [12px / [13px] scale + rounded-xl chips. */}
+          {health.signals && (
+            <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
+              {Object.entries(health.signals).map(([key, value]) => (
+                <div key={key} className="rounded-xl bg-[#F8FAFC] p-2.5">
+                  <div className="text-[11px] uppercase tracking-[0.06em] text-[#94A3B8]">{key.replaceAll("_", " ")}</div>
+                  <div className="text-[14px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">{value}</div>
                 </div>
-                <div className="text-base font-semibold text-[#0050A0]">{d.score}</div>
-                <div className="mt-1 text-[12px] leading-5 text-[#94A3B8] line-clamp-2">{d.evidence}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Dimension cards. Hermes shipped a single-line, 5-up summary; the
+              openclaw v2 scoring needs a fuller card (formula, evidence items,
+              per-dimension confidence). Keep the rich content; typography
+              follows Hermes's leading-5 + tracking conventions. */}
+          <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
+            {health.dimensions.map((d) => (
+              <div key={d.key} className="rounded-xl border border-[#E2E8F0] bg-white p-3 text-[13px] leading-6 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="font-medium tracking-[-0.01em] text-[#1A1A2E]">{d.label}</div>
+                    <div className="mt-0.5 text-[12px] leading-5 text-[#94A3B8]">{d.measured_by}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                      d.level === "Low" ? "bg-green-100 text-green-700"
+                      : d.level === "Medium" ? "bg-yellow-100 text-yellow-700"
+                      : "bg-red-100 text-red-700"
+                    }`}>{d.level} risk</span>
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                      (d.confidence ?? 0) >= 90 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+                    }`}>Conf {d.confidence ?? "—"}</span>
+                  </div>
+                </div>
+                <div className="mt-3 flex items-end gap-3">
+                  <div className="text-[22px] font-semibold tracking-[-0.02em] text-[#0050A0]">{d.score}</div>
+                  <div className="mb-1 h-2 flex-1 overflow-hidden rounded-full bg-[#F1F5F9]">
+                    <div className="h-full rounded-full bg-[#0050A0]" style={{ width: `${Math.max(0, Math.min(100, d.score))}%` }} />
+                  </div>
+                </div>
+                <div className="mt-2 rounded-md bg-[#F8FAFC] p-2 text-[12px] leading-5 text-[#475569]">
+                  <span className="font-semibold text-[#1A1A2E]">Formula: </span>{d.formula ?? "—"}
+                </div>
+                <div className="mt-2 text-[12px] leading-5 text-[#64748B]">{d.evidence}</div>
+                {d.evidence_items && d.evidence_items.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {d.evidence_items.map((item) => (
+                      <span key={item} className="rounded-full border border-[#E2E8F0] bg-[#FBFCFE] px-2 py-0.5 text-[11px] text-[#64748B]">{item}</span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
