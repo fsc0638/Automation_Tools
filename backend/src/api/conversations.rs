@@ -12,7 +12,10 @@ use crate::{
     agents::orchestrator::{build_project_scope, run_agent_turn, strip_role_prefix, AgentMode},
     api::{
         auth::AuthUser,
-        conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
+        conversation_memory::{
+            get_project_summary, load_project_history, refresh_conversation_summary,
+            refresh_project_summary,
+        },
         AppState,
     },
     db::models::{Conversation, Message, Project},
@@ -263,6 +266,7 @@ async fn send_message(
         .await?;
 
     let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;
+    let _ = refresh_conversation_summary(&state.db, &state.config, conv_id).await;
 
     Ok(Json(serde_json::json!({ "messages": saved_messages })))
 }

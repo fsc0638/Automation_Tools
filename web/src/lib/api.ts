@@ -319,7 +319,25 @@ export const conversations = {
     }),
   delete: (projectId: string, convId: string) =>
     request<void>(`/projects/${projectId}/conversations/${convId}`, { method: "DELETE" }),
+  /**
+   * Fetch the cached per-conversation summary. Null when the conversation
+   * is too new to have a summary yet (refreshed asynchronously after each
+   * turn server-side).
+   */
+  summary: (projectId: string, convId: string) =>
+    request<ConversationSummary | null>(
+      `/projects/${projectId}/conversations/${convId}/summary`,
+    ),
 };
+
+export interface ConversationSummary {
+  conversation_id: string;
+  summary: string;
+  highlights: string[];
+  keywords: string[];
+  source_message_count: number;
+  updated_at: string;
+}
 
 export function createWsConnection(conversationId: string, projectId: string): WebSocket {
   const token = getToken();
@@ -782,13 +800,41 @@ export interface ProjectUsage {
   tokens_out: number;
   cost_usd: number;
 }
+export interface AgentUsage {
+  agent: string;
+  calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+}
 export interface UserUsage {
   by_project: ProjectUsage[];
+  by_agent: AgentUsage[];
   total_calls: number;
   total_tokens_in: number;
   total_tokens_out: number;
   total_cost_usd: number;
   daily: Array<{ day: string; calls: number; cost_usd: number }>;
+  days: number;
+}
+export interface ProjectDebateHealth {
+  project_id: string;
+  project_name: string;
+  debate_turns: number;
+  consensus_turns: number;
+  citation_turns: number;
+}
+export interface RoundBucket {
+  rounds: number;
+  count: number;
+}
+export interface DebateHealth {
+  days: number;
+  total_debate_turns: number;
+  consensus_rate: number;
+  file_citation_rate: number;
+  by_project: ProjectDebateHealth[];
+  round_distribution: RoundBucket[];
 }
 export interface ConvHit {
   conversation_id: string;
@@ -818,7 +864,10 @@ export const userViews = {
     const qs = params.toString();
     return request<UserTask[]>(`/user/tasks${qs ? `?${qs}` : ""}`);
   },
-  usage: () => request<UserUsage>("/user/usage"),
+  usage: (days?: number) =>
+    request<UserUsage>(`/user/usage${days ? `?days=${days}` : ""}`),
+  debateHealth: (days?: number) =>
+    request<DebateHealth>(`/user/debate-health${days ? `?days=${days}` : ""}`),
   conversations: (q: string, limit?: number) => {
     const params = new URLSearchParams({ q });
     if (limit) params.set("limit", String(limit));

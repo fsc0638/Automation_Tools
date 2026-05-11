@@ -20,7 +20,7 @@ use crate::{
     },
     api::{auth::AuthUser, AppState},
     config::Config,
-    db::models::{Message, ProjectMemorySummary},
+    db::models::{ConversationSummary, Message, ProjectMemorySummary},
     error::{AppError, AppResult},
     security::redaction::redact_secrets,
 };
@@ -29,6 +29,11 @@ const PROJECT_HISTORY_LIMIT: i64 = 120;
 const SUMMARY_SOURCE_LIMIT: i64 = 40;
 const SUMMARY_CHAR_BUDGET: usize = 14_000;
 const SUMMARY_MAX_CHARS: usize = 2_400;
+/// Per-conversation summary scope. Smaller than project-wide because we
+/// want a tight description of "what THIS thread was about", not a digest
+/// of every parallel conversation.
+const CONV_SUMMARY_SOURCE_LIMIT: i64 = 30;
+const CONV_SUMMARY_MAX_CHARS: usize = 1_200;
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ProjectMemoryCandidate {
@@ -69,6 +74,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/projects/:project_id/memory/candidates/:candidate_id/reject",
             post(reject_memory_candidate),
+        )
+        .route(
+            "/projects/:project_id/conversations/:conversation_id/summary",
+            get(get_conversation_summary_endpoint),
         )
 }
 
@@ -157,6 +166,185 @@ pub async fn refresh_project_summary(
 
     Ok(existing)
 }
+
+// -- Per-conversation summary -----------------------------------------------
+
+pub async fn get_conversation_summary(
+    db: &PgPool,
+    conversation_id: Uuid,
+) -> Result<Option<ConversationSummary>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT conversation_id, summary, highlights, keywords, source_message_count, updated_at
+         FROM conversation_summaries
+         WHERE conversation_id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(db)
+    .await
+}
+
+async fn load_recent_conversation_messages(
+    db: &PgPool,
+    conversation_id: Uuid,
+) -> Result<Vec<Message>, sqlx::Error> {
+    let mut rows: Vec<Message> = sqlx::query_as(
+        "SELECT * FROM messages
+         WHERE conversation_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2",
+    )
+    .bind(conversation_id)
+    .bind(CONV_SUMMARY_SOURCE_LIMIT)
+    .fetch_all(db)
+    .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Builds an LLM prompt that asks for a strict JSON envelope. We constrain
+/// the output to keep parsing trivial; if the model breaks the JSON we
+/// gracefully fall back to a free-text summary with empty extras.
+fn build_conversation_summary_prompt(
+    conversation_id: Uuid,
+    recent_messages: &[Message],
+) -> Vec<ChatMessage> {
+    let transcript = render_recent_messages(recent_messages);
+    vec![
+        ChatMessage {
+            role: "system".into(),
+            content: "You are summarizing a single chat thread inside a multi-agent coding workspace. Respond in Traditional Chinese for the prose; keep keywords as short English/技術 tokens. Output STRICT JSON with this shape:\n{\n  \"summary\": \"<= 200 字\",\n  \"highlights\": [\"<= 3 條\", \"...\"],\n  \"keywords\": [\"<= 8 條\", \"...\"]\n}\nDo NOT wrap in code fences. Do NOT include commentary outside the JSON. If you cannot summarize, return {\"summary\":\"\",\"highlights\":[],\"keywords\":[]}.".into(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: format!(
+                "Conversation id: {}\n\nTranscript:\n{}\n\nReturn the JSON envelope now.",
+                conversation_id, transcript
+            ),
+        },
+    ]
+}
+
+/// Truncate to char-count and trim. Mirrors normalize_summary but with a
+/// tighter budget appropriate for per-conversation summaries.
+fn normalize_conv_summary(s: &str) -> String {
+    let trimmed = s.replace("\r\n", "\n").trim().to_string();
+    if trimmed.chars().count() <= CONV_SUMMARY_MAX_CHARS {
+        trimmed
+    } else {
+        trimmed
+            .chars()
+            .take(CONV_SUMMARY_MAX_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+}
+
+/// Strip code fences and other noise the LLM sometimes adds around JSON.
+fn strip_json_fences(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("```json") {
+        return rest.trim_end_matches("```").trim().to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        return rest.trim_end_matches("```").trim().to_string();
+    }
+    trimmed.to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmConvSummary {
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    highlights: Vec<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
+}
+
+/// Refresh the per-conversation summary cache. Called after each completed
+/// turn in ws.rs. Errors here are non-fatal — the chat itself succeeded,
+/// the summary is a nice-to-have surface for the conversation list UI.
+pub async fn refresh_conversation_summary(
+    db: &PgPool,
+    config: &Arc<Config>,
+    conversation_id: Uuid,
+) -> AnyResult<()> {
+    let recent = load_recent_conversation_messages(db, conversation_id).await?;
+    if recent.is_empty() {
+        return Ok(());
+    }
+    let prompt = build_conversation_summary_prompt(conversation_id, &recent);
+    let raw = OpenClawClient::new(config).chat(prompt).await?;
+    let cleaned = strip_json_fences(&raw);
+
+    let (summary, highlights, keywords) = match serde_json::from_str::<LlmConvSummary>(&cleaned) {
+        Ok(parsed) => (
+            normalize_conv_summary(&parsed.summary),
+            parsed.highlights,
+            parsed
+                .keywords
+                .into_iter()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .take(12)
+                .collect::<Vec<_>>(),
+        ),
+        Err(_) => (normalize_conv_summary(&cleaned), Vec::new(), Vec::new()),
+    };
+
+    if summary.is_empty() {
+        return Ok(());
+    }
+
+    let highlights_json = serde_json::to_value(&highlights).unwrap_or_else(|_| serde_json::json!([]));
+    let source_count = recent.len() as i32;
+
+    sqlx::query(
+        "INSERT INTO conversation_summaries
+            (conversation_id, summary, highlights, keywords, source_message_count, updated_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         ON CONFLICT (conversation_id) DO UPDATE
+         SET summary = EXCLUDED.summary,
+             highlights = EXCLUDED.highlights,
+             keywords = EXCLUDED.keywords,
+             source_message_count = EXCLUDED.source_message_count,
+             updated_at = NOW()",
+    )
+    .bind(conversation_id)
+    .bind(&summary)
+    .bind(&highlights_json)
+    .bind(&keywords)
+    .bind(source_count)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+async fn get_conversation_summary_endpoint(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, conversation_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<Json<Option<ConversationSummary>>> {
+    verify_project_access(&state.db, project_id, auth_user.id).await?;
+    // Belt-and-braces: ensure the conversation belongs to the project before
+    // serving its summary — keeps cross-project ID guessing from leaking.
+    let owned: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM conversations WHERE id = $1 AND project_id = $2",
+    )
+    .bind(conversation_id)
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if owned.is_none() {
+        return Err(AppError::NotFound("Conversation not found".into()));
+    }
+    let summary = get_conversation_summary(&state.db, conversation_id).await?;
+    Ok(Json(summary))
+}
+
+// -- Project candidates (existing) ------------------------------------------
 
 async fn list_memory_candidates(
     State(state): State<AppState>,

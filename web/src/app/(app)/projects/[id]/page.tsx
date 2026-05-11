@@ -47,6 +47,7 @@ import {
   type ChatMode,
   type AgentMode,
   type Conversation,
+  type ConversationSummary,
   type FileNode,
   type GitStatus,
   type Message,
@@ -235,6 +236,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [showContextRail, setShowContextRail] = useState(false);
   const [showWorkspaceOverview, setShowWorkspaceOverview] = useState(false);
   const [showConversationSummary, setShowConversationSummary] = useState(false);
+  // Cached per-conversation summary refreshed server-side after each turn.
+  // Null while loading / before the first turn has produced one.
+  const [convSummary, setConvSummary] = useState<ConversationSummary | null>(null);
   const [showDebateWorkflow, setShowDebateWorkflow] = useState(false);
   const [showComposerTools, setShowComposerTools] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
@@ -538,6 +542,27 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     })();
     return () => { cancelled = true; };
   }, [id, activeConv?.id]);
+
+  // Pull the cached per-conversation summary whenever the active conversation
+  // changes, AND once more after streaming finishes (the backend refreshes
+  // the cache row at the end of each turn). Failures are silent — the
+  // summary chip simply doesn't appear.
+  useEffect(() => {
+    if (!activeConv) {
+      setConvSummary(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await convsApi.summary(id, activeConv.id);
+        if (!cancelled) setConvSummary(s);
+      } catch {
+        if (!cancelled) setConvSummary(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [id, activeConv?.id, streaming]);
 
   useEffect(() => {
     if (!activeConv) {
@@ -1125,19 +1150,52 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 )}
 
                 {showConversationSummary && activeConv && (
-                  <div className="grid gap-2 sm:grid-cols-3">
-                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Thread size</div>
-                      <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                  <div className="space-y-2">
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Thread size</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.messageCount} messages</div>
+                      </div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last agent</div>
+                        <div className="mt-1 truncate text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
+                      </div>
+                      <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last user turn</div>
+                        <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
+                      </div>
                     </div>
-                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last agent</div>
-                      <div className="mt-1 truncate text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastAgent ?? "Waiting for first reply"}</div>
-                    </div>
-                    <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-3 py-2">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">Last user turn</div>
-                      <div className="mt-1 text-sm font-semibold text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
-                    </div>
+
+                    {/* LLM-generated per-conversation summary. Backend refreshes
+                        this after each turn; the chip is hidden until the first
+                        successful refresh produces a row. */}
+                    {convSummary && convSummary.summary && (
+                      <div className="rounded-2xl border border-[#DBEAFE] bg-[#EFF6FF] px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#1D4ED8]">Conversation summary</div>
+                          <div className="text-[10px] text-[#64748B]">
+                            {formatRelativeTime(convSummary.updated_at)} · {convSummary.source_message_count} msgs
+                          </div>
+                        </div>
+                        <p className="mt-1 whitespace-pre-wrap text-sm text-[#1E3A8A]">{convSummary.summary}</p>
+                        {convSummary.highlights.length > 0 && (
+                          <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-[#1E3A8A]">
+                            {convSummary.highlights.map((h, i) => (
+                              <li key={i}>{h}</li>
+                            ))}
+                          </ul>
+                        )}
+                        {convSummary.keywords.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {convSummary.keywords.map((k) => (
+                              <span key={k} className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-[#1D4ED8] ring-1 ring-[#BFDBFE]">
+                                {k}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 

@@ -119,6 +119,16 @@ pub struct ProjectMemorySummary {
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct ConversationSummary {
+    pub conversation_id: Uuid,
+    pub summary: String,
+    pub highlights: serde_json::Value,
+    pub keywords: Vec<String>,
+    pub source_message_count: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct RefreshToken {
     pub id: Uuid,
     pub user_id: Uuid,

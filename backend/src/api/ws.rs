@@ -22,7 +22,10 @@ use crate::{
     },
     api::{
         auth::verify_token,
-        conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
+        conversation_memory::{
+            get_project_summary, load_project_history, refresh_conversation_summary,
+            refresh_project_summary,
+        },
         project_index::relevant_file_context,
         AppState,
     },
@@ -367,6 +370,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         }
 
         let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;
+        // Per-conversation summary is a UI nice-to-have; ignore failures so
+        // they never bubble back to the user (the chat itself already
+        // succeeded by this point).
+        let _ = refresh_conversation_summary(&state.db, &state.config, query.conversation_id).await;
     }
 }
 
