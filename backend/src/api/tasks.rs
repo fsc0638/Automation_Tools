@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, patch as http_patch},
@@ -50,6 +50,9 @@ pub struct ProjectTask {
     /// IDs of tasks that must be done before this one. Always present
     /// (NOT NULL DEFAULT '{}'); empty array means no dependencies.
     pub depends_on: Vec<Uuid>,
+    // P3: sprint binding
+    pub sprint_id: Option<Uuid>,
+    pub sprint_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -61,9 +64,11 @@ const TASK_SELECT: &str = "SELECT t.id, t.project_id, t.title, t.why, t.affected
         t.definition_of_done, t.labels,
         t.acceptance_criteria_v2, t.linked_pr_url, t.linked_commit_sha,
         t.depends_on,
+        t.sprint_id, sp.name AS sprint_name,
         t.created_at, t.updated_at
      FROM project_tasks t
-     LEFT JOIN messages m ON m.id = t.source_message_id";
+     LEFT JOIN messages m ON m.id = t.source_message_id
+     LEFT JOIN sprints  sp ON sp.id = t.sprint_id";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTask {
@@ -84,6 +89,7 @@ pub struct CreateTask {
     pub linked_pr_url: Option<String>,
     pub linked_commit_sha: Option<String>,
     pub depends_on: Option<Vec<Uuid>>,
+    pub sprint_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,9 +111,25 @@ pub struct UpdateTask {
     pub linked_pr_url: Option<String>,
     pub linked_commit_sha: Option<String>,
     pub depends_on: Option<Vec<Uuid>>,
+    /// P3 sprint binding. Send `null` to clear (handled via dedicated
+    /// CASE in the update SQL — COALESCE can't represent "clear"). Send
+    /// a UUID to set. Omit to leave alone.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub sprint_id: Option<Option<Uuid>>,
     /// Optional explanation attached to a status transition; recorded
     /// in task_status_history. Ignored when status doesn't actually change.
     pub status_note: Option<String>,
+}
+
+/// Double-Option helper for serde so we can distinguish "field absent"
+/// from "field present with value null". Outer None = absent; Some(None)
+/// = explicit null; Some(Some(v)) = value.
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::de::Deserialize<'de>,
+    D: serde::de::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -170,6 +192,14 @@ pub fn routes() -> Router<AppState> {
             "/projects/:id/tasks/:task_id/attempts",
             get(list_task_attempts).post(dispatch_task),
         )
+        .route(
+            "/projects/:id/tasks/:task_id/comments",
+            get(list_task_comments).post(create_task_comment),
+        )
+        .route(
+            "/projects/:id/tasks/:task_id/comments/:comment_id",
+            http_patch(update_task_comment).delete(delete_task_comment),
+        )
 }
 
 async fn verify_access(state: &AppState, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
@@ -185,23 +215,43 @@ async fn verify_access(state: &AppState, project_id: Uuid, user_id: Uuid) -> App
     Ok(())
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ListTaskQuery {
+    /// Filter to a specific sprint. Pass `"none"` to list tasks without a
+    /// sprint (backlog). Omit to list everything.
+    pub sprint_id: Option<String>,
+}
+
 async fn list_tasks(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(project_id): Path<Uuid>,
+    Query(query): Query<ListTaskQuery>,
 ) -> AppResult<Json<Vec<ProjectTask>>> {
     verify_access(&state, project_id, auth_user.id).await?;
+
+    let (where_extra, sprint_bind): (&str, Option<Uuid>) = match query.sprint_id.as_deref() {
+        Some("none") | Some("backlog") => (" AND t.sprint_id IS NULL", None),
+        Some(other) if !other.is_empty() => {
+            let id = Uuid::parse_str(other)
+                .map_err(|_| AppError::BadRequest("invalid sprint_id".into()))?;
+            (" AND t.sprint_id = $2", Some(id))
+        }
+        _ => ("", None),
+    };
+
     let sql = format!(
         "{TASK_SELECT}
-         WHERE t.project_id = $1
+         WHERE t.project_id = $1{where_extra}
          ORDER BY
             CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
             t.created_at DESC"
     );
-    let tasks: Vec<ProjectTask> = sqlx::query_as(&sql)
-        .bind(project_id)
-        .fetch_all(&state.db)
-        .await?;
+    let mut q = sqlx::query_as::<_, ProjectTask>(&sql).bind(project_id);
+    if let Some(id) = sprint_bind {
+        q = q.bind(id);
+    }
+    let tasks: Vec<ProjectTask> = q.fetch_all(&state.db).await?;
     Ok(Json(tasks))
 }
 
@@ -229,9 +279,10 @@ async fn create_task(
          (project_id, title, why, affected_files, acceptance_criteria,
           estimated_effort, priority, source_message_id,
           assignee, due_date, test_plan, rollback_plan, definition_of_done, labels,
-          acceptance_criteria_v2, linked_pr_url, linked_commit_sha, depends_on)
+          acceptance_criteria_v2, linked_pr_url, linked_commit_sha, depends_on,
+          sprint_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                 $15, $16, $17, $18)
+                 $15, $16, $17, $18, $19)
          RETURNING id",
     )
     .bind(project_id)
@@ -252,6 +303,7 @@ async fn create_task(
     .bind(req.linked_pr_url.as_deref())
     .bind(req.linked_commit_sha.as_deref())
     .bind(&depends_on)
+    .bind(req.sprint_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -311,6 +363,12 @@ async fn update_task(
         }
     }
 
+    // sprint_id uses double-Option so the client can distinguish
+    // "leave alone" (absent / None) from "clear" (explicit null / Some(None)).
+    // The SQL uses CASE WHEN $20 THEN $21 ELSE sprint_id END so $21 may be NULL.
+    let sprint_set = req.sprint_id.is_some();
+    let sprint_val: Option<Uuid> = req.sprint_id.unwrap_or(None);
+
     let updated: Option<(Uuid,)> = sqlx::query_as(
         "UPDATE project_tasks SET
             title = COALESCE($1, title),
@@ -330,6 +388,7 @@ async fn update_task(
             linked_pr_url = COALESCE($15, linked_pr_url),
             linked_commit_sha = COALESCE($16, linked_commit_sha),
             depends_on = COALESCE($17, depends_on),
+            sprint_id = CASE WHEN $20 THEN $21 ELSE sprint_id END,
             updated_at = NOW()
          WHERE id = $18 AND project_id = $19
          RETURNING id",
@@ -353,6 +412,8 @@ async fn update_task(
     .bind(req.depends_on.as_deref())
     .bind(task_id)
     .bind(project_id)
+    .bind(sprint_set)
+    .bind(sprint_val)
     .fetch_optional(&state.db)
     .await?;
 
@@ -612,6 +673,148 @@ async fn list_task_attempts(
     .await?;
 
     Ok(Json(attempts))
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct TaskComment {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub user_id: Uuid,
+    pub author_name: Option<String>,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTaskComment {
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTaskComment {
+    pub content: String,
+}
+
+const COMMENT_SELECT: &str = "SELECT c.id, c.task_id, c.user_id,
+        u.display_name AS author_name,
+        c.content, c.created_at, c.updated_at
+     FROM task_comments c
+     LEFT JOIN users u ON u.id = c.user_id";
+
+async fn list_task_comments(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, task_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<Json<Vec<TaskComment>>> {
+    verify_access(&state, project_id, auth_user.id).await?;
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM project_tasks WHERE id = $1 AND project_id = $2",
+    )
+    .bind(task_id)
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("Task not found".into()));
+    }
+    let sql = format!("{COMMENT_SELECT} WHERE c.task_id = $1 ORDER BY c.created_at ASC");
+    let comments: Vec<TaskComment> = sqlx::query_as(&sql)
+        .bind(task_id)
+        .fetch_all(&state.db)
+        .await?;
+    Ok(Json(comments))
+}
+
+async fn create_task_comment(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, task_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<CreateTaskComment>,
+) -> AppResult<(StatusCode, Json<TaskComment>)> {
+    verify_access(&state, project_id, auth_user.id).await?;
+    let trimmed = req.content.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("content is required".into()));
+    }
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM project_tasks WHERE id = $1 AND project_id = $2",
+    )
+    .bind(task_id)
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("Task not found".into()));
+    }
+    let new_id: (Uuid,) = sqlx::query_as(
+        "INSERT INTO task_comments (task_id, user_id, content)
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(task_id)
+    .bind(auth_user.id)
+    .bind(trimmed)
+    .fetch_one(&state.db)
+    .await?;
+    let sql = format!("{COMMENT_SELECT} WHERE c.id = $1");
+    let comment: TaskComment = sqlx::query_as(&sql)
+        .bind(new_id.0)
+        .fetch_one(&state.db)
+        .await?;
+    Ok((StatusCode::CREATED, Json(comment)))
+}
+
+async fn update_task_comment(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, task_id, comment_id)): Path<(Uuid, Uuid, Uuid)>,
+    Json(req): Json<UpdateTaskComment>,
+) -> AppResult<Json<TaskComment>> {
+    verify_access(&state, project_id, auth_user.id).await?;
+    let trimmed = req.content.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("content is required".into()));
+    }
+    // Only the comment author may edit.
+    let updated: Option<(Uuid,)> = sqlx::query_as(
+        "UPDATE task_comments SET content = $1, updated_at = NOW()
+         WHERE id = $2 AND task_id = $3 AND user_id = $4
+         RETURNING id",
+    )
+    .bind(trimmed)
+    .bind(comment_id)
+    .bind(task_id)
+    .bind(auth_user.id)
+    .fetch_optional(&state.db)
+    .await?;
+    let id = updated.ok_or_else(|| AppError::NotFound("Comment not found or not yours".into()))?.0;
+    let sql = format!("{COMMENT_SELECT} WHERE c.id = $1");
+    let comment: TaskComment = sqlx::query_as(&sql)
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(comment))
+}
+
+async fn delete_task_comment(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, task_id, comment_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    verify_access(&state, project_id, auth_user.id).await?;
+    let result = sqlx::query(
+        "DELETE FROM task_comments
+         WHERE id = $1 AND task_id = $2 AND user_id = $3",
+    )
+    .bind(comment_id)
+    .bind(task_id)
+    .bind(auth_user.id)
+    .execute(&state.db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Comment not found or not yours".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_task_history(

@@ -1,11 +1,15 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLink, Filter, GitBranch, GitPullRequest, History, Lock, Plus, Search, Send, Tag, Trash2, X } from "lucide-react";
+import { CalendarRange, ExternalLink, Filter, GitBranch, GitPullRequest, History, Lock, MessageCircle, Plus, Search, Send, Tag, Trash2, X } from "lucide-react";
 import {
+  sprints as sprintsApi,
   tasks as tasksApi,
   type AcceptanceCriteriaV2,
+  type CreateSprintInput,
   type ProjectTask,
+  type Sprint,
   type TaskAttempt,
+  type TaskComment,
   type TaskPriority,
   type TaskStatus,
   type TaskStatusEvent,
@@ -59,6 +63,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
     assignee: "",
     due_date: "",
     labels: "",
+    sprint_id: "" as string,
   });
   const [hoverCol, setHoverCol] = useState<TaskStatus | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -69,7 +74,12 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
   const [filterAssignee, setFilterAssignee] = useState<string>("all");
   const [filterLabel, setFilterLabel] = useState<string>("all");
   const [filterOverdue, setFilterOverdue] = useState(false);
+  const [filterSprint, setFilterSprint] = useState<string>("all");      // "all" | "none" | uuid
   const [sortKey, setSortKey] = useState<SortKey>("priority");
+
+  // Sprint state
+  const [sprintList, setSprintList] = useState<Sprint[]>([]);
+  const [showSprintMgr, setShowSprintMgr] = useState(false);
 
   const t = useT();
   const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
@@ -83,12 +93,23 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
     setLoading(true);
     setErr("");
     try {
-      setItems(await tasksApi.list(projectId));
+      const [taskList, sprintListNew] = await Promise.all([
+        tasksApi.list(projectId),
+        sprintsApi.list(projectId).catch(() => [] as Sprint[]),
+      ]);
+      setItems(taskList);
+      setSprintList(sprintListNew);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load tasks");
     } finally {
       setLoading(false);
     }
+  }, [projectId]);
+
+  const reloadSprints = useCallback(async () => {
+    try {
+      setSprintList(await sprintsApi.list(projectId));
+    } catch { /* best-effort */ }
   }, [projectId]);
 
   useEffect(() => {
@@ -111,9 +132,10 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
       assignee: draft.assignee.trim() || undefined,
       due_date: draft.due_date || undefined,
       labels: labelsArr.length > 0 ? labelsArr : undefined,
+      sprint_id: draft.sprint_id || undefined,
     });
     setItems((prev) => [created, ...prev]);
-    setDraft({ title: "", why: "", priority: "medium", affected_files: "", acceptance_criteria: "", estimated_effort: "", assignee: "", due_date: "", labels: "" });
+    setDraft({ title: "", why: "", priority: "medium", affected_files: "", acceptance_criteria: "", estimated_effort: "", assignee: "", due_date: "", labels: "", sprint_id: "" });
     setShowNew(false);
   }
 
@@ -187,6 +209,11 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
       if (filterPriority !== "all" && t.priority !== filterPriority) return false;
       if (filterAssignee !== "all" && (t.assignee ?? "") !== filterAssignee) return false;
       if (filterLabel !== "all" && !(t.labels ?? []).includes(filterLabel)) return false;
+      if (filterSprint === "none") {
+        if (t.sprint_id) return false;
+      } else if (filterSprint !== "all") {
+        if (t.sprint_id !== filterSprint) return false;
+      }
       if (filterOverdue) {
         if (!t.due_date) return false;
         if (t.status === "done" || t.status === "cancelled") return false;
@@ -216,7 +243,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
       }
     });
     return arr;
-  }, [items, search, filterPriority, filterAssignee, filterLabel, filterOverdue, sortKey]);
+  }, [items, search, filterPriority, filterAssignee, filterLabel, filterOverdue, filterSprint, sortKey]);
 
   const activeTask = useMemo(() => items.find((t) => t.id === activeId) ?? null, [items, activeId]);
 
@@ -230,7 +257,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
   };
   for (const tk of filteredItems) grouped[tk.status]?.push(tk);
 
-  const filtersActive = filterPriority !== "all" || filterAssignee !== "all" || filterLabel !== "all" || filterOverdue || search.trim().length > 0;
+  const filtersActive = filterPriority !== "all" || filterAssignee !== "all" || filterLabel !== "all" || filterSprint !== "all" || filterOverdue || search.trim().length > 0;
 
   return (
     <div className="p-6 space-y-4 overflow-auto">
@@ -320,10 +347,31 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
             />
             {t("roadmap.onlyOverdue")}
           </label>
+          <select
+            value={filterSprint}
+            onChange={(e) => setFilterSprint(e.target.value)}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+            title={t("roadmap.sprint")}
+          >
+            <option value="all">{t("roadmap.allSprints")}</option>
+            <option value="none">{t("roadmap.sprintBacklog")}</option>
+            {sprintList.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.task_done}/{s.task_total})
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => setShowSprintMgr(true)}
+            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            title={t("roadmap.manageSprints")}
+          >
+            <CalendarRange size={11} /> {t("roadmap.manageSprints")}
+          </button>
           {filtersActive && (
             <button
               onClick={() => {
-                setSearch(""); setFilterPriority("all"); setFilterAssignee("all"); setFilterLabel("all"); setFilterOverdue(false);
+                setSearch(""); setFilterPriority("all"); setFilterAssignee("all"); setFilterLabel("all"); setFilterOverdue(false); setFilterSprint("all");
               }}
               className="text-[11px] text-[#0050A0] hover:underline"
             >
@@ -404,6 +452,17 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               placeholder="S / M / L / 2d"
               className="h-8 w-24 px-2 text-xs rounded-md border border-[#E2E8F0]"
             />
+            <label className="text-xs text-[#64748B]">{t("roadmap.sprint")}:</label>
+            <select
+              value={draft.sprint_id}
+              onChange={(e) => setDraft({ ...draft, sprint_id: e.target.value })}
+              className="h-8 px-2 text-xs rounded-md border border-[#E2E8F0] max-w-[160px]"
+            >
+              <option value="">{t("roadmap.sprintBacklog")}</option>
+              {sprintList.filter((s) => s.status !== "closed").map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
             <div className="flex-1" />
             <button type="button" onClick={() => setShowNew(false)} className="text-xs text-[#64748B] hover:text-[#1A1A2E]">{t("common.cancel")}</button>
             <button type="submit" className="px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium">{t("common.create")}</button>
@@ -454,12 +513,22 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           key={activeTask.id}
           task={activeTask}
           allTasks={items}
+          sprintList={sprintList}
           projectId={projectId}
           onClose={() => setActiveId(null)}
           onUpdate={updateTask}
           onDelete={deleteTask}
           onOpenSource={onOpenSource}
           onDispatched={onDispatched}
+        />
+      )}
+
+      {showSprintMgr && (
+        <SprintManagerModal
+          projectId={projectId}
+          sprints={sprintList}
+          onClose={() => setShowSprintMgr(false)}
+          onChanged={() => void reloadSprints()}
         />
       )}
     </div>
@@ -579,6 +648,11 @@ function TaskCard({
             <GitPullRequest size={9} /> PR
           </span>
         )}
+        {task.sprint_name && (
+          <span className="inline-flex items-center gap-0.5 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700" title={task.sprint_name}>
+            <CalendarRange size={9} /> {task.sprint_name}
+          </span>
+        )}
         {blocked && (
           <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-800" title={blockers.map((b) => b.title).join("\n")}>
             <Lock size={9} /> blocked × {blockers.length}
@@ -617,6 +691,7 @@ function splitList(value: string): string[] {
 function TaskDetailDrawer({
   task,
   allTasks,
+  sprintList,
   projectId,
   onClose,
   onUpdate,
@@ -626,6 +701,7 @@ function TaskDetailDrawer({
 }: {
   task: ProjectTask;
   allTasks: ProjectTask[];
+  sprintList: Sprint[];
   projectId: string;
   onClose: () => void;
   onUpdate: (taskId: string, patch: UpdateTaskInput) => Promise<ProjectTask>;
@@ -655,6 +731,7 @@ function TaskDetailDrawer({
     linked_pr_url: task.linked_pr_url ?? "",
     linked_commit_sha: task.linked_commit_sha ?? "",
     depends_on: task.depends_on ?? [],
+    sprint_id: task.sprint_id ?? "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -662,6 +739,11 @@ function TaskDetailDrawer({
   const [showHistory, setShowHistory] = useState(false);
   const [attempts, setAttempts] = useState<TaskAttempt[] | null>(null);
   const [showAttempts, setShowAttempts] = useState(false);
+  const [comments, setComments] = useState<TaskComment[] | null>(null);
+  const [commentDraft, setCommentDraft] = useState("");
+  const [submittingComment, setSubmittingComment] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentDraft, setEditingCommentDraft] = useState("");
   const [dispatchMode, setDispatchMode] = useState<string>("openclaw");
   const [dispatching, setDispatching] = useState(false);
 
@@ -701,6 +783,7 @@ function TaskDetailDrawer({
       form.assignee !== (task.assignee ?? "") ||
       form.due_date !== (task.due_date ?? "") ||
       form.linked_pr_url !== (task.linked_pr_url ?? "") ||
+      form.sprint_id !== (task.sprint_id ?? "") ||
       form.linked_commit_sha !== (task.linked_commit_sha ?? "") ||
       filesChanged || labelsChanged || depsChanged || acV2Changed
     );
@@ -714,6 +797,67 @@ function TaskDetailDrawer({
       setShowHistory(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load history");
+    }
+  }
+
+  // Comments are loaded eagerly when the drawer opens so the count chip
+  // in the header reflects reality without a click.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await tasksApi.comments(projectId, task.id);
+        if (!cancelled) setComments(list);
+      } catch {
+        if (!cancelled) setComments([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [projectId, task.id]);
+
+  async function submitComment() {
+    const trimmed = commentDraft.trim();
+    if (!trimmed || submittingComment) return;
+    setSubmittingComment(true);
+    setError("");
+    try {
+      const created = await tasksApi.addComment(projectId, task.id, trimmed);
+      setComments((prev) => [...(prev ?? []), created]);
+      setCommentDraft("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Comment failed");
+    } finally {
+      setSubmittingComment(false);
+    }
+  }
+
+  function startEditComment(c: TaskComment) {
+    setEditingCommentId(c.id);
+    setEditingCommentDraft(c.content);
+  }
+
+  async function saveEditComment(c: TaskComment) {
+    const trimmed = editingCommentDraft.trim();
+    if (!trimmed || trimmed === c.content) {
+      setEditingCommentId(null);
+      return;
+    }
+    try {
+      const updated = await tasksApi.updateComment(projectId, task.id, c.id, trimmed);
+      setComments((prev) => (prev ?? []).map((x) => x.id === updated.id ? updated : x));
+      setEditingCommentId(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Comment update failed");
+    }
+  }
+
+  async function deleteComment(c: TaskComment) {
+    if (!confirm("刪除這則留言？")) return;
+    try {
+      await tasksApi.deleteComment(projectId, task.id, c.id);
+      setComments((prev) => (prev ?? []).filter((x) => x.id !== c.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Comment delete failed");
     }
   }
 
@@ -798,6 +942,12 @@ function TaskDetailDrawer({
       // Send due_date only when set; null clears it.
       if (form.due_date) patch.due_date = form.due_date;
       else if (task.due_date) patch.due_date = null;
+      // Sprint: send the value (or explicit null) only when the user
+      // actually changed it. Backend uses CASE WHEN $20 THEN $21 ELSE
+      // sprint_id END, so omitting the field leaves the column alone.
+      if (form.sprint_id !== (task.sprint_id ?? "")) {
+        patch.sprint_id = form.sprint_id || null;
+      }
       await onUpdate(task.id, patch);
       // If status changed, refresh history so user sees the new entry.
       if (form.status !== task.status) {
@@ -904,14 +1054,33 @@ function TaskDetailDrawer({
             </div>
           </div>
 
-          <div>
-            <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.labels")}</label>
-            <input
-              value={form.labels}
-              onChange={(e) => setForm({ ...form, labels: e.target.value })}
-              placeholder={t("roadmap.labelsHint")}
-              className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-sm"
-            />
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">{t("roadmap.labels")}</label>
+              <input
+                value={form.labels}
+                onChange={(e) => setForm({ ...form, labels: e.target.value })}
+                placeholder={t("roadmap.labelsHint")}
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#94A3B8]">
+                <CalendarRange size={11} className="inline" /> {t("roadmap.sprint")}
+              </label>
+              <select
+                value={form.sprint_id}
+                onChange={(e) => setForm({ ...form, sprint_id: e.target.value })}
+                className="mt-1 h-9 w-full rounded-md border border-[#E2E8F0] px-2 text-sm"
+              >
+                <option value="">{t("roadmap.sprintBacklog")}</option>
+                {sprintList.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}{s.status === "closed" ? " (closed)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div>
@@ -1180,6 +1349,89 @@ function TaskDetailDrawer({
             )}
           </div>
 
+          {/* Comments thread */}
+          <div className="rounded-md border border-[#E2E8F0] bg-white">
+            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] px-3 py-2 text-xs font-semibold text-[#475569]">
+              <span className="inline-flex items-center gap-2">
+                <MessageCircle size={12} /> {t("roadmap.comments")}
+              </span>
+              <span className="text-[10px] font-normal text-[#94A3B8]">
+                {comments === null ? "…" : `${comments.length} ${t("roadmap.commentCount")}`}
+              </span>
+            </div>
+            <div className="px-3 py-2 space-y-2">
+              {comments === null ? (
+                <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+              ) : comments.length === 0 ? (
+                <div className="text-xs text-[#94A3B8]">{t("roadmap.commentsEmpty")}</div>
+              ) : (
+                <ul className="space-y-2">
+                  {comments.map((c) => (
+                    <li key={c.id} className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
+                      <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                        <span className="font-semibold text-[#1A1A2E]">{c.author_name ?? t("roadmap.unknownAuthor")}</span>
+                        <span className="text-[10px] text-[#94A3B8]">
+                          {new Date(c.created_at).toLocaleString()}
+                          {c.updated_at !== c.created_at && (
+                            <span className="ml-1 italic">({t("roadmap.edited")})</span>
+                          )}
+                        </span>
+                      </div>
+                      {editingCommentId === c.id ? (
+                        <div className="mt-1 space-y-1">
+                          <textarea
+                            value={editingCommentDraft}
+                            onChange={(e) => setEditingCommentDraft(e.target.value)}
+                            rows={3}
+                            className="w-full rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-xs leading-5"
+                          />
+                          <div className="flex gap-1">
+                            <button type="button" onClick={() => void saveEditComment(c)} className="rounded-md bg-[#0050A0] px-2 py-1 text-[11px] text-white hover:bg-[#003B7A]">
+                              {t("common.save")}
+                            </button>
+                            <button type="button" onClick={() => setEditingCommentId(null)} className="rounded-md border border-[#E2E8F0] px-2 py-1 text-[11px] text-[#64748B] hover:bg-[#F1F5F9]">
+                              {t("common.cancel")}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[#1A1A2E]">{c.content}</div>
+                          <div className="mt-1 flex gap-2 text-[10px]">
+                            <button type="button" onClick={() => startEditComment(c)} className="text-[#0050A0] hover:underline">
+                              {t("common.edit")}
+                            </button>
+                            <button type="button" onClick={() => void deleteComment(c)} className="text-[#C8102E] hover:underline">
+                              {t("common.delete")}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="mt-2 space-y-1">
+                <textarea
+                  value={commentDraft}
+                  onChange={(e) => setCommentDraft(e.target.value)}
+                  placeholder={t("roadmap.commentPlaceholder")}
+                  rows={2}
+                  className="w-full rounded-md border border-[#E2E8F0] px-2 py-1.5 text-xs leading-5"
+                />
+                <button
+                  type="button"
+                  onClick={() => void submitComment()}
+                  disabled={!commentDraft.trim() || submittingComment}
+                  className="rounded-md bg-[#0050A0] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
+                >
+                  {submittingComment ? t("common.loading") : t("roadmap.addComment")}
+                </button>
+              </div>
+            </div>
+          </div>
+
           {task.source_message_id && (
             <div className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs text-[#475569]">
               <div className="flex items-center justify-between gap-2">
@@ -1272,6 +1524,183 @@ function TaskDetailDrawer({
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SprintManagerModal({
+  projectId,
+  sprints,
+  onClose,
+  onChanged,
+}: {
+  projectId: string;
+  sprints: Sprint[];
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const t = useT();
+  const [draft, setDraft] = useState<CreateSprintInput>({ name: "", goal: "", start_date: "", end_date: "", status: "planned" });
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    if (!draft.name.trim() || creating) return;
+    setCreating(true);
+    setError("");
+    try {
+      const payload: CreateSprintInput = {
+        name: draft.name.trim(),
+        status: draft.status,
+      };
+      if (draft.goal && draft.goal.trim()) payload.goal = draft.goal.trim();
+      if (draft.start_date) payload.start_date = draft.start_date;
+      if (draft.end_date) payload.end_date = draft.end_date;
+      await sprintsApi.create(projectId, payload);
+      setDraft({ name: "", goal: "", start_date: "", end_date: "", status: "planned" });
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Create failed");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function updateStatus(s: Sprint, status: Sprint["status"]) {
+    try {
+      await sprintsApi.update(projectId, s.id, { status });
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Update failed");
+    }
+  }
+
+  async function rename(s: Sprint) {
+    const next = window.prompt(t("roadmap.sprintRenamePrompt"), s.name);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === s.name) return;
+    try {
+      await sprintsApi.update(projectId, s.id, { name: trimmed });
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Rename failed");
+    }
+  }
+
+  async function removeSprint(s: Sprint) {
+    if (!confirm(t("roadmap.sprintDeleteConfirm").replace("{name}", s.name))) return;
+    try {
+      await sprintsApi.delete(projectId, s.id);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={onClose}>
+      <div className="w-full max-w-2xl rounded-lg bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-[#E2E8F0] px-5 py-3">
+          <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("roadmap.manageSprints")}</h3>
+          <button onClick={onClose} className="rounded-md p-1 text-[#64748B] hover:bg-[#F1F5F9]"><X size={16} /></button>
+        </div>
+
+        <div className="max-h-[420px] overflow-y-auto px-5 py-4 space-y-3">
+          {sprints.length === 0 ? (
+            <div className="text-xs text-[#94A3B8]">{t("roadmap.sprintsEmpty")}</div>
+          ) : (
+            <ul className="space-y-2">
+              {sprints.map((s) => (
+                <li key={s.id} className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-[#1A1A2E] truncate">{s.name}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                          s.status === "active" ? "bg-emerald-50 text-emerald-700"
+                          : s.status === "closed" ? "bg-slate-100 text-slate-500"
+                          : "bg-amber-50 text-amber-700"
+                        }`}>{s.status}</span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-[#64748B]">
+                        {s.start_date ?? "—"} → {s.end_date ?? "—"} · {s.task_done}/{s.task_total} {t("roadmap.tasksDoneLabel")}
+                      </div>
+                      {s.goal && <div className="mt-1 text-xs text-[#475569] line-clamp-2">{s.goal}</div>}
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      <select
+                        value={s.status}
+                        onChange={(e) => void updateStatus(s, e.target.value as Sprint["status"])}
+                        className="h-7 rounded-md border border-[#E2E8F0] bg-white px-1.5 text-[11px]"
+                      >
+                        <option value="planned">planned</option>
+                        <option value="active">active</option>
+                        <option value="closed">closed</option>
+                      </select>
+                      <button type="button" onClick={() => void rename(s)} className="rounded-md border border-[#E2E8F0] px-2 py-1 text-[11px] text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]">
+                        {t("common.edit")}
+                      </button>
+                      <button type="button" onClick={() => void removeSprint(s)} className="rounded-md border border-red-200 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50">
+                        {t("common.delete")}
+                      </button>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <form onSubmit={create} className="border-t border-[#E2E8F0] px-5 py-3 space-y-2 bg-[#FBFCFE]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#475569]">{t("roadmap.sprintNew")}</div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+            <input
+              required
+              value={draft.name}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              placeholder={t("roadmap.sprintNamePlaceholder")}
+              className="h-9 rounded-md border border-[#E2E8F0] px-2 text-sm"
+            />
+            <select
+              value={draft.status}
+              onChange={(e) => setDraft({ ...draft, status: e.target.value as Sprint["status"] })}
+              className="h-9 rounded-md border border-[#E2E8F0] px-2 text-sm"
+            >
+              <option value="planned">planned</option>
+              <option value="active">active</option>
+              <option value="closed">closed</option>
+            </select>
+            <input
+              type="date"
+              value={draft.start_date ?? ""}
+              onChange={(e) => setDraft({ ...draft, start_date: e.target.value })}
+              className="h-9 rounded-md border border-[#E2E8F0] px-2 text-sm"
+            />
+            <input
+              type="date"
+              value={draft.end_date ?? ""}
+              onChange={(e) => setDraft({ ...draft, end_date: e.target.value })}
+              className="h-9 rounded-md border border-[#E2E8F0] px-2 text-sm"
+            />
+          </div>
+          <textarea
+            value={draft.goal ?? ""}
+            onChange={(e) => setDraft({ ...draft, goal: e.target.value })}
+            placeholder={t("roadmap.sprintGoalPlaceholder")}
+            rows={2}
+            className="w-full rounded-md border border-[#E2E8F0] px-2 py-1.5 text-sm"
+          />
+          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs text-[#64748B] hover:bg-[#F1F5F9]">{t("common.close")}</button>
+            <button type="submit" disabled={!draft.name.trim() || creating} className="rounded-md bg-[#0050A0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]">
+              {creating ? t("common.loading") : t("roadmap.sprintCreate")}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

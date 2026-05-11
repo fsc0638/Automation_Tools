@@ -97,6 +97,8 @@ export const projects = {
     request<MetricsSummary>(`/projects/${id}/metrics/summary`),
   metricsCost: (id: string) =>
     request<MetricsCost>(`/projects/${id}/metrics/cost`),
+  metricsBurndown: (id: string) =>
+    request<MetricsBurndown>(`/projects/${id}/metrics/burndown`),
   metricsHealth: (id: string) =>
     request<MetricsHealth>(`/projects/${id}/metrics/health`),
   remoteBranches: (url: string, git_identity_id?: string) =>
@@ -115,8 +117,10 @@ export const feedback = {
 };
 
 export const tasks = {
-  list: (projectId: string) =>
-    request<ProjectTask[]>(`/projects/${projectId}/tasks`),
+  list: (projectId: string, opts?: { sprintId?: string | "none" }) => {
+    const params = opts?.sprintId ? `?sprint_id=${encodeURIComponent(opts.sprintId)}` : "";
+    return request<ProjectTask[]>(`/projects/${projectId}/tasks${params}`);
+  },
   create: (projectId: string, data: CreateTaskInput) =>
     request<ProjectTask>(`/projects/${projectId}/tasks`, {
       method: "POST",
@@ -137,6 +141,22 @@ export const tasks = {
     request<DispatchTaskResult>(`/projects/${projectId}/tasks/${taskId}/attempts`, {
       method: "POST",
       body: JSON.stringify(data),
+    }),
+  comments: (projectId: string, taskId: string) =>
+    request<TaskComment[]>(`/projects/${projectId}/tasks/${taskId}/comments`),
+  addComment: (projectId: string, taskId: string, content: string) =>
+    request<TaskComment>(`/projects/${projectId}/tasks/${taskId}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+  updateComment: (projectId: string, taskId: string, commentId: string, content: string) =>
+    request<TaskComment>(`/projects/${projectId}/tasks/${taskId}/comments/${commentId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ content }),
+    }),
+  deleteComment: (projectId: string, taskId: string, commentId: string) =>
+    request<void>(`/projects/${projectId}/tasks/${taskId}/comments/${commentId}`, {
+      method: "DELETE",
     }),
 };
 
@@ -336,6 +356,9 @@ export interface ProjectTask {
   linked_pr_url?: string | null;
   linked_commit_sha?: string | null;
   depends_on: string[];                 // always present, possibly empty
+  // P3 sprint binding
+  sprint_id?: string | null;
+  sprint_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -358,6 +381,7 @@ export interface CreateTaskInput {
   linked_pr_url?: string;
   linked_commit_sha?: string;
   depends_on?: string[];
+  sprint_id?: string;
 }
 
 export interface UpdateTaskInput {
@@ -378,6 +402,9 @@ export interface UpdateTaskInput {
   linked_pr_url?: string;
   linked_commit_sha?: string;
   depends_on?: string[];
+  /** P3: send a UUID string to bind to a sprint, send `null` to clear,
+   *  omit to leave alone. */
+  sprint_id?: string | null;
   status_note?: string;
 }
 
@@ -407,6 +434,63 @@ export interface DispatchTaskResult {
   prompt: string;
 }
 
+export interface Sprint {
+  id: string;
+  project_id: string;
+  name: string;
+  goal?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  status: "planned" | "active" | "closed";
+  task_total: number;
+  task_done: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSprintInput {
+  name: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  status?: "planned" | "active" | "closed";
+}
+
+export interface UpdateSprintInput {
+  name?: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  status?: "planned" | "active" | "closed";
+}
+
+export const sprints = {
+  list: (projectId: string) =>
+    request<Sprint[]>(`/projects/${projectId}/sprints`),
+  create: (projectId: string, data: CreateSprintInput) =>
+    request<Sprint>(`/projects/${projectId}/sprints`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (projectId: string, sprintId: string, data: UpdateSprintInput) =>
+    request<Sprint>(`/projects/${projectId}/sprints/${sprintId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  delete: (projectId: string, sprintId: string) =>
+    request<void>(`/projects/${projectId}/sprints/${sprintId}`, { method: "DELETE" }),
+};
+
+export interface TaskComment {
+  id: string;
+  task_id: string;
+  user_id: string;
+  author_name?: string | null;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TaskStatusEvent {
   id: string;
   task_id: string;
@@ -428,6 +512,21 @@ export interface MetricsHealth {
     level: "Low" | "Medium" | "High";
     evidence: string;
   }>;
+}
+
+export interface MetricsBurndownPoint {
+  day: string;       // YYYY-MM-DD
+  total: number;     // cumulative tasks created by EOD
+  done: number;      // cumulative tasks completed by EOD
+  remaining: number; // total - done
+  ideal: number;     // linear reference trajectory
+}
+
+export interface MetricsBurndown {
+  points: MetricsBurndownPoint[];
+  final_total: number;
+  final_remaining: number;
+  velocity_per_day: number;
 }
 
 export interface MetricsCost {

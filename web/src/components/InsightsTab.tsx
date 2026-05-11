@@ -4,8 +4,9 @@ import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   PieChart, Pie, Cell,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
+  ComposedChart, Area, Line, Legend,
 } from "recharts";
-import { projects as projectsApi, type MetricsSummary, type MetricsHealth } from "@/lib/api";
+import { projects as projectsApi, type MetricsBurndown, type MetricsSummary, type MetricsHealth } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
 const MODE_COLORS: Record<string, string> = {
@@ -22,6 +23,7 @@ const AGENT_COLORS: Record<string, string> = {
 export function InsightsTab({ projectId }: { projectId: string }) {
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [health, setHealth] = useState<MetricsHealth | null>(null);
+  const [burndown, setBurndown] = useState<MetricsBurndown | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
   const t = useT();
@@ -30,12 +32,14 @@ export function InsightsTab({ projectId }: { projectId: string }) {
     setLoading(true);
     setError("");
     try {
-      const [m, h] = await Promise.all([
+      const [m, h, b] = await Promise.all([
         projectsApi.metricsSummary(projectId),
         projectsApi.metricsHealth(projectId).catch(() => null),
+        projectsApi.metricsBurndown(projectId).catch(() => null),
       ]);
       setMetrics(m);
       setHealth(h);
+      setBurndown(b);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load metrics");
     } finally {
@@ -239,6 +243,61 @@ export function InsightsTab({ projectId }: { projectId: string }) {
           <Stat label="p50" value={fmtMs(timing.p50_total_ms)} />
           <Stat label="p95" value={fmtMs(timing.p95_total_ms)} />
         </div>
+      </ChartCard>
+
+      <ChartCard
+        title={t("insights.burndownTitle")}
+        subtitle={
+          burndown
+            ? `${burndown.final_remaining} ${t("insights.burndownOpen")} · ${burndown.velocity_per_day.toFixed(1)} ${t("insights.burndownVelocity")}`
+            : t("insights.burndownDesc")
+        }
+      >
+        {!burndown || burndown.points.length === 0 ? (
+          <Empty hint={t("insights.burndownEmpty")} />
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-3 pt-2 mb-3">
+              <Stat label={t("insights.burndownScope")} value={String(burndown.final_total)} />
+              <Stat label={t("insights.burndownDone")} value={String(burndown.final_total - burndown.final_remaining)} />
+              <Stat label={t("insights.burndownVelocity")} value={burndown.velocity_per_day.toFixed(2)} />
+            </div>
+            <ResponsiveContainer width="100%" height={260}>
+              <ComposedChart data={burndown.points}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                <XAxis dataKey="day" tick={{ fontSize: 10 }} minTickGap={20} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Area
+                  type="monotone"
+                  dataKey="remaining"
+                  name={t("insights.burndownRemaining")}
+                  stroke="#C8102E"
+                  fill="#FECACA"
+                  fillOpacity={0.55}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="done"
+                  name={t("insights.burndownDoneLine")}
+                  stroke="#10B981"
+                  strokeWidth={2}
+                  dot={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="ideal"
+                  name={t("insights.burndownIdeal")}
+                  stroke="#94A3B8"
+                  strokeDasharray="5 5"
+                  strokeWidth={1.5}
+                  dot={false}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </>
+        )}
       </ChartCard>
     </div>
   );

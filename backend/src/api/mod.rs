@@ -13,6 +13,7 @@ pub mod git_identities;
 pub mod metrics;
 pub mod project_index;
 pub mod projects;
+pub mod sprints;
 pub mod tasks;
 pub mod ws;
 
@@ -36,6 +37,7 @@ pub fn router(state: AppState) -> Router {
         .merge(conversations::routes())
         .merge(metrics::routes())
         .merge(tasks::routes())
+        .merge(sprints::routes())
         .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
