@@ -10,6 +10,7 @@ use crate::{
     },
     config::Config,
     db::models::{Message, ProjectMemorySummary},
+    security::redaction::redact_secrets,
 };
 
 const PROJECT_HISTORY_LIMIT: i64 = 120;
@@ -115,9 +116,10 @@ fn build_summary_prompt(
     existing: Option<&ProjectMemorySummary>,
     recent_messages: &[Message],
 ) -> Vec<ChatMessage> {
-    let existing_summary = existing
+    let existing_summary_raw = existing
         .map(|s| s.summary.as_str())
         .unwrap_or("[No previous summary]");
+    let existing_summary = redact_secrets(existing_summary_raw).text;
     let root = project.root.as_deref().unwrap_or("unknown");
     let recent_transcript = render_recent_messages(recent_messages);
 
@@ -150,7 +152,7 @@ fn render_recent_messages(messages: &[Message]) -> String {
             "system" => message.agent_name.as_deref().unwrap_or("System"),
             _ => "Unknown",
         };
-        let sanitized = message.content.replace("\r", "").replace("\n", " ");
+        let sanitized = redact_secrets(&message.content.replace("\r", "").replace("\n", " ")).text;
         output.push_str("- ");
         output.push_str(label);
         output.push_str(": ");

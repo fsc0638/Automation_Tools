@@ -461,7 +461,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       el.classList.add("ring-2", "ring-[#0050A0]");
       window.setTimeout(() => el.classList.remove("ring-2", "ring-[#0050A0]"), 2200);
     }
-    setPendingScrollMessageId(null);
+    window.setTimeout(() => setPendingScrollMessageId(null), 0);
   }, [messages, pendingScrollMessageId]);
 
   useEffect(() => {

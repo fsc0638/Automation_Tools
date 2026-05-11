@@ -26,6 +26,7 @@ use crate::{
     },
     db::models::{AgentProfile, Project},
     error::AppError,
+    security::context_firewall::secure_agent_context,
 };
 
 #[derive(Debug, Deserialize)]
@@ -156,7 +157,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         let agent_mode = match agent_mode_from_str(&state, user_id, mode.as_deref()).await {
             Ok(mode) => mode,
             Err(error) => {
-                let error = ServerEvent::Error { message: error.to_string() };
+                let error = ServerEvent::Error {
+                    message: error.to_string(),
+                };
                 let _ = sender
                     .send(WsMessage::Text(
                         serde_json::to_string(&error).unwrap_or_default().into(),
@@ -173,12 +176,48 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                 .flatten();
 
         let mode_label = mode_label(&agent_mode);
-        let mut stream = run_agent_stream(
-            &state.config,
+        let secured_context = match secure_agent_context(
+            &state.db,
+            user_id,
+            query.project_id,
+            query.conversation_id,
+            mode_label,
             &project_scope,
             &history,
             project_summary.map(|summary| summary.summary),
             &content,
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(error) => {
+                let error = ServerEvent::Error {
+                    message: format!("Context firewall failed: {error}"),
+                };
+                let _ = sender
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&error).unwrap_or_default().into(),
+                    ))
+                    .await;
+                continue;
+            }
+        };
+        tracing::info!(
+            project_id = %query.project_id,
+            conversation_id = %query.conversation_id,
+            mode = mode_label,
+            redacted_count = secured_context.report.redacted_count,
+            blocked_count = secured_context.report.blocked_items.len(),
+            classification_max = %secured_context.report.classification_max,
+            "context firewall applied"
+        );
+
+        let mut stream = run_agent_stream(
+            &state.config,
+            &secured_context.project_scope,
+            &secured_context.history,
+            secured_context.project_summary.clone(),
+            &secured_context.user_message,
             agent_mode,
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
@@ -297,7 +336,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         // own latest attempt. An error anywhere in the stream wins
         // over a partial success.
         if stream_had_error || stream_had_done {
-            let new_status = if stream_had_error { "failed" } else { "complete" };
+            let new_status = if stream_had_error {
+                "failed"
+            } else {
+                "complete"
+            };
             let _ = sqlx::query(
                 "UPDATE task_attempts
                  SET status = $1, updated_at = NOW()
@@ -313,7 +356,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
     }
 }
 
-async fn agent_mode_from_str(state: &AppState, user_id: Uuid, mode: Option<&str>) -> Result<AgentMode, AppError> {
+async fn agent_mode_from_str(
+    state: &AppState,
+    user_id: Uuid,
+    mode: Option<&str>,
+) -> Result<AgentMode, AppError> {
     let mode = match mode {
         Some("hermes") => AgentMode::HermesOnly,
         Some("debate") => AgentMode::Debate,
@@ -325,7 +372,9 @@ async fn agent_mode_from_str(state: &AppState, user_id: Uuid, mode: Option<&str>
                 .take(4)
                 .collect::<Vec<_>>();
             if ids.len() < 2 {
-                return Err(AppError::BadRequest("Custom debate requires at least 2 agent profiles".into()));
+                return Err(AppError::BadRequest(
+                    "Custom debate requires at least 2 agent profiles".into(),
+                ));
             }
             let mut profiles = Vec::new();
             for id in ids {
@@ -446,9 +495,8 @@ fn detect_consensus_marker(content: &str) -> bool {
 /// Conservative on extensions to avoid false positives from prose.
 fn detect_file_citation(content: &str) -> bool {
     static EXTS: &[&str] = &[
-        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".sql", ".toml",
-        ".json", ".yaml", ".yml", ".swift", ".kt", ".java", ".go", ".html",
-        ".css",
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".sql", ".toml", ".json", ".yaml",
+        ".yml", ".swift", ".kt", ".java", ".go", ".html", ".css",
     ];
     let lower = content.to_lowercase();
     EXTS.iter().any(|ext| lower.contains(ext))

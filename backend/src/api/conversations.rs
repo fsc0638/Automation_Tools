@@ -17,6 +17,7 @@ use crate::{
     },
     db::models::{Conversation, Message, Project},
     error::{AppError, AppResult},
+    security::context_firewall::secure_agent_context,
 };
 
 #[derive(Debug, Deserialize)]
@@ -123,24 +124,25 @@ async fn get_conversation(
 ) -> AppResult<Json<ConversationWithMessages>> {
     verify_project_access(&state, project_id, auth_user.id).await?;
 
-    let conv: Option<Conversation> = sqlx::query_as(
-        "SELECT * FROM conversations WHERE id = $1 AND project_id = $2",
-    )
-    .bind(conv_id)
-    .bind(project_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let conv: Option<Conversation> =
+        sqlx::query_as("SELECT * FROM conversations WHERE id = $1 AND project_id = $2")
+            .bind(conv_id)
+            .bind(project_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     let conv = conv.ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
 
-    let messages: Vec<Message> = sqlx::query_as(
-        "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
-    )
-    .bind(conv_id)
-    .fetch_all(&state.db)
-    .await?;
+    let messages: Vec<Message> =
+        sqlx::query_as("SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC")
+            .bind(conv_id)
+            .fetch_all(&state.db)
+            .await?;
 
-    Ok(Json(ConversationWithMessages { conversation: conv, messages }))
+    Ok(Json(ConversationWithMessages {
+        conversation: conv,
+        messages,
+    }))
 }
 
 async fn delete_conversation(
@@ -150,14 +152,13 @@ async fn delete_conversation(
 ) -> AppResult<StatusCode> {
     verify_project_access(&state, project_id, auth_user.id).await?;
 
-    let result = sqlx::query(
-        "DELETE FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3",
-    )
-    .bind(conv_id)
-    .bind(project_id)
-    .bind(auth_user.id)
-    .execute(&state.db)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3")
+            .bind(conv_id)
+            .bind(project_id)
+            .bind(auth_user.id)
+            .execute(&state.db)
+            .await?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound("Conversation not found".into()));
@@ -181,13 +182,12 @@ async fn send_message(
         .await?;
     let project_scope = build_project_scope(&project);
 
-    let conv: Option<Conversation> = sqlx::query_as(
-        "SELECT * FROM conversations WHERE id = $1 AND project_id = $2",
-    )
-    .bind(conv_id)
-    .bind(project_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let conv: Option<Conversation> =
+        sqlx::query_as("SELECT * FROM conversations WHERE id = $1 AND project_id = $2")
+            .bind(conv_id)
+            .bind(project_id)
+            .fetch_optional(&state.db)
+            .await?;
     let conv = conv.ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
 
     // Load conversation history before saving this turn, then append the current
@@ -208,17 +208,31 @@ async fn send_message(
     .await?;
 
     let mode = agent_mode_from_str(req.mode.as_deref());
+    let mode_label = normalize_mode(req.mode.as_deref());
+    let secured_context = secure_agent_context(
+        &state.db,
+        auth_user.id,
+        project_id,
+        conv_id,
+        mode_label,
+        &project_scope,
+        &history,
+        project_summary.map(|summary| summary.summary),
+        &req.content,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("context firewall failed: {}", e)))?;
 
     let responses = run_agent_turn(
         &state.config,
-        &project_scope,
-        &history,
-        project_summary.as_ref().map(|summary| summary.summary.as_str()),
-        &req.content,
+        &secured_context.project_scope,
+        &secured_context.history,
+        secured_context.project_summary.as_deref(),
+        &secured_context.user_message,
         mode,
     )
-        .await
-        .map_err(|e| AppError::Agent(e.to_string()))?;
+    .await
+    .map_err(|e| AppError::Agent(e.to_string()))?;
 
     let mut saved_messages = vec![];
     for (role, content, agent_name) in &responses {
@@ -279,11 +293,7 @@ fn default_title_for_mode(mode: &str) -> String {
     }
 }
 
-async fn verify_project_access(
-    state: &AppState,
-    project_id: Uuid,
-    user_id: Uuid,
-) -> AppResult<()> {
+async fn verify_project_access(state: &AppState, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
     let exists: Option<(Uuid,)> =
         sqlx::query_as("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
             .bind(project_id)

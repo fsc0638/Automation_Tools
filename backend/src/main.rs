@@ -20,6 +20,7 @@ mod crypto;
 mod db;
 mod error;
 mod git_ops;
+mod security;
 
 use api::{router, AppState};
 use crypto::TokenCipher;
@@ -101,7 +102,10 @@ async fn main() -> anyhow::Result<()> {
                 "CORS_ALLOWED_ORIGINS not set or '*' — allowing any origin. \
                 Set CORS_ALLOWED_ORIGINS=https://your-domain.com in production."
             );
-            CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any)
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
         }
     };
 

@@ -38,6 +38,12 @@ const PRIORITY_RANK: Record<TaskPriority, number> = {
 
 type SortKey = "priority" | "due" | "newest" | "oldest" | "updated";
 
+function startOfDayMs(value: string | Date): number {
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
 export interface RoadmapTabProps {
   projectId: string;
   /** When set, clicking the source-message link on a task opens that
@@ -313,8 +319,8 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
     return Array.from(set).sort();
   }, [items]);
 
-  const filteredItems = useMemo(() => {
-    const today = new Date(); today.setHours(0, 0, 0, 0);
+  const filteredItems = (() => {
+    const today = startOfDayMs(new Date());
     const q = search.trim().toLowerCase();
     let arr = items.filter((t) => {
       if (filterPriority !== "all" && t.priority !== filterPriority) return false;
@@ -328,7 +334,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
       if (filterOverdue) {
         if (!t.due_date) return false;
         if (t.status === "done" || t.status === "cancelled") return false;
-        const due = new Date(t.due_date); due.setHours(0, 0, 0, 0);
+        const due = startOfDayMs(t.due_date);
         if (due >= today) return false;
       }
       if (q) {
@@ -354,7 +360,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
       }
     });
     return arr;
-  }, [items, search, filterPriority, filterAssignee, filterLabel, filterOverdue, filterSprint, sortKey]);
+  })();
 
   const activeTask = useMemo(() => items.find((t) => t.id === activeId) ?? null, [items, activeId]);
 
