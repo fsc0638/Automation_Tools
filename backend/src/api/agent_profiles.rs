@@ -23,6 +23,7 @@ pub struct CreateAgentProfileRequest {
     pub role_prompt: Option<String>,
     pub api_key: String,
     pub enabled: Option<bool>,
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +35,7 @@ pub struct UpdateAgentProfileRequest {
     pub role_prompt: Option<String>,
     pub api_key: Option<String>,
     pub enabled: Option<bool>,
+    pub labels: Option<Vec<String>>,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -74,9 +76,10 @@ async fn create_profile(
         .encrypt(api_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("agent key encryption failed: {}", e)))?;
 
+    let labels = req.labels.unwrap_or_default();
     let profile: AgentProfile = sqlx::query_as(
-        "INSERT INTO agent_profiles (user_id, name, provider, model, base_url, role_prompt, api_key, enabled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "INSERT INTO agent_profiles (user_id, name, provider, model, base_url, role_prompt, api_key, enabled, labels)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING *",
     )
     .bind(auth_user.id)
@@ -87,6 +90,7 @@ async fn create_profile(
     .bind(req.role_prompt.unwrap_or_default())
     .bind(encrypted_key)
     .bind(req.enabled.unwrap_or(true))
+    .bind(&labels)
     .fetch_one(&state.db)
     .await?;
 
@@ -126,10 +130,12 @@ async fn update_profile(
         None => existing.api_key,
     };
 
+    let labels = req.labels.unwrap_or(existing.labels);
     let profile: AgentProfile = sqlx::query_as(
         "UPDATE agent_profiles
          SET name = $3, provider = $4, model = $5, base_url = $6,
-             role_prompt = $7, api_key = $8, enabled = $9, updated_at = NOW()
+             role_prompt = $7, api_key = $8, enabled = $9, labels = $10,
+             updated_at = NOW()
          WHERE id = $1 AND user_id = $2
          RETURNING *",
     )
@@ -142,6 +148,7 @@ async fn update_profile(
     .bind(req.role_prompt.unwrap_or(existing.role_prompt))
     .bind(api_key)
     .bind(req.enabled.unwrap_or(existing.enabled))
+    .bind(&labels)
     .fetch_one(&state.db)
     .await?;
 

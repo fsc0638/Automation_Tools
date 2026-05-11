@@ -56,6 +56,9 @@ pub struct ProjectTask {
     /// Count of task_comments. Always present (COALESCE 0). Lets the
     /// Roadmap card show a "💬 N" chip without a per-card fetch.
     pub comment_count: i64,
+    // B3: cross-project epic binding (nullable)
+    pub epic_id: Option<Uuid>,
+    pub epic_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -69,10 +72,12 @@ const TASK_SELECT: &str = "SELECT t.id, t.project_id, t.title, t.why, t.affected
         t.depends_on,
         t.sprint_id, sp.name AS sprint_name,
         COALESCE(cc.n, 0) AS comment_count,
+        t.epic_id, ep.name AS epic_name,
         t.created_at, t.updated_at
      FROM project_tasks t
      LEFT JOIN messages m ON m.id = t.source_message_id
      LEFT JOIN sprints  sp ON sp.id = t.sprint_id
+     LEFT JOIN epics    ep ON ep.id = t.epic_id
      LEFT JOIN (
         SELECT task_id, COUNT(*)::int8 AS n FROM task_comments GROUP BY task_id
      ) cc ON cc.task_id = t.id";
@@ -97,6 +102,7 @@ pub struct CreateTask {
     pub linked_commit_sha: Option<String>,
     pub depends_on: Option<Vec<Uuid>>,
     pub sprint_id: Option<Uuid>,
+    pub epic_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +129,10 @@ pub struct UpdateTask {
     /// a UUID to set. Omit to leave alone.
     #[serde(default, deserialize_with = "deserialize_some")]
     pub sprint_id: Option<Option<Uuid>>,
+    /// B3: same double-Option pattern as sprint_id — null clears the
+    /// epic binding, value sets it, absent leaves it alone.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub epic_id: Option<Option<Uuid>>,
     /// Optional explanation attached to a status transition; recorded
     /// in task_status_history. Ignored when status doesn't actually change.
     pub status_note: Option<String>,
@@ -291,9 +301,9 @@ async fn create_task(
           estimated_effort, priority, source_message_id,
           assignee, due_date, test_plan, rollback_plan, definition_of_done, labels,
           acceptance_criteria_v2, linked_pr_url, linked_commit_sha, depends_on,
-          sprint_id)
+          sprint_id, epic_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                 $15, $16, $17, $18, $19)
+                 $15, $16, $17, $18, $19, $20)
          RETURNING id",
     )
     .bind(project_id)
@@ -315,6 +325,7 @@ async fn create_task(
     .bind(req.linked_commit_sha.as_deref())
     .bind(&depends_on)
     .bind(req.sprint_id)
+    .bind(req.epic_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -391,11 +402,14 @@ async fn update_task(
         }
     }
 
-    // sprint_id uses double-Option so the client can distinguish
-    // "leave alone" (absent / None) from "clear" (explicit null / Some(None)).
-    // The SQL uses CASE WHEN $20 THEN $21 ELSE sprint_id END so $21 may be NULL.
+    // sprint_id and epic_id both use double-Option semantics so the
+    // client can distinguish "leave alone" (absent / None) from "clear"
+    // (explicit null / Some(None)). SQL uses CASE WHEN $set THEN $val
+    // ELSE col END so $val may be NULL.
     let sprint_set = req.sprint_id.is_some();
     let sprint_val: Option<Uuid> = req.sprint_id.unwrap_or(None);
+    let epic_set   = req.epic_id.is_some();
+    let epic_val: Option<Uuid> = req.epic_id.unwrap_or(None);
 
     let updated: Option<(Uuid,)> = sqlx::query_as(
         "UPDATE project_tasks SET
@@ -417,6 +431,7 @@ async fn update_task(
             linked_commit_sha = COALESCE($16, linked_commit_sha),
             depends_on = COALESCE($17, depends_on),
             sprint_id = CASE WHEN $20 THEN $21 ELSE sprint_id END,
+            epic_id   = CASE WHEN $22 THEN $23 ELSE epic_id   END,
             updated_at = NOW()
          WHERE id = $18 AND project_id = $19
          RETURNING id",
@@ -442,6 +457,8 @@ async fn update_task(
     .bind(project_id)
     .bind(sprint_set)
     .bind(sprint_val)
+    .bind(epic_set)
+    .bind(epic_val)
     .fetch_optional(&state.db)
     .await?;
 

@@ -9,13 +9,16 @@ pub mod auth;
 pub mod agent_profiles;
 pub mod conversation_memory;
 pub mod conversations;
+pub mod epics;
 pub mod feedback;
 pub mod git_identities;
 pub mod metrics;
 pub mod project_index;
 pub mod projects;
+pub mod shared_memory;
 pub mod sprints;
 pub mod tasks;
+pub mod user_views;
 pub mod ws;
 
 #[derive(Clone)]
@@ -60,6 +63,9 @@ pub fn router(state: AppState) -> Router {
         .merge(metrics::routes())
         .merge(tasks::routes())
         .merge(sprints::routes())
+        .merge(epics::routes())
+        .merge(shared_memory::routes())
+        .merge(user_views::routes())
         .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),

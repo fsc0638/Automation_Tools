@@ -348,6 +348,8 @@ export interface AgentProfile {
   base_url?: string | null;
   role_prompt: string;
   enabled: boolean;
+  /** B7: free-form labels for grouping agents on the /agents page. */
+  labels: string[];
   created_at: string;
   updated_at: string;
 }
@@ -360,6 +362,7 @@ export interface CreateAgentProfileInput {
   role_prompt?: string;
   api_key: string;
   enabled?: boolean;
+  labels?: string[];
 }
 
 export interface UpdateAgentProfileInput {
@@ -369,6 +372,7 @@ export interface UpdateAgentProfileInput {
   base_url?: string;
   role_prompt?: string;
   api_key?: string;
+  labels?: string[];
   enabled?: boolean;
 }
 
@@ -435,6 +439,9 @@ export interface ProjectTask {
   sprint_name?: string | null;
   /** Server-computed via task_comments JOIN. Updated when re-listing. */
   comment_count?: number;
+  // B3 epic binding (cross-project)
+  epic_id?: string | null;
+  epic_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -458,6 +465,7 @@ export interface CreateTaskInput {
   linked_commit_sha?: string;
   depends_on?: string[];
   sprint_id?: string;
+  epic_id?: string;
 }
 
 export interface UpdateTaskInput {
@@ -481,6 +489,8 @@ export interface UpdateTaskInput {
   /** P3: send a UUID string to bind to a sprint, send `null` to clear,
    *  omit to leave alone. */
   sprint_id?: string | null;
+  /** B3: same semantics as sprint_id, for cross-project epic binding. */
+  epic_id?: string | null;
   status_note?: string;
 }
 
@@ -539,6 +549,169 @@ export interface UpdateSprintInput {
   end_date?: string;
   status?: "planned" | "active" | "closed";
 }
+
+// ---------------------------------------------------------------
+// B3 Epics — user-scoped cross-project milestone buckets
+// ---------------------------------------------------------------
+export interface Epic {
+  id: string;
+  user_id: string;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  status: "planned" | "active" | "done" | "archived";
+  target_date?: string | null;
+  task_total: number;
+  task_done: number;
+  project_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateEpicInput {
+  name: string;
+  description?: string;
+  color?: string;
+  status?: Epic["status"];
+  target_date?: string;
+}
+export interface UpdateEpicInput {
+  name?: string;
+  description?: string;
+  color?: string;
+  status?: Epic["status"];
+  target_date?: string;
+}
+
+export const epics = {
+  list: () => request<Epic[]>("/epics"),
+  create: (data: CreateEpicInput) =>
+    request<Epic>("/epics", { method: "POST", body: JSON.stringify(data) }),
+  update: (id: string, data: UpdateEpicInput) =>
+    request<Epic>(`/epics/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/epics/${id}`, { method: "DELETE" }),
+};
+
+// ---------------------------------------------------------------
+// B6 Shared memory notes
+// ---------------------------------------------------------------
+export interface SharedMemoryNote {
+  id: string;
+  user_id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  scope_projects: string[];
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+}
+export interface CreateNoteInput {
+  title: string;
+  body: string;
+  tags?: string[];
+  scope_projects?: string[];
+  pinned?: boolean;
+}
+export interface UpdateNoteInput {
+  title?: string;
+  body?: string;
+  tags?: string[];
+  scope_projects?: string[];
+  pinned?: boolean;
+}
+export const sharedMemory = {
+  list: (opts?: { projectId?: string; q?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.projectId) params.set("project_id", opts.projectId);
+    if (opts?.q) params.set("q", opts.q);
+    const qs = params.toString();
+    return request<SharedMemoryNote[]>(`/memory${qs ? `?${qs}` : ""}`);
+  },
+  create: (data: CreateNoteInput) =>
+    request<SharedMemoryNote>("/memory", { method: "POST", body: JSON.stringify(data) }),
+  update: (id: string, data: UpdateNoteInput) =>
+    request<SharedMemoryNote>(`/memory/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/memory/${id}`, { method: "DELETE" }),
+};
+
+// ---------------------------------------------------------------
+// User-level cross-project views (B1, B2, B4, B5)
+// ---------------------------------------------------------------
+export interface UserTask {
+  id: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assignee?: string | null;
+  due_date?: string | null;
+  labels: string[];
+  sprint_id?: string | null;
+  sprint_name?: string | null;
+  epic_id?: string | null;
+  epic_name?: string | null;
+  linked_pr_url?: string | null;
+  comment_count: number;
+  updated_at: string;
+}
+export interface ProjectUsage {
+  project_id: string;
+  project_name: string;
+  calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+}
+export interface UserUsage {
+  by_project: ProjectUsage[];
+  total_calls: number;
+  total_tokens_in: number;
+  total_tokens_out: number;
+  total_cost_usd: number;
+  daily: Array<{ day: string; calls: number; cost_usd: number }>;
+}
+export interface ConvHit {
+  conversation_id: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  mode: string;
+  message_id?: string | null;
+  snippet?: string | null;
+  updated_at: string;
+}
+export interface FileHit {
+  project_id: string;
+  project_name: string;
+  path: string;
+  size_bytes?: number | null;
+}
+export const userViews = {
+  tasks: (opts?: { projectId?: string; epicId?: string; status?: string; assignee?: string; label?: string; q?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.projectId) params.set("project_id", opts.projectId);
+    if (opts?.epicId) params.set("epic_id", opts.epicId);
+    if (opts?.status) params.set("status", opts.status);
+    if (opts?.assignee) params.set("assignee", opts.assignee);
+    if (opts?.label) params.set("label", opts.label);
+    if (opts?.q) params.set("q", opts.q);
+    const qs = params.toString();
+    return request<UserTask[]>(`/user/tasks${qs ? `?${qs}` : ""}`);
+  },
+  usage: () => request<UserUsage>("/user/usage"),
+  conversations: (q: string, limit?: number) => {
+    const params = new URLSearchParams({ q });
+    if (limit) params.set("limit", String(limit));
+    return request<ConvHit[]>(`/user/conversations?${params}`);
+  },
+  code: (q: string, limit?: number) => {
+    const params = new URLSearchParams({ q });
+    if (limit) params.set("limit", String(limit));
+    return request<FileHit[]>(`/user/code?${params}`);
+  },
+};
 
 export const sprints = {
   list: (projectId: string) =>

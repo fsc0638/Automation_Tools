@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Bot, FolderOpen, LogOut, Sparkles, UserCog } from "lucide-react";
+import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, Sparkles, Target, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { auth } from "@/lib/api";
@@ -20,6 +20,36 @@ export function Sidebar() {
       label: t("sidebar.projects"),
       description: t("sidebar.projectsDesc"),
       icon: FolderOpen,
+    },
+    {
+      href: "/roadmap",
+      label: t("sidebar.globalRoadmap"),
+      description: t("sidebar.globalRoadmapDesc"),
+      icon: MapIcon,
+    },
+    {
+      href: "/insights",
+      label: t("sidebar.globalInsights"),
+      description: t("sidebar.globalInsightsDesc"),
+      icon: BarChart3,
+    },
+    {
+      href: "/search",
+      label: t("sidebar.globalSearch"),
+      description: t("sidebar.globalSearchDesc"),
+      icon: Search,
+    },
+    {
+      href: "/epics",
+      label: t("sidebar.epics"),
+      description: t("sidebar.epicsDesc"),
+      icon: Target,
+    },
+    {
+      href: "/memory",
+      label: t("sidebar.sharedMemory"),
+      description: t("sidebar.sharedMemoryDesc"),
+      icon: NotebookPen,
     },
     {
       href: "/agents",
