@@ -395,28 +395,28 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
     <div className="p-6 space-y-4 overflow-auto">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("roadmap.title")}</h2>
-          <p className="text-xs text-[#94A3B8]">{t("roadmap.subtitle")}</p>
+          <h2 className="type-section-title text-[1.4rem]">{t("roadmap.title")}</h2>
+          <p className="mt-1 text-[13px] leading-6 text-[#94A3B8]">{t("roadmap.subtitle")}</p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">{t("common.refresh")}</button>
+          <button onClick={() => void refresh()} className="text-[13px] text-[#0050A0] hover:underline">{t("common.refresh")}</button>
           <button
             onClick={() => exportTasks("csv")}
-            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-xs text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 py-1.5 text-[13px] text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
             title={t("roadmap.exportCsv")}
           >
             <Download size={12} /> CSV
           </button>
           <button
             onClick={() => exportTasks("json")}
-            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-xs text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 py-1.5 text-[13px] text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
             title={t("roadmap.exportJson")}
           >
             <Download size={12} /> JSON
           </button>
           <button
             onClick={() => setShowNew((v) => !v)}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium hover:bg-[#003B7A]"
+            className="flex items-center gap-1 rounded-lg bg-[#0050A0] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#003B7A]"
           >
             <Plus size={12} /> {t("roadmap.newTask")}
           </button>
@@ -443,7 +443,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t("roadmap.searchPlaceholder")}
-              className="flex-1 bg-transparent text-xs outline-none placeholder:text-[#94A3B8]"
+              className="flex-1 bg-transparent text-[14px] outline-none placeholder:text-[#94A3B8]"
             />
             {search && (
               <button onClick={() => setSearch("")} className="text-[#94A3B8] hover:text-[#1A1A2E]">
@@ -454,7 +454,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           <select
             value={sortKey}
             onChange={(e) => setSortKey(e.target.value as SortKey)}
-            className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs"
+            className="h-9 rounded-lg border border-[#E2E8F0] bg-white px-3 text-[13px]"
             title={t("roadmap.sortBy")}
           >
             <option value="priority">{t("roadmap.sortPriority")}</option>
@@ -464,7 +464,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
             <option value="updated">{t("roadmap.sortUpdated")}</option>
           </select>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2 text-[13px]">
           <Filter size={11} className="text-[#94A3B8]" />
           <select
             value={filterPriority}
@@ -535,7 +535,7 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
                 setFilterLabelRaw("all"); setFilterOverdueRaw(false); setFilterSprintRaw("all");
                 resetPersistedFilters(projectId);
               }}
-              className="text-[11px] text-[#0050A0] hover:underline"
+              className="text-[13px] text-[#0050A0] hover:underline"
             >
               {t("roadmap.clearFilters")}
             </button>
@@ -580,45 +580,45 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               value={draft.assignee}
               onChange={(e) => setDraft({ ...draft, assignee: e.target.value })}
               placeholder={t("roadmap.assigneeHint")}
-              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+              className="h-10 rounded-lg border border-[#E2E8F0] px-3 text-[14px]"
             />
             <input
               type="date"
               value={draft.due_date}
               onChange={(e) => setDraft({ ...draft, due_date: e.target.value })}
-              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+              className="h-10 rounded-lg border border-[#E2E8F0] px-3 text-[14px]"
             />
             <input
               value={draft.labels}
               onChange={(e) => setDraft({ ...draft, labels: e.target.value })}
               placeholder={t("roadmap.labelsHint")}
-              className="h-9 px-3 rounded-md border border-[#E2E8F0] text-xs"
+              className="h-10 rounded-lg border border-[#E2E8F0] px-3 text-[14px]"
             />
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-xs text-[#64748B]">{t("roadmap.priority")}:</label>
+            <label className="text-[13px] text-[#64748B]">{t("roadmap.priority")}:</label>
             <select
               value={draft.priority}
               onChange={(e) => setDraft({ ...draft, priority: e.target.value as TaskPriority })}
-              className="h-8 px-2 text-xs rounded-md border border-[#E2E8F0]"
+              className="h-9 rounded-lg border border-[#E2E8F0] px-3 text-[13px]"
             >
               <option value="low">{t("roadmap.priorityLow")}</option>
               <option value="medium">{t("roadmap.priorityMedium")}</option>
               <option value="high">{t("roadmap.priorityHigh")}</option>
               <option value="critical">{t("roadmap.priorityCritical")}</option>
             </select>
-            <label className="text-xs text-[#64748B]">{t("roadmap.effort")}:</label>
+            <label className="text-[13px] text-[#64748B]">{t("roadmap.effort")}:</label>
             <input
               value={draft.estimated_effort}
               onChange={(e) => setDraft({ ...draft, estimated_effort: e.target.value })}
               placeholder="S / M / L / 2d"
-              className="h-8 w-24 px-2 text-xs rounded-md border border-[#E2E8F0]"
+              className="h-9 w-24 rounded-lg border border-[#E2E8F0] px-3 text-[13px]"
             />
-            <label className="text-xs text-[#64748B]">{t("roadmap.sprint")}:</label>
+            <label className="text-[13px] text-[#64748B]">{t("roadmap.sprint")}:</label>
             <select
               value={draft.sprint_id}
               onChange={(e) => setDraft({ ...draft, sprint_id: e.target.value })}
-              className="h-8 px-2 text-xs rounded-md border border-[#E2E8F0] max-w-[160px]"
+              className="h-9 max-w-[160px] rounded-lg border border-[#E2E8F0] px-3 text-[13px]"
             >
               <option value="">{t("roadmap.sprintBacklog")}</option>
               {sprintsWithLiveCounts.filter((s) => s.status !== "closed").map((s) => (
@@ -649,8 +649,8 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
               }`}
             >
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">{col.label}</span>
-                <span className="text-xs text-[#94A3B8]">{grouped[col.key].length}</span>
+                <span className="text-[12px] font-semibold text-[#64748B] tracking-[0.05em]">{col.label}</span>
+                <span className="text-[12px] text-[#94A3B8]">{grouped[col.key].length}</span>
               </div>
               <div className="space-y-2">
                 {grouped[col.key].map((tk) => (
@@ -781,14 +781,14 @@ function TaskCard({
           <Trash2 size={12} />
         </button>
       </div>
-      {task.why && <div className="text-xs text-[#64748B] mt-1 line-clamp-3">{task.why}</div>}
+      {task.why && <div className="mt-1 text-[13px] leading-6 text-[#64748B] line-clamp-3">{task.why}</div>}
       {task.acceptance_criteria && (
-        <div className="mt-2 rounded-sm border-l-2 border-emerald-300 bg-emerald-50/60 px-2 py-1 text-[11px] text-emerald-900 line-clamp-2">
+        <div className="mt-2 rounded-md border-l-2 border-emerald-300 bg-emerald-50/60 px-3 py-2 text-[12px] leading-5 text-emerald-900 line-clamp-2">
           AC: {task.acceptance_criteria}
         </div>
       )}
       {task.affected_files && task.affected_files.length > 0 && (
-        <div className="mt-2 text-[10px] text-[#0050A0] font-mono">
+        <div className="mt-2 text-[12px] text-[#0050A0] font-mono">
           {task.affected_files.slice(0, 3).join(", ")}
           {task.affected_files.length > 3 && ` +${task.affected_files.length - 3}`}
         </div>
@@ -796,21 +796,21 @@ function TaskCard({
       {task.labels && task.labels.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1">
           {task.labels.slice(0, 4).map((l) => (
-            <span key={l} className="inline-flex items-center gap-0.5 rounded-full bg-[#EEF2FF] px-1.5 py-0.5 text-[10px] text-[#3730A3]">
+            <span key={l} className="inline-flex items-center gap-0.5 rounded-full bg-[#EEF2FF] px-2 py-1 text-[12px] text-[#3730A3]">
               <Tag size={9} /> {l}
             </span>
           ))}
           {task.labels.length > 4 && (
-            <span className="text-[10px] text-[#94A3B8]">+{task.labels.length - 4}</span>
+            <span className="text-[12px] text-[#94A3B8]">+{task.labels.length - 4}</span>
           )}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-1.5 mt-2">
-        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>
+        <span className={`rounded-full px-2 py-1 text-[12px] ${PRIORITY_BADGE[task.priority]}`}>
           {task.priority}
         </span>
         {task.estimated_effort && (
-          <span className="text-[10px] text-[#94A3B8]">{task.estimated_effort}</span>
+          <span className="text-[12px] text-[#94A3B8]">{task.estimated_effort}</span>
         )}
         {task.assignee && (
           <span className="text-[10px] rounded-full bg-slate-100 px-1.5 py-0.5 text-slate-700">
@@ -849,7 +849,7 @@ function TaskCard({
         {next && (
           <button
             onClick={(e) => { e.stopPropagation(); void onMove(task, next); }}
-            className="text-[11px] text-[#0050A0] hover:underline"
+            className="text-[13px] text-[#0050A0] hover:underline"
           >
             → {next}
           </button>
@@ -1469,7 +1469,7 @@ function TaskDetailDrawer({
                 <select
                   value={dispatchMode}
                   onChange={(e) => setDispatchMode(e.target.value)}
-                  className="h-8 rounded-md border border-[#E2E8F0] bg-white px-2 text-xs"
+                  className="h-9 rounded-lg border border-[#E2E8F0] bg-white px-3 text-[13px]"
                 >
                   <option value="openclaw">OpenClaw</option>
                   <option value="hermes">Hermes</option>
@@ -1504,9 +1504,9 @@ function TaskDetailDrawer({
             {showAttempts && (
               <div className="px-3 py-2">
                 {attempts === null ? (
-                  <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("common.loading")}</div>
                 ) : attempts.length === 0 ? (
-                  <div className="text-xs text-[#94A3B8]">{t("roadmap.attemptsEmpty")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("roadmap.attemptsEmpty")}</div>
                 ) : (
                   <ul className="space-y-1 text-xs">
                     {attempts.map((a) => {
@@ -1569,16 +1569,16 @@ function TaskDetailDrawer({
             </div>
             <div className="px-3 py-2 space-y-2">
               {comments === null ? (
-                <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                <div className="text-[12px] text-[#94A3B8]">{t("common.loading")}</div>
               ) : comments.length === 0 ? (
-                <div className="text-xs text-[#94A3B8]">{t("roadmap.commentsEmpty")}</div>
+                <div className="text-[12px] text-[#94A3B8]">{t("roadmap.commentsEmpty")}</div>
               ) : (
                 <ul className="space-y-2">
                   {comments.map((c) => (
                     <li key={c.id} className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
                       <div className="flex items-baseline justify-between gap-2 text-[11px]">
                         <span className="font-semibold text-[#1A1A2E]">{c.author_name ?? t("roadmap.unknownAuthor")}</span>
-                        <span className="text-[10px] text-[#94A3B8]">
+                        <span className="text-[12px] text-[#94A3B8]">
                           {new Date(c.created_at).toLocaleString()}
                           {c.updated_at !== c.created_at && (
                             <span className="ml-1 italic">({t("roadmap.edited")})</span>
@@ -1676,9 +1676,9 @@ function TaskDetailDrawer({
             {showHistory && (
               <div className="px-3 py-2">
                 {history === null ? (
-                  <div className="text-xs text-[#94A3B8]">{t("common.loading")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("common.loading")}</div>
                 ) : history.length === 0 ? (
-                  <div className="text-xs text-[#94A3B8]">{t("roadmap.historyEmpty")}</div>
+                  <div className="text-[12px] text-[#94A3B8]">{t("roadmap.historyEmpty")}</div>
                 ) : (
                   <ul className="space-y-1 text-xs">
                     {history.map((h) => (
@@ -1818,7 +1818,7 @@ function SprintManagerModal({
 
         <div className="max-h-[420px] overflow-y-auto px-5 py-4 space-y-3">
           {sprints.length === 0 ? (
-            <div className="text-xs text-[#94A3B8]">{t("roadmap.sprintsEmpty")}</div>
+            <div className="text-[12px] text-[#94A3B8]">{t("roadmap.sprintsEmpty")}</div>
           ) : (
             <ul className="space-y-2">
               {sprints.map((s) => (

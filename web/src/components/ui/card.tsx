@@ -32,7 +32,7 @@ export function CardHeader({ className, children, ...props }: HTMLAttributes<HTM
 
 export function CardContent({ className, children, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={cn("px-6 py-4", className)} {...props}>
+    <div className={cn("px-6 py-5", className)} {...props}>
       {children}
     </div>
   );
@@ -50,9 +50,9 @@ export function SectionEmpty({
   className?: string;
 }) {
   return (
-    <div className={cn("rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] px-4 py-8 text-center", className)}>
-      <div className="text-sm font-medium text-[#475569]">{title}</div>
-      <div className="mt-2 text-sm text-[#94A3B8]">{description}</div>
+    <div className={cn("rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] px-5 py-8 text-center", className)}>
+      <div className="type-card-title text-[#475569]">{title}</div>
+      <div className="type-body-muted mt-2 text-[#94A3B8]">{description}</div>
       {action && <div className="mt-4 flex justify-center">{action}</div>}
     </div>
   );
@@ -81,8 +81,8 @@ export function InlineBanner({
 
   return (
     <div className={cn("rounded-2xl border px-4 py-3", toneClass)}>
-      <div className="text-sm font-semibold">{title}</div>
-      {description && <div className="mt-1 text-sm opacity-90">{description}</div>}
+      <div className="text-[14px] font-semibold tracking-[-0.01em]">{title}</div>
+      {description && <div className="mt-1 text-[13px] leading-6 opacity-90">{description}</div>}
     </div>
   );
 }

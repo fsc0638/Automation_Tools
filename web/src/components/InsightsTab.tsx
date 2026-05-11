@@ -70,12 +70,12 @@ export function InsightsTab({ projectId }: { projectId: string }) {
   const { totals, mode_distribution, avg_chars_by_agent, consensus, debate_round_distribution, timing, file_citation, feedback_by_agent } = metrics;
 
   return (
-    <div className="p-6 space-y-6 overflow-auto">
+    <div className="space-y-6 overflow-auto p-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("insights.title")}</h2>
+        <h2 className="type-section-title text-[1.4rem]">{t("insights.title")}</h2>
         <button
           onClick={() => void refresh()}
-          className="text-xs text-[#0050A0] hover:underline"
+          className="text-[13px] text-[#0050A0] hover:underline"
         >
           {t("common.refresh")}
         </button>
@@ -88,7 +88,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
               <div className={`text-5xl font-bold ${
                 health.score >= 80 ? "text-[#10B981]" : health.score >= 50 ? "text-[#F59E0B]" : "text-[#C8102E]"
               }`}>{health.score}</div>
-              <div className="text-xs text-[#94A3B8] mt-1">/ 100</div>
+              <div className="mt-1 text-[12px] text-[#94A3B8]">/ 100</div>
             </div>
             <div className="flex-1 w-full">
               <ResponsiveContainer width="100%" height={220}>
@@ -102,19 +102,19 @@ export function InsightsTab({ projectId }: { projectId: string }) {
               </ResponsiveContainer>
             </div>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-2 mt-3 text-xs">
+          <div className="mt-4 grid grid-cols-1 gap-3 text-[13px] md:grid-cols-5">
             {health.dimensions.map((d) => (
-              <div key={d.key} className="rounded-md bg-[#F8FAFC] p-2">
+              <div key={d.key} className="rounded-xl bg-[#F8FAFC] p-3">
                 <div className="flex items-center justify-between mb-0.5">
                   <span className="font-medium text-[#1A1A2E]">{d.label}</span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                  <span className={`rounded-full px-2 py-1 text-[12px] ${
                     d.level === "Low" ? "bg-green-100 text-green-700"
                     : d.level === "Medium" ? "bg-yellow-100 text-yellow-700"
                     : "bg-red-100 text-red-700"
                   }`}>{d.level}</span>
                 </div>
                 <div className="text-base font-semibold text-[#0050A0]">{d.score}</div>
-                <div className="text-[10px] text-[#94A3B8] mt-0.5 line-clamp-2">{d.evidence}</div>
+                <div className="mt-1 text-[12px] leading-5 text-[#94A3B8] line-clamp-2">{d.evidence}</div>
               </div>
             ))}
           </div>
