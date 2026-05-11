@@ -30,7 +30,7 @@ export default function RegisterPage() {
     setLoading(true);
     try {
       const res = await auth.register(form);
-      setAuth(res.access_token, res.user);
+      setAuth(res.access_token, res.user, res.refresh_token);
       router.push("/projects");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Registration failed");

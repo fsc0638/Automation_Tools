@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Bot, FolderOpen, LogOut, Sparkles, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
+import { auth } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { LocaleSwitcher } from "@/components/LocaleSwitcher";
 
@@ -29,6 +30,10 @@ export function Sidebar() {
   ];
 
   function handleLogout() {
+    // Fire-and-forget server-side invalidation so the refresh token
+    // becomes useless even if it's somehow exfiltrated; don't block
+    // the redirect on the network round-trip.
+    void auth.logout();
     logout();
     router.push("/login");
   }

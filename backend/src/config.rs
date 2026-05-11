@@ -9,6 +9,11 @@ pub struct Config {
     pub database_url: String,
     pub jwt_secret: String,
     pub jwt_expiry_hours: i64,
+    /// How long a refresh token lives. Access tokens stay short
+    /// (jwt_expiry_hours, default 24h); refresh tokens are long-lived
+    /// so users don't need to log in repeatedly while we keep the
+    /// access-token blast radius small.
+    pub refresh_token_expiry_days: i64,
     pub openclaw_api_url: String,
     pub openclaw_api_key: String,
     pub openclaw_model: String,
@@ -38,6 +43,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(24),
+            refresh_token_expiry_days: std::env::var("REFRESH_TOKEN_EXPIRY_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
             openclaw_api_url: std::env::var("OPENCLAW_API_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:18789/v1".into()),
             openclaw_api_key: std::env::var("OPENCLAW_API_KEY")

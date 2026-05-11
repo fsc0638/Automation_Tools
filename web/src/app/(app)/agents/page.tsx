@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Bot, Plus, Trash2 } from "lucide-react";
+import { Bot, KeyRound, Plus, Trash2, X } from "lucide-react";
 import { agentProfiles, type AgentProfile } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,9 @@ export default function AgentsPage() {
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [rotatingFor, setRotatingFor] = useState<AgentProfile | null>(null);
+  const [rotateInput, setRotateInput] = useState("");
+  const [rotating, setRotating] = useState(false);
 
   // Provider hints are translated at render time so they stay in sync
   // with the active locale (a const map outside the component would be
@@ -83,6 +86,42 @@ export default function AgentsPage() {
       pushToast({ tone: "error", title: t("agents.createFailedTitle"), description: message });
     } finally {
       setSaving(false);
+    }
+  }
+
+  function openRotate(profile: AgentProfile) {
+    setRotatingFor(profile);
+    setRotateInput("");
+  }
+  function closeRotate() {
+    setRotatingFor(null);
+    setRotateInput("");
+  }
+  async function submitRotate(e: FormEvent) {
+    e.preventDefault();
+    if (!rotatingFor) return;
+    const next = rotateInput.trim();
+    if (!next) return;
+    setRotating(true);
+    setError("");
+    try {
+      // Only api_key is sent — everything else server-side stays as-is
+      // because the backend PATCH falls back to existing fields when the
+      // request body omits them. The new key is encrypted with the same
+      // TokenCipher used elsewhere.
+      const updated = await agentProfiles.update(rotatingFor.id, { api_key: next });
+      setProfiles((items) => items.map((item) => item.id === updated.id ? updated : item));
+      pushToast({
+        tone: "success",
+        title: t("agents.rotateSuccessTitle"),
+        description: t("agents.rotateSuccessDesc").replace("{name}", updated.name),
+      });
+      closeRotate();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("agents.rotateFailedDesc");
+      setError(message);
+    } finally {
+      setRotating(false);
     }
   }
 
@@ -181,12 +220,46 @@ export default function AgentsPage() {
                 <Button variant="secondary" onClick={() => void toggleEnabled(profile)}>
                   {profile.enabled ? t("agents.disable") : t("agents.enable")}
                 </Button>
+                <Button variant="secondary" onClick={() => openRotate(profile)}>
+                  <KeyRound size={14} /> {t("agents.rotateKey")}
+                </Button>
                 <Button variant="secondary" onClick={() => void handleDelete(profile)}><Trash2 size={14} /> {t("common.delete")}</Button>
               </div>
             </div>
           </Card>
         ))}
       </section>
+
+      {rotatingFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={closeRotate}>
+          <div className="w-full max-w-md rounded-lg bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-[#E2E8F0] px-5 py-3">
+              <h3 className="text-sm font-semibold text-[#1A1A2E]">
+                <KeyRound size={14} className="inline mr-1" /> {t("agents.rotateKeyFor").replace("{name}", rotatingFor.name)}
+              </h3>
+              <button onClick={closeRotate} className="rounded-md p-1 text-[#64748B] hover:bg-[#F1F5F9]"><X size={16} /></button>
+            </div>
+            <form onSubmit={(e) => void submitRotate(e)} className="space-y-4 px-5 py-4">
+              <p className="text-xs text-[#64748B]">{t("agents.rotateHint")}</p>
+              <Input
+                id="rotate-key"
+                label={t("agents.newApiKey")}
+                type="password"
+                placeholder={t("agents.apiKeyPlaceholder")}
+                value={rotateInput}
+                onChange={(e) => setRotateInput(e.target.value)}
+                required
+                autoFocus
+              />
+              {error && <InlineBanner tone="error" title={t("agents.rotateFailedTitle")} description={error} />}
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={closeRotate}>{t("common.cancel")}</Button>
+                <Button type="submit" loading={rotating} disabled={!rotateInput.trim()}>{t("agents.rotateConfirm")}</Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

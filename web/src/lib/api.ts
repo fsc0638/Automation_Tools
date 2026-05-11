@@ -5,7 +5,51 @@ function getToken(): string | null {
   return localStorage.getItem("kway_token");
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+function getRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("kway_refresh_token");
+}
+
+function setSession(accessToken: string, refreshToken?: string) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("kway_token", accessToken);
+  if (refreshToken) localStorage.setItem("kway_refresh_token", refreshToken);
+}
+
+function clearSession() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("kway_token");
+  localStorage.removeItem("kway_refresh_token");
+}
+
+/** Single in-flight refresh — concurrent 401s share one fetch. */
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function tryRefresh(): Promise<boolean> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return false;
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) return false;
+      const data: { access_token: string; refresh_token: string } = await res.json();
+      setSession(data.access_token, data.refresh_token);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
+async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
   const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -16,17 +60,22 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     },
   });
 
-  // Auto-logout on expired/invalid session: when we sent a token but the
-  // server rejected it, clear local state and redirect to /login.
-  // Skipped for login/register pages so a wrong-password 401 stays as
-  // an inline form error rather than a redirect loop.
-  if (res.status === 401 && token && typeof window !== "undefined") {
+  // 401 path: try the refresh token once. If refresh succeeds, replay
+  // the original request transparently. If refresh fails (no refresh
+  // token, expired, server reject), fall through to the legacy logout
+  // behaviour below. Login/register endpoints skip this path entirely
+  // so a wrong-password 401 stays as a form error.
+  if (res.status === 401 && token && typeof window !== "undefined" && retry) {
     const currentPath = window.location.pathname;
-    if (currentPath !== "/login" && currentPath !== "/register") {
-      localStorage.removeItem("kway_token");
+    const isAuthEndpoint = path.startsWith("/auth/");
+    if (!isAuthEndpoint && currentPath !== "/login" && currentPath !== "/register") {
+      const refreshed = await tryRefresh();
+      if (refreshed) {
+        // Replay the original request with the new access token.
+        return request<T>(path, options, false);
+      }
+      clearSession();
       window.location.replace("/login");
-      // Block this promise so callers don't surface a runtime error during
-      // the brief moment before the navigation actually happens.
       return new Promise<T>(() => {});
     }
   }
@@ -42,16 +91,36 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 // Auth
 export const auth = {
   register: (data: { email: string; password: string; display_name: string }) =>
-    request<{ access_token: string; user: UserInfo }>("/auth/register", {
+    request<AuthResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify(data),
     }),
   login: (data: { email: string; password: string }) =>
-    request<{ access_token: string; user: UserInfo }>("/auth/login", {
+    request<AuthResponse>("/auth/login", {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  logout: () => {
+    const refreshToken = getRefreshToken();
+    clearSession();
+    if (!refreshToken) return Promise.resolve();
+    // Best-effort server-side invalidation. Even if this fails (network
+    // error, etc.) the local session is already gone.
+    return fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }).catch(() => undefined);
+  },
 };
+
+export interface AuthResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  refresh_expires_in: number;
+  user: UserInfo;
+}
 
 // Projects
 export const projects = {

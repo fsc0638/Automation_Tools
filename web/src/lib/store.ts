@@ -5,12 +5,13 @@ import type { UserInfo } from "./api";
 
 interface AuthStore {
   token: string | null;
+  refreshToken: string | null;
   user: UserInfo | null;
   /** False until zustand-persist has read localStorage. AppLayout uses
    *  this to avoid kicking the user to /login during the SSR→hydrate
    *  window when token is still default-null. */
   hasHydrated: boolean;
-  setAuth: (token: string, user: UserInfo) => void;
+  setAuth: (token: string, user: UserInfo, refreshToken?: string) => void;
   logout: () => void;
 }
 
@@ -23,15 +24,18 @@ export const useAuthStore = create<AuthStore>()(
   persist(
     (set) => ({
       token: null,
+      refreshToken: null,
       user: null,
       hasHydrated: false,
-      setAuth: (token, user) => {
+      setAuth: (token, user, refreshToken) => {
         localStorage.setItem("kway_token", token);
-        set({ token, user });
+        if (refreshToken) localStorage.setItem("kway_refresh_token", refreshToken);
+        set({ token, user, refreshToken: refreshToken ?? null });
       },
       logout: () => {
         localStorage.removeItem("kway_token");
-        set({ token: null, user: null });
+        localStorage.removeItem("kway_refresh_token");
+        set({ token: null, user: null, refreshToken: null });
       },
     }),
     {
@@ -39,13 +43,18 @@ export const useAuthStore = create<AuthStore>()(
       // hasHydrated isn't persisted — it's a transient runtime flag.
       // We flip it true once rehydration finishes (or fails) so consumers
       // know the localStorage read has completed.
-      partialize: (state) => ({ token: state.token, user: state.user }),
+      partialize: (state) => ({
+        token: state.token,
+        refreshToken: state.refreshToken,
+        user: state.user,
+      }),
       onRehydrateStorage: () => (state) => {
         if (state) {
           // Sync the legacy mirror so api.ts's getToken() also sees it
           // immediately after a fresh tab — without this, the first
           // request after F5 might still send no Authorization header.
           if (state.token) localStorage.setItem("kway_token", state.token);
+          if (state.refreshToken) localStorage.setItem("kway_refresh_token", state.refreshToken);
           state.hasHydrated = true;
         } else {
           // Even on failure we still need consumers to stop waiting.
