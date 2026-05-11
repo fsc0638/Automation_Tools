@@ -20,6 +20,14 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Dev console noise — what to ignore
+
+Some console warnings appear during development that are NOT bugs in this app:
+
+- **`Unchecked runtime.lastError: The message port closed before a response was received.`** — emitted by Chrome browser extensions (LastPass, Grammarly, MetaMask, etc.) trying to talk to their own background page. Has nothing to do with our WebSocket or fetch calls. Reproduces in a clean profile only if an extension is installed; disappears in Incognito with extensions disabled.
+- **`Hydration failed because the server rendered HTML didn't match the client. fdprocessedid="..."`** — injected by password managers / form-fill extensions onto `<input>` and `<button>` between SSR and client hydration. Suppressed at the component level via `suppressHydrationWarning`; if you still see it, the offending element is a raw `<input>` or `<button>` rather than the `ui/input.tsx` / `ui/button.tsx` wrappers — switch it over.
+- **`WebSocket is closed before the connection is established.`** — React 18+ StrictMode double-mounts effects in dev. The second mount's cleanup fires before the WS handshake completes. Handled by `safeCloseWs()` in `projects/[id]/page.tsx`; if you see this in production it's a real bug.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

@@ -16,7 +16,9 @@ use uuid::Uuid;
 use crate::{
     agents::{
         generic::AgentProfileRuntime,
-        orchestrator::{build_project_scope, run_agent_stream, AgentMode, ServerEvent},
+        orchestrator::{
+            build_project_scope, run_agent_stream, strip_role_prefix, AgentMode, ServerEvent,
+        },
     },
     api::{
         auth::verify_token,
@@ -278,6 +280,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                     let call_timing = timing.remove(&key);
                     if let Some(content) = buffers.remove(&key) {
                         if !content.trim().is_empty() {
+                            // Models occasionally mimic the `[Hermes]: ...` envelope
+                            // we use to label history turns. Strip it before persisting
+                            // so chat UI doesn't show the prefix to the user.
+                            let content = strip_role_prefix(&content);
                             let role = agent_role(agent);
                             let display_name = display_agent_name(agent, *round, phase.as_deref());
                             let saved_id: Option<(Uuid,)> = sqlx::query_as(

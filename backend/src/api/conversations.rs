@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    agents::orchestrator::{build_project_scope, run_agent_turn, AgentMode},
+    agents::orchestrator::{build_project_scope, run_agent_turn, strip_role_prefix, AgentMode},
     api::{
         auth::AuthUser,
         conversation_memory::{get_project_summary, load_project_history, refresh_project_summary},
@@ -240,6 +240,9 @@ async fn send_message(
 
     let mut saved_messages = vec![];
     for (role, content, agent_name) in &responses {
+        // Strip mimicked `[Hermes]: ...` envelope before persisting; matches
+        // the same hygiene applied on the streaming path in ws.rs.
+        let cleaned = strip_role_prefix(content);
         let msg: Message = sqlx::query_as(
             "INSERT INTO messages (conversation_id, role, content, agent_name)
              VALUES ($1, $2, $3, $4)
@@ -247,7 +250,7 @@ async fn send_message(
         )
         .bind(conv_id)
         .bind(role)
-        .bind(content)
+        .bind(&cleaned)
         .bind(agent_name)
         .fetch_one(&state.db)
         .await?;

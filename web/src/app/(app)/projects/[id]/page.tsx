@@ -243,6 +243,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const streamStatusesRef = useRef<Record<string, StreamStatus>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const [wsReconnectKey, setWsReconnectKey] = useState(0);
+
+  /**
+   * Close a WebSocket safely under React 18+ StrictMode double-mount. When
+   * the effect cleanup fires while the socket is still CONNECTING, calling
+   * `close()` produces the "WebSocket closed before the connection is
+   * established" console warning. Defer the close to the `open` event so
+   * the handshake completes first, then close cleanly.
+   */
+  function safeCloseWs(ws: WebSocket | null) {
+    if (!ws) return;
+    if (ws.readyState === WebSocket.CONNECTING) {
+      ws.addEventListener("open", () => ws.close(), { once: true });
+      return;
+    }
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close();
+    }
+  }
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -523,7 +541,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
   useEffect(() => {
     if (!activeConv) {
-      wsRef.current?.close();
+      safeCloseWs(wsRef.current);
       wsRef.current = null;
       return;
     }
@@ -642,7 +660,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     };
 
     return () => {
-      ws.close();
+      safeCloseWs(ws);
       if (wsRef.current === ws) wsRef.current = null;
       if (flushRafRef.current !== null) {
         cancelAnimationFrame(flushRafRef.current);
