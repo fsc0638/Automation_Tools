@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarRange, ExternalLink, Filter, GitBranch, GitPullRequest, History, Lock, MessageCircle, Plus, Search, Send, Tag, Trash2, X } from "lucide-react";
+import { CalendarRange, CheckSquare, Download, ExternalLink, Filter, GitBranch, GitPullRequest, History, Lock, MessageCircle, Plus, RefreshCcw, Search, Send, Square, Tag, Trash2, X } from "lucide-react";
 import {
   sprints as sprintsApi,
   tasks as tasksApi,
@@ -16,6 +16,7 @@ import {
   type UpdateTaskInput,
 } from "@/lib/api";
 import { useT } from "@/lib/i18n";
+import { useRoadmapFiltersStore } from "@/lib/store";
 
 const PRIORITY_BADGE: Record<TaskPriority, string> = {
   critical: "bg-red-100 text-red-700",
@@ -68,14 +69,39 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
   const [hoverCol, setHoverCol] = useState<TaskStatus | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
 
-  // Filter / sort state
-  const [search, setSearch] = useState("");
-  const [filterPriority, setFilterPriority] = useState<TaskPriority | "all">("all");
-  const [filterAssignee, setFilterAssignee] = useState<string>("all");
-  const [filterLabel, setFilterLabel] = useState<string>("all");
-  const [filterOverdue, setFilterOverdue] = useState(false);
-  const [filterSprint, setFilterSprint] = useState<string>("all");      // "all" | "none" | uuid
-  const [sortKey, setSortKey] = useState<SortKey>("priority");
+  // C1: bulk-selection model. selectedIds is a set of task ids; the
+  // bulk-action bar appears whenever it's non-empty.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const clearSelection = () => setSelectedIds(new Set());
+  const toggleSelected = (id: string) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  // Filter / sort state — persisted to localStorage per project so
+  // reloading or coming back later restores what the user had set
+  // (C2). We mirror the persisted values into local state for
+  // controlled inputs, and write back to the store on every change.
+  const persistedFilters = useRoadmapFiltersStore((s) => s.get(projectId));
+  const persistFilter = useRoadmapFiltersStore((s) => s.set);
+  const resetPersistedFilters = useRoadmapFiltersStore((s) => s.reset);
+  const [search, setSearchRaw] = useState(persistedFilters.search);
+  const [filterPriority, setFilterPriorityRaw] = useState<TaskPriority | "all">(persistedFilters.priority as TaskPriority | "all");
+  const [filterAssignee, setFilterAssigneeRaw] = useState<string>(persistedFilters.assignee);
+  const [filterLabel, setFilterLabelRaw] = useState<string>(persistedFilters.label);
+  const [filterOverdue, setFilterOverdueRaw] = useState(persistedFilters.overdue);
+  const [filterSprint, setFilterSprintRaw] = useState<string>(persistedFilters.sprint);
+  const [sortKey, setSortKeyRaw] = useState<SortKey>(persistedFilters.sort as SortKey);
+
+  // Wrap setters so every change also writes to the store.
+  const setSearch = (v: string) => { setSearchRaw(v); persistFilter(projectId, { search: v }); };
+  const setFilterPriority = (v: TaskPriority | "all") => { setFilterPriorityRaw(v); persistFilter(projectId, { priority: v }); };
+  const setFilterAssignee = (v: string) => { setFilterAssigneeRaw(v); persistFilter(projectId, { assignee: v }); };
+  const setFilterLabel    = (v: string) => { setFilterLabelRaw(v);    persistFilter(projectId, { label: v }); };
+  const setFilterOverdue  = (v: boolean) => { setFilterOverdueRaw(v); persistFilter(projectId, { overdue: v }); };
+  const setFilterSprint   = (v: string) => { setFilterSprintRaw(v);   persistFilter(projectId, { sprint: v }); };
+  const setSortKey        = (v: SortKey) => { setSortKeyRaw(v);       persistFilter(projectId, { sort: v }); };
 
   // Sprint state
   const [sprintList, setSprintList] = useState<Sprint[]>([]);
@@ -116,6 +142,91 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
     const timer = window.setTimeout(() => { void refresh(); }, 0);
     return () => window.clearTimeout(timer);
   }, [refresh]);
+
+  // C3: lightweight polling so a second user's edits show up without
+  // a manual refresh. 30s interval, paused while the tab is hidden
+  // (Page Visibility API) so background tabs don't burn requests. We
+  // skip the refresh while the drawer is open to avoid yanking the
+  // user's in-progress edit out from under them.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      if (document.hidden) return;
+      if (activeId) return; // someone is editing — wait
+      void refresh();
+    };
+    const handle = window.setInterval(tick, 30_000);
+    return () => { cancelled = true; window.clearInterval(handle); };
+  }, [refresh, activeId]);
+
+  // ----- C4: export -----------------------------------------------------
+  function downloadBlob(content: string, mime: string, filename: string) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+  function csvField(value: unknown): string {
+    if (value === null || value === undefined) return "";
+    let s = Array.isArray(value) ? value.join("|") : String(value);
+    // RFC 4180-ish: wrap in quotes if it contains a comma / quote / newline,
+    // and double-up any embedded quotes.
+    if (/[",\n\r]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+  function exportTasks(format: "csv" | "json") {
+    // Export only the currently filtered set so what the user sees is
+    // what they get. Falls back to all items if no filters applied.
+    const rows = filteredItems.length > 0 ? filteredItems : items;
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    if (format === "json") {
+      downloadBlob(JSON.stringify(rows, null, 2), "application/json", `roadmap-${projectId.slice(0, 8)}-${ts}.json`);
+      return;
+    }
+    const headers = [
+      "id", "title", "status", "priority", "assignee", "due_date",
+      "labels", "sprint_name", "epic_name", "estimated_effort",
+      "linked_pr_url", "linked_commit_sha", "why", "acceptance_criteria",
+      "created_at", "updated_at",
+    ];
+    const lines = [headers.join(",")];
+    for (const r of rows) {
+      lines.push(headers.map((h) => csvField((r as unknown as Record<string, unknown>)[h])).join(","));
+    }
+    downloadBlob(lines.join("\n"), "text/csv", `roadmap-${projectId.slice(0, 8)}-${ts}.csv`);
+  }
+
+  // ----- C1: bulk operations -------------------------------------------
+  async function bulkApply(patch: UpdateTaskInput) {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    // Fire updates in parallel; collect successful + failed counts.
+    let ok = 0, fail = 0;
+    await Promise.all(ids.map(async (id) => {
+      try { await tasksApi.update(projectId, id, patch); ok += 1; }
+      catch { fail += 1; }
+    }));
+    await refresh();
+    clearSelection();
+    if (fail > 0) {
+      setErr(`${ok} updated, ${fail} failed`);
+    }
+  }
+  async function bulkDelete() {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} task(s)?`)) return;
+    const ids = Array.from(selectedIds);
+    await Promise.all(ids.map((id) => tasksApi.delete(projectId, id).catch(() => undefined)));
+    await refresh();
+    clearSelection();
+  }
 
   async function createTask(e: React.FormEvent) {
     e.preventDefault();
@@ -287,8 +398,22 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           <h2 className="text-lg font-semibold text-[#1A1A2E]">{t("roadmap.title")}</h2>
           <p className="text-xs text-[#94A3B8]">{t("roadmap.subtitle")}</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
           <button onClick={() => void refresh()} className="text-xs text-[#0050A0] hover:underline">{t("common.refresh")}</button>
+          <button
+            onClick={() => exportTasks("csv")}
+            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-xs text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            title={t("roadmap.exportCsv")}
+          >
+            <Download size={12} /> CSV
+          </button>
+          <button
+            onClick={() => exportTasks("json")}
+            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-xs text-[#475569] hover:border-[#0050A0] hover:text-[#0050A0]"
+            title={t("roadmap.exportJson")}
+          >
+            <Download size={12} /> JSON
+          </button>
           <button
             onClick={() => setShowNew((v) => !v)}
             className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-[#0050A0] text-white text-xs font-medium hover:bg-[#003B7A]"
@@ -297,6 +422,17 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           </button>
         </div>
       </div>
+
+      {selectedIds.size > 0 && (
+        <BulkActionBar
+          count={selectedIds.size}
+          sprintList={sprintsWithLiveCounts}
+          onClear={clearSelection}
+          onSelectAll={() => setSelectedIds(new Set(filteredItems.map((tk) => tk.id)))}
+          onBulkApply={bulkApply}
+          onBulkDelete={() => void bulkDelete()}
+        />
+      )}
 
       {/* Toolbar: search + filters + sort */}
       <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 space-y-2">
@@ -392,7 +528,12 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
           {filtersActive && (
             <button
               onClick={() => {
-                setSearch(""); setFilterPriority("all"); setFilterAssignee("all"); setFilterLabel("all"); setFilterOverdue(false); setFilterSprint("all");
+                // Use the raw setters (skip persist write per call) and
+                // then nuke the persisted record in one go so localStorage
+                // doesn't churn through six writes for a single click.
+                setSearchRaw(""); setFilterPriorityRaw("all"); setFilterAssigneeRaw("all");
+                setFilterLabelRaw("all"); setFilterOverdueRaw(false); setFilterSprintRaw("all");
+                resetPersistedFilters(projectId);
               }}
               className="text-[11px] text-[#0050A0] hover:underline"
             >
@@ -517,6 +658,8 @@ export function RoadmapTab({ projectId, onOpenSource, onDispatched }: RoadmapTab
                     key={tk.id}
                     task={tk}
                     allTasks={items}
+                    selected={selectedIds.has(tk.id)}
+                    onToggleSelect={() => toggleSelected(tk.id)}
                     onMove={moveTask}
                     onDelete={deleteTask}
                     onDragStart={onCardDragStart}
@@ -587,6 +730,8 @@ function formatDueRel(due: string): string {
 function TaskCard({
   task,
   allTasks,
+  selected,
+  onToggleSelect,
   onMove,
   onDelete,
   onDragStart,
@@ -594,6 +739,8 @@ function TaskCard({
 }: {
   task: ProjectTask;
   allTasks: ProjectTask[];
+  selected: boolean;
+  onToggleSelect: () => void;
   onMove: (t: ProjectTask, s: TaskStatus) => void | Promise<void>;
   onDelete: (t: ProjectTask) => void | Promise<void>;
   onDragStart: (e: React.DragEvent<HTMLDivElement>, t: ProjectTask) => void;
@@ -608,9 +755,23 @@ function TaskCard({
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onOpen}
-      className={`bg-white border rounded-md p-3 group hover:border-[#0050A0] cursor-pointer ${overdue ? "border-red-300" : "border-[#E2E8F0]"}`}
+      className={`bg-white border rounded-md p-3 group hover:border-[#0050A0] cursor-pointer ${
+        selected ? "border-[#0050A0] ring-2 ring-[#0050A0]/30"
+        : overdue ? "border-red-300"
+        : "border-[#E2E8F0]"
+      }`}
     >
       <div className="flex items-start justify-between gap-2">
+        {/* Checkbox stops propagation so clicking it doesn't also open
+            the drawer; clicking the card itself still opens the drawer. */}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleSelect(); }}
+          className="mt-0.5 flex-shrink-0 text-[#94A3B8] hover:text-[#0050A0]"
+          aria-label={selected ? "Deselect" : "Select"}
+        >
+          {selected ? <CheckSquare size={13} className="text-[#0050A0]" /> : <Square size={13} />}
+        </button>
         <div className="text-sm font-medium text-[#1A1A2E] flex-1 leading-snug">{task.title}</div>
         <button
           onClick={(e) => { e.stopPropagation(); void onDelete(task); }}
@@ -1348,27 +1509,48 @@ function TaskDetailDrawer({
                   <div className="text-xs text-[#94A3B8]">{t("roadmap.attemptsEmpty")}</div>
                 ) : (
                   <ul className="space-y-1 text-xs">
-                    {attempts.map((a) => (
-                      <li key={a.id} className="flex items-start gap-2">
-                        <span className="font-mono text-[10px] text-[#94A3B8]">
-                          {new Date(a.created_at).toLocaleString()}
-                        </span>
-                        <span className="text-[#475569]">
-                          <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px]">{a.mode}</span>
-                          <span className="ml-1 text-[10px] uppercase text-[#94A3B8]">{a.status}</span>
-                          {a.dispatched_by_name && <span className="ml-1 text-[#94A3B8]">by {a.dispatched_by_name}</span>}
-                        </span>
-                        {onOpenSource && (
-                          <button
-                            type="button"
-                            onClick={() => onOpenSource(a.conversation_id, "")}
-                            className="ml-auto inline-flex items-center gap-0.5 text-[10px] text-[#0050A0] hover:underline"
-                          >
-                            <ExternalLink size={9} /> {t("roadmap.openConv")}
-                          </button>
-                        )}
-                      </li>
-                    ))}
+                    {attempts.map((a) => {
+                      const isFailed = a.status === "failed" || a.status === "cancelled";
+                      const statusTone =
+                        a.status === "complete" ? "text-emerald-700"
+                        : a.status === "running"  ? "text-amber-700"
+                        : isFailed               ? "text-red-700"
+                        : "text-[#94A3B8]";
+                      return (
+                        <li key={a.id} className="flex items-start gap-2">
+                          <span className="font-mono text-[10px] text-[#94A3B8]">
+                            {new Date(a.created_at).toLocaleString()}
+                          </span>
+                          <span className="text-[#475569]">
+                            <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px]">{a.mode}</span>
+                            <span className={`ml-1 text-[10px] uppercase font-semibold ${statusTone}`}>{a.status}</span>
+                            {a.dispatched_by_name && <span className="ml-1 text-[#94A3B8]">by {a.dispatched_by_name}</span>}
+                          </span>
+                          <div className="ml-auto flex gap-2">
+                            {isFailed && onDispatched && !dirty && (
+                              <button
+                                type="button"
+                                onClick={() => { setDispatchMode(a.mode); void dispatch(); }}
+                                disabled={dispatching}
+                                className="inline-flex items-center gap-0.5 text-[10px] text-[#0050A0] hover:underline disabled:opacity-50"
+                                title={t("roadmap.retryDispatch")}
+                              >
+                                <RefreshCcw size={9} /> {t("roadmap.retry")}
+                              </button>
+                            )}
+                            {onOpenSource && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenSource(a.conversation_id, "")}
+                                className="inline-flex items-center gap-0.5 text-[10px] text-[#0050A0] hover:underline"
+                              >
+                                <ExternalLink size={9} /> {t("roadmap.openConv")}
+                              </button>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>
@@ -1727,6 +1909,96 @@ function SprintManagerModal({
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+function BulkActionBar({
+  count,
+  sprintList,
+  onClear,
+  onSelectAll,
+  onBulkApply,
+  onBulkDelete,
+}: {
+  count: number;
+  sprintList: Sprint[];
+  onClear: () => void;
+  onSelectAll: () => void;
+  onBulkApply: (patch: UpdateTaskInput) => void | Promise<void>;
+  onBulkDelete: () => void;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#BFDBFE] bg-[#EFF6FF] px-3 py-2 text-xs">
+      <span className="font-semibold text-[#0050A0]">
+        {count} {t("roadmap.bulkSelected")}
+      </span>
+      <button onClick={onSelectAll} className="text-[#0050A0] hover:underline">{t("roadmap.bulkSelectAll")}</button>
+      <button onClick={onClear} className="text-[#64748B] hover:text-[#1A1A2E]">{t("roadmap.bulkClear")}</button>
+      <div className="ml-2 inline-flex items-center gap-1">
+        <span className="text-[#64748B]">{t("roadmap.bulkSetStatus")}:</span>
+        <select
+          defaultValue=""
+          onChange={(e) => {
+            if (!e.target.value) return;
+            void onBulkApply({ status: e.target.value as TaskStatus });
+            e.target.value = "";
+          }}
+          className="h-7 rounded-md border border-[#E2E8F0] bg-white px-1.5"
+        >
+          <option value="">…</option>
+          <option value="todo">{t("roadmap.colTodo")}</option>
+          <option value="in-progress">{t("roadmap.colInProgress")}</option>
+          <option value="done">{t("roadmap.colDone")}</option>
+          <option value="cancelled">{t("roadmap.colCancelled")}</option>
+        </select>
+      </div>
+      <div className="inline-flex items-center gap-1">
+        <span className="text-[#64748B]">{t("roadmap.bulkSetPriority")}:</span>
+        <select
+          defaultValue=""
+          onChange={(e) => {
+            if (!e.target.value) return;
+            void onBulkApply({ priority: e.target.value as TaskPriority });
+            e.target.value = "";
+          }}
+          className="h-7 rounded-md border border-[#E2E8F0] bg-white px-1.5"
+        >
+          <option value="">…</option>
+          <option value="low">{t("roadmap.priorityLow")}</option>
+          <option value="medium">{t("roadmap.priorityMedium")}</option>
+          <option value="high">{t("roadmap.priorityHigh")}</option>
+          <option value="critical">{t("roadmap.priorityCritical")}</option>
+        </select>
+      </div>
+      <div className="inline-flex items-center gap-1">
+        <span className="text-[#64748B]">{t("roadmap.bulkSetSprint")}:</span>
+        <select
+          defaultValue=""
+          onChange={(e) => {
+            if (e.target.value === "") return;
+            const v = e.target.value;
+            void onBulkApply({ sprint_id: v === "_clear" ? null : v });
+            e.target.value = "";
+          }}
+          className="h-7 rounded-md border border-[#E2E8F0] bg-white px-1.5 max-w-[140px]"
+        >
+          <option value="">…</option>
+          <option value="_clear">{t("roadmap.sprintBacklog")}</option>
+          {sprintList.filter((s) => s.status !== "closed").map((s) => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
+      </div>
+      <div className="ml-auto">
+        <button
+          onClick={onBulkDelete}
+          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2 py-1 text-red-700 hover:bg-red-50"
+        >
+          <Trash2 size={11} /> {t("common.delete")}
+        </button>
       </div>
     </div>
   );

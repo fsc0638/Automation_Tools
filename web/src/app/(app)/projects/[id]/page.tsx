@@ -210,6 +210,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [switchingBranch, setSwitchingBranch] = useState(false);
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
+  const [showCustomDebatePicker, setShowCustomDebatePicker] = useState(false);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -1163,27 +1164,27 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </button>
                     );
                   })}
-                  {agentProfiles.length >= 2 && (() => {
-                    const candidate = `agents:${agentProfiles.slice(0, 4).map((profile) => profile.id).join(",")}` as ChatMode;
-                    return (
-                      <button
-                        key="custom-debate"
-                        onClick={() => setMode(candidate)}
-                        className={cn(
-                          "rounded-xl px-3 py-2 text-xs font-medium transition",
-                          mode === candidate
-                            ? modeStyle(candidate)
-                            : "border border-[#E2E8F0] bg-white text-[#64748B] hover:border-teal-200 hover:text-teal-700"
-                        )}
-                        title="Run the first 2–4 enabled custom agents as a debate"
-                      >
-                        <span className="inline-flex items-center gap-1.5">
-                          <Zap size={12} />
-                          Custom Debate
-                        </span>
-                      </button>
-                    );
-                  })()}
+                  {agentProfiles.length >= 2 && (
+                    <button
+                      key="custom-debate"
+                      onClick={() => setShowCustomDebatePicker(true)}
+                      className={cn(
+                        "rounded-xl px-3 py-2 text-xs font-medium transition",
+                        mode.startsWith("agents:")
+                          ? modeStyle(mode)
+                          : "border border-[#E2E8F0] bg-white text-[#64748B] hover:border-teal-200 hover:text-teal-700"
+                      )}
+                      title={t("chat.customDebateHint")}
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        <Zap size={12} />
+                        {mode.startsWith("agents:") ? (() => {
+                          const ids = mode.slice("agents:".length).split(",");
+                          return `${t("chat.customDebateLabel")} (${ids.length})`;
+                        })() : t("chat.customDebateConfigure")}
+                      </span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1689,6 +1690,129 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         )}
       </div>
       )}
+
+      {showCustomDebatePicker && (
+        <CustomDebatePicker
+          profiles={agentProfiles}
+          initialMode={mode}
+          onClose={() => setShowCustomDebatePicker(false)}
+          onConfirm={(picked) => {
+            setMode(`agents:${picked.join(",")}` as ChatMode);
+            setShowCustomDebatePicker(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * C6: lets the user pick exactly which 2–4 enabled agents participate
+ * in a Custom Debate. Without this, the previous shortcut grabbed the
+ * first 2-4 enabled profiles automatically, which is fine when you
+ * have exactly the right set up but gives no control otherwise.
+ */
+function CustomDebatePicker({
+  profiles,
+  initialMode,
+  onClose,
+  onConfirm,
+}: {
+  profiles: AgentProfile[];
+  initialMode: ChatMode;
+  onClose: () => void;
+  onConfirm: (ids: string[]) => void;
+}) {
+  const t = useT();
+  const presetIds = initialMode.startsWith("agents:")
+    ? initialMode.slice("agents:".length).split(",")
+    : [];
+  const [picked, setPicked] = useState<string[]>(presetIds);
+
+  function toggle(id: string) {
+    setPicked((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= 4) return prev;       // hard cap — matches backend
+      return [...prev, id];
+    });
+  }
+  function moveUp(id: string) {
+    setPicked((prev) => {
+      const i = prev.indexOf(id);
+      if (i <= 0) return prev;
+      const next = prev.slice();
+      [next[i - 1], next[i]] = [next[i], next[i - 1]];
+      return next;
+    });
+  }
+
+  const ready = picked.length >= 2 && picked.length <= 4;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={onClose}>
+      <div className="w-full max-w-lg rounded-lg bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-[#E2E8F0] px-5 py-3">
+          <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("chat.customDebateTitle")}</h3>
+          <p className="mt-1 text-xs text-[#64748B]">{t("chat.customDebateDesc")}</p>
+        </div>
+        <div className="max-h-[420px] overflow-y-auto px-5 py-3 space-y-1">
+          {profiles.map((p) => {
+            const order = picked.indexOf(p.id);
+            const selected = order >= 0;
+            return (
+              <label
+                key={p.id}
+                className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 ${
+                  selected ? "border-[#0050A0] bg-[#EFF6FF]" : "border-[#E2E8F0] hover:border-[#94A3B8]"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  onChange={() => toggle(p.id)}
+                  className="h-3 w-3"
+                />
+                {selected && (
+                  <span className="rounded-full bg-[#0050A0] px-1.5 text-[10px] font-semibold text-white">
+                    #{order + 1}
+                  </span>
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-[#1A1A2E] truncate">{p.name}</div>
+                  <div className="text-[11px] text-[#64748B]">{p.provider} · {p.model}</div>
+                </div>
+                {selected && order > 0 && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); moveUp(p.id); }}
+                    className="text-[11px] text-[#0050A0] hover:underline"
+                    title={t("chat.customDebateMoveUp")}
+                  >
+                    ↑
+                  </button>
+                )}
+              </label>
+            );
+          })}
+        </div>
+        <div className="flex items-center justify-between gap-2 border-t border-[#E2E8F0] px-5 py-3 text-xs">
+          <span className="text-[#64748B]">
+            {picked.length} / 4 {t("chat.customDebateSelected")}
+            {picked.length > 0 && picked.length < 2 && ` · ${t("chat.customDebateMinHint")}`}
+          </span>
+          <div className="flex gap-2">
+            <button type="button" onClick={onClose} className="text-[#64748B] hover:text-[#1A1A2E]">{t("common.cancel")}</button>
+            <button
+              type="button"
+              disabled={!ready}
+              onClick={() => onConfirm(picked)}
+              className="rounded-md bg-[#0050A0] px-3 py-1.5 font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
+            >
+              {t("chat.customDebateConfirm")}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
