@@ -153,19 +153,48 @@ async fn delete_conversation(
     Extension(auth_user): Extension<AuthUser>,
     Path((project_id, conv_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
-    verify_project_access(&state, project_id, auth_user.id, "admin").await?;
+    // Anyone with at least editor access on the project should be able to
+    // delete THEIR OWN conversations. Admins/owners can additionally clean
+    // up conversations owned by other collaborators.
+    //
+    // Historically this required "admin", which silently broke editors:
+    // the verify_project_access helper surfaces failure as
+    // `AppError::NotFound("Project not found")`, so a shared editor
+    // hitting delete saw a confusing "Project not found" error.
+    verify_project_access(&state, project_id, auth_user.id, "editor").await?;
+    let is_admin: bool = sqlx::query_scalar("SELECT user_can_access_project($1, $2, 'admin')")
+        .bind(project_id)
+        .bind(auth_user.id)
+        .fetch_one(&state.db)
+        .await?;
 
-    let result =
-        sqlx::query("DELETE FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3")
-            .bind(conv_id)
-            .bind(project_id)
-            .bind(auth_user.id)
-            .execute(&state.db)
-            .await?;
+    // Look the row up first so we can distinguish "no such conv" (404)
+    // from "you're not allowed to delete this one" (403). Without this,
+    // an editor trying to delete someone else's thread would get a 404
+    // and assume the conv vanished from under them.
+    let owner: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM conversations WHERE id = $1 AND project_id = $2",
+    )
+    .bind(conv_id)
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?;
 
-    if result.rows_affected() == 0 {
+    let Some((owner_user_id,)) = owner else {
         return Err(AppError::NotFound("Conversation not found".into()));
+    };
+
+    if !is_admin && owner_user_id != auth_user.id {
+        return Err(AppError::Forbidden(
+            "Only the conversation owner or a project admin can delete this conversation".into(),
+        ));
     }
+
+    sqlx::query("DELETE FROM conversations WHERE id = $1 AND project_id = $2")
+        .bind(conv_id)
+        .bind(project_id)
+        .execute(&state.db)
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

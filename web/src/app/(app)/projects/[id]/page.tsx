@@ -58,7 +58,7 @@ import { InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card"
 import { cn, formatDate } from "@/lib/utils";
 import { useToastStore } from "@/lib/toast-store";
 import { useT } from "@/lib/i18n";
-import { useWorkspaceChromeStore } from "@/lib/store";
+import { useAuthStore, useWorkspaceChromeStore } from "@/lib/store";
 import { InsightsTab } from "@/components/InsightsTab";
 import { CostTab } from "@/components/CostTab";
 import { RoadmapTab } from "@/components/RoadmapTab";
@@ -203,6 +203,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const pushToast = useToastStore((state) => state.pushToast);
   const t = useT();
   const setShowAppSidebar = useWorkspaceChromeStore((state) => state.setShowAppSidebar);
+  // Identity of the logged-in viewer. Used below to decide whether the
+  // conversation-row delete affordance should render: editors should only
+  // see it on conversations they authored. Project owners (matched by
+  // project.user_id) keep the affordance on every row.
+  const currentUserId = useAuthStore((state) => state.user?.id);
 
   const [project, setProject] = useState<Project | null>(null);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
@@ -791,7 +796,21 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   async function deleteConv(conv: Conversation, e: MouseEvent) {
     e.stopPropagation();
     if (!confirm(`Delete conversation "${conv.title}"? All messages will be lost.`)) return;
-    await convsApi.delete(id, conv.id);
+    // Hit the backend first, then update local state only on success. The
+    // previous flow optimistically removed the conv and let the runtime
+    // overlay surface unrelated errors (e.g. "Project not found" when the
+    // caller's role is too low to delete) as crashes.
+    try {
+      await convsApi.delete(id, conv.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      pushToast({
+        tone: "error",
+        title: "Could not delete conversation",
+        description: message,
+      });
+      return;
+    }
     const remaining = convs.filter((c) => c.id !== conv.id);
     setConvs(remaining);
     if (activeConv?.id === conv.id) {
@@ -1098,14 +1117,22 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                               : t("convDesc.openclaw")}
                       </div>
                     </button>
-                    <button
-                      type="button"
-                      onClick={(e) => void deleteConv(conv, e)}
-                      title="Delete conversation"
-                      className="opacity-0 transition group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E]"
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    {/* Show delete only when the viewer authored the conv OR
+                        owns the project. Admins-on-the-project-but-not-owner
+                        currently lose the UI affordance; backend still
+                        accepts their request, so they can fall back to the
+                        API. Fixing this fully needs `effective_role` on the
+                        Project response — tracked in deferred backlog. */}
+                    {(conv.user_id === currentUserId || project?.user_id === currentUserId) && (
+                      <button
+                        type="button"
+                        onClick={(e) => void deleteConv(conv, e)}
+                        title="Delete conversation"
+                        className="opacity-0 transition group-hover:opacity-100 text-[#94A3B8] hover:text-[#C8102E]"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
                   </div>
                 </div>
               ))
