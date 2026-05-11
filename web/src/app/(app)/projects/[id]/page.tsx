@@ -413,11 +413,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
   /** Roadmap → workspace deep-link. Switches to the workspace tab, opens the
    *  conversation that owns the message, and scrolls to it once messages
-   *  load (handled by the effect below via pendingScrollMessageId). */
-  const [pendingScrollMessageId, setPendingScrollMessageId] = useState<string | null>(null);
+   *  load (handled by the effect below via a pending-scroll ref + tick). */
+  const pendingScrollMessageIdRef = useRef<string | null>(null);
+  const [pendingScrollTick, setPendingScrollTick] = useState(0);
   const openSourceMessage = useCallback(async (conversationId: string, messageId: string) => {
     setProjectTab("workspace");
-    setPendingScrollMessageId(messageId);
+    pendingScrollMessageIdRef.current = messageId;
+    setPendingScrollTick((tick) => tick + 1);
     const target = convs.find((c) => c.id === conversationId);
     if (target && (!activeConv || activeConv.id !== conversationId)) {
       await selectConv(target);
@@ -453,6 +455,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   }, [id, selectConv]);
 
   useEffect(() => {
+    const pendingScrollMessageId = pendingScrollMessageIdRef.current;
     if (!pendingScrollMessageId) return;
     if (!messages.some((m) => m.id === pendingScrollMessageId)) return;
     const el = document.querySelector<HTMLDivElement>(`[data-message-id="${pendingScrollMessageId}"]`);
@@ -461,8 +464,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       el.classList.add("ring-2", "ring-[#0050A0]");
       window.setTimeout(() => el.classList.remove("ring-2", "ring-[#0050A0]"), 2200);
     }
-    setPendingScrollMessageId(null);
-  }, [messages, pendingScrollMessageId]);
+    pendingScrollMessageIdRef.current = null;
+  }, [messages, pendingScrollTick]);
 
   useEffect(() => {
     setShowAppSidebar(!focusMode);

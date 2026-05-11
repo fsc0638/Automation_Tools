@@ -133,7 +133,7 @@ export function CostTab({ projectId }: { projectId: string }) {
       </div>
 
       <Card title={t("cost.pricingInUse")}>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 text-xs">
+        <div className="grid grid-cols-2 gap-3 pt-2 text-[13px] md:grid-cols-4">
           <Stat label="OpenClaw in" value={`$${data.pricing.openclaw_per_1k_in}/1k`} />
           <Stat label="OpenClaw out" value={`$${data.pricing.openclaw_per_1k_out}/1k`} />
           <Stat label="Hermes in" value={`$${data.pricing.hermes_per_1k_in}/1k`} />

@@ -225,7 +225,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
               <div key={f.agent} className="rounded-md bg-[#F8FAFC] p-3 flex items-center justify-between">
                 <div>
                   <div className="text-sm font-medium text-[#1A1A2E] capitalize">{f.agent}</div>
-                  <div className="text-[11px] text-[#94A3B8]">{f.thumbs_up} 👍 · {f.thumbs_down} 👎 · {f.total} total</div>
+                  <div className="mt-1 text-[12px] leading-5 text-[#94A3B8]">{f.thumbs_up} 👍 · {f.thumbs_down} 👎 · {f.total} total</div>
                 </div>
                 <div className="text-right">
                   <div className={`text-2xl font-bold ${
@@ -235,7 +235,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
                   }`}>
                     {(f.satisfaction_rate * 100).toFixed(0)}%
                   </div>
-                  <div className="text-[10px] text-[#94A3B8]">satisfaction</div>
+                  <div className="mt-1 text-[12px] tracking-[0.03em] text-[#94A3B8]">satisfaction</div>
                 </div>
               </div>
             ))}
@@ -263,7 +263,7 @@ export function InsightsTab({ projectId }: { projectId: string }) {
         {/* Filter row — always visible so users can switch scope even on
             an empty chart and watch it repopulate. Refetches via the
             refresh useCallback dep array. */}
-        <div className="flex flex-wrap items-center gap-2 pb-3 text-xs">
+        <div className="flex flex-wrap items-center gap-2 pb-3 text-[13px] text-[#64748B]">
           <label className="text-[#64748B]">{t("roadmap.sprint")}:</label>
           <select
             value={burndownSprint}
@@ -349,9 +349,9 @@ function fmtMs(v: number | null): string {
 function KpiCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
   return (
     <div className="rounded-lg border border-[#E2E8F0] bg-white p-4">
-      <div className="text-xs text-[#94A3B8] uppercase tracking-wider">{label}</div>
+      <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">{label}</div>
       <div className="mt-1 text-2xl font-semibold text-[#1A1A2E]">{value}</div>
-      {sub && <div className="text-[11px] text-[#94A3B8] mt-0.5">{sub}</div>}
+      {sub && <div className="mt-1 text-[12px] leading-5 text-[#94A3B8]">{sub}</div>}
     </div>
   );
 }
@@ -360,8 +360,8 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle?: st
   return (
     <div className="rounded-lg border border-[#E2E8F0] bg-white p-4">
       <div className="mb-2">
-        <div className="text-sm font-semibold text-[#1A1A2E]">{title}</div>
-        {subtitle && <div className="text-[11px] text-[#94A3B8]">{subtitle}</div>}
+        <div className="text-[16px] font-semibold text-[#1A1A2E]">{title}</div>
+        {subtitle && <div className="mt-1 text-[13px] leading-6 text-[#94A3B8]">{subtitle}</div>}
       </div>
       {children}
     </div>
@@ -371,8 +371,8 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle?: st
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md bg-[#F8FAFC] p-3">
-      <div className="text-[11px] text-[#94A3B8] uppercase">{label}</div>
-      <div className="text-base font-semibold text-[#1A1A2E] mt-0.5">{value}</div>
+      <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">{label}</div>
+      <div className="mt-1 text-base font-semibold text-[#1A1A2E]">{value}</div>
     </div>
   );
 }
@@ -382,7 +382,7 @@ function Gauge({ value, sub }: { value: number; sub?: string }) {
   return (
     <div className="flex flex-col items-center justify-center py-4">
       <div className="text-4xl font-bold text-[#0050A0]">{pct}%</div>
-      {sub && <div className="text-xs text-[#94A3B8] mt-1">{sub}</div>}
+      {sub && <div className="mt-1 text-[12px] leading-5 text-[#94A3B8]">{sub}</div>}
       <div className="w-full mt-3 h-2 bg-[#F1F5F9] rounded-full overflow-hidden">
         <div className="h-full bg-[#0050A0] transition-all" style={{ width: `${pct}%` }} />
       </div>
