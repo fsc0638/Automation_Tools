@@ -175,11 +175,13 @@ async fn send_message(
 ) -> AppResult<Json<serde_json::Value>> {
     verify_project_access(&state, project_id, auth_user.id).await?;
 
-    let project: Project = sqlx::query_as("SELECT * FROM projects WHERE id = $1 AND user_id = $2")
-        .bind(project_id)
-        .bind(auth_user.id)
-        .fetch_one(&state.db)
-        .await?;
+    let project: Project = sqlx::query_as(
+        "SELECT * FROM projects WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
+    )
+    .bind(project_id)
+    .bind(auth_user.id)
+    .fetch_one(&state.db)
+    .await?;
     let project_scope = build_project_scope(&project);
 
     let conv: Option<Conversation> =
@@ -296,12 +298,13 @@ fn default_title_for_mode(mode: &str) -> String {
 }
 
 async fn verify_project_access(state: &AppState, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
-    let exists: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
-            .bind(project_id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM projects WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
 
     exists
         .map(|_| ())

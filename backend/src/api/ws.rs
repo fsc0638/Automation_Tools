@@ -61,7 +61,10 @@ async fn ws_handler(
         Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
 
     let conversation_exists: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM conversations WHERE id = $1 AND project_id = $2 AND user_id = $3",
+        "SELECT c.id
+         FROM conversations c
+         WHERE c.id = $1 AND c.project_id = $2
+           AND (c.user_id = $3 OR user_can_access_project(c.project_id, $3, 'viewer'))",
     )
     .bind(query.conversation_id)
     .bind(query.project_id)
@@ -79,10 +82,13 @@ async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
 
-    let project: Project = match sqlx::query_as("SELECT * FROM projects WHERE id = $1")
-        .bind(query.project_id)
-        .fetch_one(&state.db)
-        .await
+    let project: Project = match sqlx::query_as(
+        "SELECT * FROM projects WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
+    )
+    .bind(query.project_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await
     {
         Ok(project) => project,
         Err(_) => {

@@ -359,12 +359,13 @@ fn memory_candidate_hash(project_id: Uuid, content: &str, source_message_count: 
 }
 
 async fn verify_project_access(db: &PgPool, project_id: Uuid, user_id: Uuid) -> AppResult<()> {
-    let exists: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
-            .bind(project_id)
-            .bind(user_id)
-            .fetch_optional(db)
-            .await?;
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM projects WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
 
     exists
         .map(|_| ())

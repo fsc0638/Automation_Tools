@@ -13,6 +13,7 @@ pub mod epics;
 pub mod feedback;
 pub mod git_identities;
 pub mod metrics;
+pub mod organizations;
 pub mod project_index;
 pub mod projects;
 pub mod shared_memory;
@@ -65,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .merge(conversations::routes())
         .merge(conversation_memory::routes())
         .merge(metrics::routes())
+        .merge(organizations::routes())
         .merge(tasks::routes())
         .merge(sprints::routes())
         .merge(epics::routes())

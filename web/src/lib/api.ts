@@ -182,6 +182,12 @@ export const projects = {
     }),
 };
 
+export const organizations = {
+  list: () => request<Organization[]>("/organizations"),
+  workspaces: (organizationId: string) =>
+    request<Workspace[]>(`/organizations/${organizationId}/workspaces`),
+};
+
 export const feedback = {
   submit: (messageId: string, rating: 1 | -1, note?: string) =>
     request<{ id: string; message_id: string; rating: number; note: string | null }>(
@@ -316,6 +322,8 @@ export interface CreateProjectInput {
 export interface Project {
   id: string;
   user_id: string;
+  organization_id: string;
+  workspace_id: string;
   name: string;
   description?: string;
   source_type: string;
@@ -323,6 +331,24 @@ export interface Project {
   local_path?: string;
   default_branch?: string;
   git_identity_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  owner_user_id: string;
+  role?: "owner" | "admin" | "member" | "viewer" | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Workspace {
+  id: string;
+  organization_id: string;
+  name: string;
+  role?: "owner" | "admin" | "member" | "viewer" | null;
   created_at: string;
   updated_at: string;
 }

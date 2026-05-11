@@ -17,6 +17,8 @@ pub struct User {
 pub struct Project {
     pub id: Uuid,
     pub user_id: Uuid,
+    pub organization_id: Uuid,
+    pub workspace_id: Uuid,
     pub name: String,
     pub description: Option<String>,
     pub source_type: String,        // "local" | "git" | "upload"
@@ -24,6 +26,26 @@ pub struct Project {
     pub local_path: Option<String>, // cloned path for git repos
     pub default_branch: Option<String>,
     pub git_identity_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct Organization {
+    pub id: Uuid,
+    pub name: String,
+    pub owner_user_id: Uuid,
+    pub role: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct Workspace {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub role: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
