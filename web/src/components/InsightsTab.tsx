@@ -4,8 +4,9 @@ import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   PieChart, Pie, Cell,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
+  ComposedChart, Area, Line, Legend,
 } from "recharts";
-import { projects as projectsApi, type MetricsSummary, type MetricsHealth } from "@/lib/api";
+import { projects as projectsApi, sprints as sprintsApi, type MetricsBurndown, type MetricsSummary, type MetricsHealth, type Sprint } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
 const MODE_COLORS: Record<string, string> = {
@@ -22,6 +23,10 @@ const AGENT_COLORS: Record<string, string> = {
 export function InsightsTab({ projectId }: { projectId: string }) {
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [health, setHealth] = useState<MetricsHealth | null>(null);
+  const [burndown, setBurndown] = useState<MetricsBurndown | null>(null);
+  const [sprintList, setSprintList] = useState<Sprint[]>([]);
+  const [burndownSprint, setBurndownSprint] = useState<string>("all"); // "all" | "none" | uuid
+  const [burndownDays, setBurndownDays] = useState<number>(60);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
   const t = useT();
@@ -30,18 +35,24 @@ export function InsightsTab({ projectId }: { projectId: string }) {
     setLoading(true);
     setError("");
     try {
-      const [m, h] = await Promise.all([
+      const sprintOpts: { sprintId?: string; days?: number } = { days: burndownDays };
+      if (burndownSprint !== "all") sprintOpts.sprintId = burndownSprint;
+      const [m, h, b, sp] = await Promise.all([
         projectsApi.metricsSummary(projectId),
         projectsApi.metricsHealth(projectId).catch(() => null),
+        projectsApi.metricsBurndown(projectId, sprintOpts).catch(() => null),
+        sprintsApi.list(projectId).catch(() => [] as Sprint[]),
       ]);
       setMetrics(m);
       setHealth(h);
+      setBurndown(b);
+      setSprintList(sp);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load metrics");
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, burndownSprint, burndownDays]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void refresh(); }, 0);
@@ -291,6 +302,91 @@ export function InsightsTab({ projectId }: { projectId: string }) {
           <Stat label="p50" value={fmtMs(timing.p50_total_ms)} />
           <Stat label="p95" value={fmtMs(timing.p95_total_ms)} />
         </div>
+      </ChartCard>
+
+      <ChartCard
+        title={t("insights.burndownTitle")}
+        subtitle={
+          burndown
+            ? `${burndown.final_remaining} ${t("insights.burndownOpen")} · ${burndown.velocity_per_day.toFixed(1)} ${t("insights.burndownVelocity")}`
+            : t("insights.burndownDesc")
+        }
+      >
+        {/* Filter row — always visible so users can switch scope even on
+            an empty chart and watch it repopulate. Refetches via the
+            refresh useCallback dep array. */}
+        <div className="flex flex-wrap items-center gap-2 pb-3 text-xs">
+          <label className="text-[#64748B]">{t("roadmap.sprint")}:</label>
+          <select
+            value={burndownSprint}
+            onChange={(e) => setBurndownSprint(e.target.value)}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+          >
+            <option value="all">{t("roadmap.allSprints")}</option>
+            <option value="none">{t("roadmap.sprintBacklog")}</option>
+            {sprintList.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <label className="ml-2 text-[#64748B]">{t("insights.burndownWindow")}:</label>
+          <select
+            value={burndownDays}
+            onChange={(e) => setBurndownDays(Number(e.target.value))}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+          >
+            <option value={7}>7d</option>
+            <option value={14}>14d</option>
+            <option value={30}>30d</option>
+            <option value={60}>60d</option>
+            <option value={90}>90d</option>
+            <option value={180}>180d</option>
+          </select>
+        </div>
+        {!burndown || burndown.points.length === 0 ? (
+          <Empty hint={t("insights.burndownEmpty")} />
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-3 pt-2 mb-3">
+              <Stat label={t("insights.burndownScope")} value={String(burndown.final_total)} />
+              <Stat label={t("insights.burndownDone")} value={String(burndown.final_total - burndown.final_remaining)} />
+              <Stat label={t("insights.burndownVelocity")} value={burndown.velocity_per_day.toFixed(2)} />
+            </div>
+            <ResponsiveContainer width="100%" height={260}>
+              <ComposedChart data={burndown.points}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                <XAxis dataKey="day" tick={{ fontSize: 10 }} minTickGap={20} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Area
+                  type="monotone"
+                  dataKey="remaining"
+                  name={t("insights.burndownRemaining")}
+                  stroke="#C8102E"
+                  fill="#FECACA"
+                  fillOpacity={0.55}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="done"
+                  name={t("insights.burndownDoneLine")}
+                  stroke="#10B981"
+                  strokeWidth={2}
+                  dot={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="ideal"
+                  name={t("insights.burndownIdeal")}
+                  stroke="#94A3B8"
+                  strokeDasharray="5 5"
+                  strokeWidth={1.5}
+                  dot={false}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </>
+        )}
       </ChartCard>
     </div>
   );

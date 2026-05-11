@@ -86,14 +86,14 @@ const QUICK_ACTIONS: Array<{ key: QuickAction; labelKey: string; icon: typeof Ac
     labelKey: "quick.roadmap",
     icon: ListChecks,
     prompt:
-      "請把目前專案可優化方向整理成可執行 Roadmap。請輸出任務清單，每個任務包含：title、priority、why、affected files、acceptance criteria、estimated effort、dependencies、建議由 OpenClaw 或 Hermes 主導。任務必須根據專案檔案與目前對話，不要憑空發明。",
+      "請把目前專案可優化方向整理成可執行 Roadmap，必須根據專案檔案與目前對話，不要憑空發明。\n\n輸出格式：先用一段 markdown 敘述為什麼這些任務重要，接著一個 ```json fenced block，內容是 JSON array，每個元素一個任務：\n\n```json\n[\n  {\n    \"title\": \"短句任務名稱（≤80 字）\",\n    \"priority\": \"low | medium | high | critical\",\n    \"why\": \"為什麼這項重要、會解決什麼問題\",\n    \"affected_files\": [\"path/to/foo.ts\", \"backend/src/bar.rs\"],\n    \"acceptance_criteria\": \"開發者或代理人可驗證的條件：例如『跑 X 測試會通過』、『B 檔案的 Y 函式變成 Z 行為』、『diff 不超過 N 行』\",\n    \"estimated_effort\": \"S | M | L 或 0.5d / 2d 等\"\n  }\n]\n```\n\n至少 3 項、最多 8 項。每個任務都必須引用真實的檔案路徑或對話中提到的問題。",
   },
   {
     key: "patch",
     labelKey: "quick.patchPlan",
     icon: Code2,
     prompt:
-      "請進入 Patch / PR 規劃模式。根據目前專案狀態，挑選最高價值且風險可控的一項改善，產生 patch-ready 計畫。請輸出：目標、受影響檔案、修改步驟、預期 diff 摘要、測試指令、回滾方案、PR 標題與描述。不要實際 commit 或 push；若證據不足，先列出需要讀取或確認的檔案。",
+      "請進入 Patch / PR 規劃模式。根據目前專案狀態，挑選最高價值且風險可控的 1~3 項改善，產生 patch-ready 計畫。\n\n輸出格式：先用 markdown 說明選擇這些 patch 的理由，再用 ```json fenced block 給出陣列，每個 patch 一個物件：\n\n```json\n[\n  {\n    \"title\": \"PR 標題（祈使句、≤72 字）\",\n    \"priority\": \"low | medium | high | critical\",\n    \"why\": \"目標、影響範圍、預期收益\",\n    \"affected_files\": [\"路徑1\", \"路徑2\"],\n    \"acceptance_criteria\": \"明確驗證條件，包含：1) 應通過的測試指令 2) 預期 diff 摘要 3) 行為驗證步驟 4) 回滾方案\",\n    \"estimated_effort\": \"S | M | L\"\n  }\n]\n```\n\n不要實際 commit 或 push；若證據不足，先列出需要讀取或確認的檔案，並說明該 patch 為何尚不該實作。",
   },
 ];
 
@@ -210,6 +210,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [switchingBranch, setSwitchingBranch] = useState(false);
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
+  const [showCustomDebatePicker, setShowCustomDebatePicker] = useState(false);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -409,6 +410,59 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const data = await convsApi.get(id, conv.id);
     setMessages(data.messages);
   }, [id]);
+
+  /** Roadmap → workspace deep-link. Switches to the workspace tab, opens the
+   *  conversation that owns the message, and scrolls to it once messages
+   *  load (handled by the effect below via pendingScrollMessageId). */
+  const [pendingScrollMessageId, setPendingScrollMessageId] = useState<string | null>(null);
+  const openSourceMessage = useCallback(async (conversationId: string, messageId: string) => {
+    setProjectTab("workspace");
+    setPendingScrollMessageId(messageId);
+    const target = convs.find((c) => c.id === conversationId);
+    if (target && (!activeConv || activeConv.id !== conversationId)) {
+      await selectConv(target);
+    } else if (!target) {
+      // conv not in current list — refetch and try again
+      try {
+        const list = await convsApi.list(id);
+        setConvs(list);
+        const found = list.find((c) => c.id === conversationId);
+        if (found) await selectConv(found);
+      } catch { /* best-effort */ }
+    }
+  }, [convs, activeConv, selectConv, id]);
+
+  /** Roadmap → workspace dispatch. The Roadmap drawer creates a new conv
+   *  and gets back a pre-built prompt; we switch tabs, open the conv,
+   *  and pre-fill the composer so the user can review then hit Send. */
+  const onDispatched = useCallback(async (conversationId: string, prompt: string) => {
+    setProjectTab("workspace");
+    try {
+      const list = await convsApi.list(id);
+      setConvs(list);
+      const target = list.find((c) => c.id === conversationId);
+      if (target) await selectConv(target);
+    } catch { /* best-effort */ }
+    setInput(prompt);
+    // Make sure the composer scrolls into view; users typically expect to
+    // see the prompt waiting for them.
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+  }, [id, selectConv]);
+
+  useEffect(() => {
+    if (!pendingScrollMessageId) return;
+    if (!messages.some((m) => m.id === pendingScrollMessageId)) return;
+    const el = document.querySelector<HTMLDivElement>(`[data-message-id="${pendingScrollMessageId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("ring-2", "ring-[#0050A0]");
+      window.setTimeout(() => el.classList.remove("ring-2", "ring-[#0050A0]"), 2200);
+    }
+    setPendingScrollMessageId(null);
+  }, [messages, pendingScrollMessageId]);
 
   useEffect(() => {
     setShowAppSidebar(!focusMode);
@@ -779,12 +833,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       setStreamBuffers({});
       setStreamStatuses({});
       setRefreshStatus(`Switched to ${branch}`);
-      pushToast({ tone: "success", title: "Branch switched", description: `Workspace is now on ${branch}.` });
+      pushToast({ tone: "success", title: t("toast.branchSwitched"), description: t("toast.branchSwitchedDesc").replace("{branch}", branch) });
       setTimeout(() => setRefreshStatus(""), 3000);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Branch switch failed";
+      const msg = err instanceof Error ? err.message : t("toast.branchSwitchFailed");
       setRefreshStatus(`Switch failed: ${msg}`);
-      pushToast({ tone: "error", title: "Branch switch failed", description: msg });
+      pushToast({ tone: "error", title: t("toast.branchSwitchFailed"), description: msg });
       setTimeout(() => setRefreshStatus(""), 6000);
     } finally {
       setSwitchingBranch(false);
@@ -873,7 +927,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           <div className="mt-3">
             <InlineBanner
               tone={refreshStatus.toLowerCase().includes("failed") ? "error" : "info"}
-              title="Workspace status"
+              title={t("toast.workspaceStatus")}
               description={refreshStatus}
             />
           </div>
@@ -907,7 +961,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
       {projectTab === "insights" && <InsightsTab projectId={id} />}
       {projectTab === "cost" && <CostTab projectId={id} />}
-      {projectTab === "roadmap" && <RoadmapTab projectId={id} />}
+      {projectTab === "roadmap" && <RoadmapTab projectId={id} onOpenSource={openSourceMessage} onDispatched={onDispatched} />}
 
       {projectTab === "workspace" && (
       <div className="flex min-h-0 flex-1 bg-[#F8FAFC]">
@@ -959,7 +1013,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             ) : filteredConvs.length === 0 ? (
               <SectionEmpty
                 className="px-4 py-8"
-                title={conversationQuery ? "No conversations found" : "No conversations yet"}
+                title={conversationQuery ? t("convList.noMatches") : t("convList.empty")}
                 description={conversationQuery
                   ? "Try another title or mode keyword, or create a fresh conversation."
                   : "Create a conversation to start building shared history across agents."}
@@ -1110,27 +1164,27 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </button>
                     );
                   })}
-                  {agentProfiles.length >= 2 && (() => {
-                    const candidate = `agents:${agentProfiles.slice(0, 4).map((profile) => profile.id).join(",")}` as ChatMode;
-                    return (
-                      <button
-                        key="custom-debate"
-                        onClick={() => setMode(candidate)}
-                        className={cn(
-                          "rounded-xl px-3 py-2 text-xs font-medium transition",
-                          mode === candidate
-                            ? modeStyle(candidate)
-                            : "border border-[#E2E8F0] bg-white text-[#64748B] hover:border-teal-200 hover:text-teal-700"
-                        )}
-                        title="Run the first 2–4 enabled custom agents as a debate"
-                      >
-                        <span className="inline-flex items-center gap-1.5">
-                          <Zap size={12} />
-                          Custom Debate
-                        </span>
-                      </button>
-                    );
-                  })()}
+                  {agentProfiles.length >= 2 && (
+                    <button
+                      key="custom-debate"
+                      onClick={() => setShowCustomDebatePicker(true)}
+                      className={cn(
+                        "rounded-xl px-3 py-2 text-xs font-medium transition",
+                        mode.startsWith("agents:")
+                          ? modeStyle(mode)
+                          : "border border-[#E2E8F0] bg-white text-[#64748B] hover:border-teal-200 hover:text-teal-700"
+                      )}
+                      title={t("chat.customDebateHint")}
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        <Zap size={12} />
+                        {mode.startsWith("agents:") ? (() => {
+                          const ids = mode.slice("agents:".length).split(",");
+                          return `${t("chat.customDebateLabel")} (${ids.length})`;
+                        })() : t("chat.customDebateConfigure")}
+                      </span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1217,7 +1271,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 {messages.map((msg) => (
                   <div
                     key={msg.id}
+                    data-message-id={msg.id}
                     style={{ contentVisibility: "auto", containIntrinsicSize: "0 200px" }}
+                    className="rounded-[24px] transition-shadow"
                   >
                     <ChatMessage message={msg} projectId={id} />
                   </div>
@@ -1285,7 +1341,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   onClick={() => setShowComposerTools((value) => !value)}
                   className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
                 >
-                  {showComposerTools ? "Hide suggestions" : "Show suggestions"}
+                  {showComposerTools ? t("chat.hideSuggestions") : t("chat.showSuggestions")}
                 </button>
               </div>
 
@@ -1634,6 +1690,129 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         )}
       </div>
       )}
+
+      {showCustomDebatePicker && (
+        <CustomDebatePicker
+          profiles={agentProfiles}
+          initialMode={mode}
+          onClose={() => setShowCustomDebatePicker(false)}
+          onConfirm={(picked) => {
+            setMode(`agents:${picked.join(",")}` as ChatMode);
+            setShowCustomDebatePicker(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * C6: lets the user pick exactly which 2–4 enabled agents participate
+ * in a Custom Debate. Without this, the previous shortcut grabbed the
+ * first 2-4 enabled profiles automatically, which is fine when you
+ * have exactly the right set up but gives no control otherwise.
+ */
+function CustomDebatePicker({
+  profiles,
+  initialMode,
+  onClose,
+  onConfirm,
+}: {
+  profiles: AgentProfile[];
+  initialMode: ChatMode;
+  onClose: () => void;
+  onConfirm: (ids: string[]) => void;
+}) {
+  const t = useT();
+  const presetIds = initialMode.startsWith("agents:")
+    ? initialMode.slice("agents:".length).split(",")
+    : [];
+  const [picked, setPicked] = useState<string[]>(presetIds);
+
+  function toggle(id: string) {
+    setPicked((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= 4) return prev;       // hard cap — matches backend
+      return [...prev, id];
+    });
+  }
+  function moveUp(id: string) {
+    setPicked((prev) => {
+      const i = prev.indexOf(id);
+      if (i <= 0) return prev;
+      const next = prev.slice();
+      [next[i - 1], next[i]] = [next[i], next[i - 1]];
+      return next;
+    });
+  }
+
+  const ready = picked.length >= 2 && picked.length <= 4;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={onClose}>
+      <div className="w-full max-w-lg rounded-lg bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-[#E2E8F0] px-5 py-3">
+          <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("chat.customDebateTitle")}</h3>
+          <p className="mt-1 text-xs text-[#64748B]">{t("chat.customDebateDesc")}</p>
+        </div>
+        <div className="max-h-[420px] overflow-y-auto px-5 py-3 space-y-1">
+          {profiles.map((p) => {
+            const order = picked.indexOf(p.id);
+            const selected = order >= 0;
+            return (
+              <label
+                key={p.id}
+                className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 ${
+                  selected ? "border-[#0050A0] bg-[#EFF6FF]" : "border-[#E2E8F0] hover:border-[#94A3B8]"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  onChange={() => toggle(p.id)}
+                  className="h-3 w-3"
+                />
+                {selected && (
+                  <span className="rounded-full bg-[#0050A0] px-1.5 text-[10px] font-semibold text-white">
+                    #{order + 1}
+                  </span>
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-[#1A1A2E] truncate">{p.name}</div>
+                  <div className="text-[11px] text-[#64748B]">{p.provider} · {p.model}</div>
+                </div>
+                {selected && order > 0 && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); moveUp(p.id); }}
+                    className="text-[11px] text-[#0050A0] hover:underline"
+                    title={t("chat.customDebateMoveUp")}
+                  >
+                    ↑
+                  </button>
+                )}
+              </label>
+            );
+          })}
+        </div>
+        <div className="flex items-center justify-between gap-2 border-t border-[#E2E8F0] px-5 py-3 text-xs">
+          <span className="text-[#64748B]">
+            {picked.length} / 4 {t("chat.customDebateSelected")}
+            {picked.length > 0 && picked.length < 2 && ` · ${t("chat.customDebateMinHint")}`}
+          </span>
+          <div className="flex gap-2">
+            <button type="button" onClick={onClose} className="text-[#64748B] hover:text-[#1A1A2E]">{t("common.cancel")}</button>
+            <button
+              type="button"
+              disabled={!ready}
+              onClick={() => onConfirm(picked)}
+              className="rounded-md bg-[#0050A0] px-3 py-1.5 font-medium text-white hover:bg-[#003B7A] disabled:bg-[#94A3B8]"
+            >
+              {t("chat.customDebateConfirm")}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1853,10 +2032,29 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
     if (adding || added) return;
     setAdding(true);
     try {
-      const parsed = parseTaskFromMessage(visibleContent);
-      await tasksApi.create(projectId, { ...parsed, source_message_id: message.id });
-      setAdded(true);
-      pushToast({ tone: "success", title: "Added to Roadmap", description: parsed.title });
+      const parsedList = parseTasksFromMessage(visibleContent);
+      let createdCount = 0;
+      let firstTitle = "";
+      for (const parsed of parsedList) {
+        try {
+          await tasksApi.create(projectId, { ...parsed, source_message_id: message.id });
+          createdCount += 1;
+          if (!firstTitle) firstTitle = parsed.title;
+        } catch (e) {
+          // continue with the rest of the batch even if one fails
+          console.warn("Failed to create roadmap task:", e);
+        }
+      }
+      if (createdCount > 0) {
+        setAdded(true);
+        pushToast({
+          tone: "success",
+          title: createdCount === 1 ? "Added to Roadmap" : `Added ${createdCount} tasks to Roadmap`,
+          description: createdCount === 1 ? firstTitle : `${firstTitle} +${createdCount - 1} more`,
+        });
+      } else {
+        pushToast({ tone: "error", title: "Failed to add to Roadmap", description: "No tasks were created" });
+      }
     } catch (e) {
       pushToast({ tone: "error", title: "Failed to add to Roadmap", description: e instanceof Error ? e.message : "" });
     } finally {
@@ -2036,55 +2234,157 @@ function FileNodeItem({
 }
 
 
-/**
- * Pull a roadmap task from an agent reply. Heuristic — title is the first
- * non-empty line, why is the rest, affected_files are regex-extracted code paths.
- */
-function parseTaskFromMessage(content: string): {
+type ParsedTask = {
   title: string;
   why?: string;
   affected_files?: string[];
+  acceptance_criteria?: string;
+  estimated_effort?: string;
   priority?: "low" | "medium" | "high" | "critical";
-} {
-  const lines = content
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+};
 
+const PRIORITY_VALUES = ["low", "medium", "high", "critical"] as const;
+
+function classifyPriority(text: string): ParsedTask["priority"] {
+  const lower = text.toLowerCase();
+  if (/critical|嚴重|安全漏洞/.test(lower)) return "critical";
+  if (/high priority|high\b|高優先|高風險/.test(lower)) return "high";
+  if (/low priority|low\b|nice to have|錦上添花/.test(lower)) return "low";
+  return "medium";
+}
+
+function extractFiles(text: string, limit = 8): string[] {
+  const fileRe = /(?:[\w./-]+)\.(?:rs|ts|tsx|js|jsx|py|md|sql|toml|json|yaml|yml|swift|kt|java|go|html|css)\b/g;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of text.matchAll(fileRe)) {
+    const path = m[0].replace(/^[`"\x27]+|[`"\x27]+$/g, "");
+    if (path.length > 120 || path.includes(" ")) continue;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function normalizeParsed(raw: Partial<ParsedTask> & { title?: unknown }): ParsedTask | null {
+  const titleRaw = typeof raw.title === "string" ? raw.title : "";
+  const title = titleRaw
+    .replace(/^[#*\-•·\d.\s]+/, "")
+    .replace(/[*_`]+/g, "")
+    .slice(0, 120)
+    .trim();
+  if (!title) return null;
+  return {
+    title,
+    why: typeof raw.why === "string" && raw.why.trim() ? raw.why.trim().slice(0, 1500) : undefined,
+    affected_files: Array.isArray(raw.affected_files) && raw.affected_files.length > 0
+      ? raw.affected_files.map(String).filter(Boolean).slice(0, 12)
+      : undefined,
+    acceptance_criteria: typeof raw.acceptance_criteria === "string" && raw.acceptance_criteria.trim()
+      ? raw.acceptance_criteria.trim().slice(0, 1500)
+      : undefined,
+    estimated_effort: typeof raw.estimated_effort === "string" && raw.estimated_effort.trim()
+      ? raw.estimated_effort.trim().slice(0, 40)
+      : undefined,
+    priority: PRIORITY_VALUES.includes(raw.priority as never)
+      ? (raw.priority as ParsedTask["priority"])
+      : "medium",
+  };
+}
+
+function tryParseJsonTasks(content: string): ParsedTask[] | null {
+  // Look for ```json ... ``` or ``` ... ``` fences containing a JSON array of tasks.
+  const fenceMatch = content.match(/```(?:json|JSON)?\s*([\s\S]+?)```/);
+  const candidates: string[] = [];
+  if (fenceMatch) candidates.push(fenceMatch[1]);
+  // Bare JSON array fallback (only if message looks like one).
+  const trimmed = content.trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) candidates.push(trimmed);
+  for (const raw of candidates) {
+    try {
+      const parsed = JSON.parse(raw.trim());
+      if (Array.isArray(parsed)) {
+        const tasks = parsed
+          .map((item) => (typeof item === "object" && item ? normalizeParsed(item) : null))
+          .filter((task): task is ParsedTask => task !== null);
+        if (tasks.length > 0) return tasks;
+      }
+    } catch { /* not valid JSON, fall through */ }
+  }
+  return null;
+}
+
+function tryParseNumberedList(content: string): ParsedTask[] | null {
+  // Look for numbered headings like "1) Title" / "1. Title" / "### 1. Title"
+  // followed by indented or unindented lines until the next number or end.
+  const lines = content.split(/\r?\n/);
+  const blocks: { title: string; body: string[] }[] = [];
+  const startRe = /^\s*(?:#{1,6}\s+)?(\d+)\s*[).、:：]\s*(.+)$/;
+  let current: { title: string; body: string[] } | null = null;
+  for (const line of lines) {
+    const m = line.match(startRe);
+    if (m) {
+      if (current && current.title) blocks.push(current);
+      current = { title: m[2].trim(), body: [] };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (current && current.title) blocks.push(current);
+  if (blocks.length < 2) return null;
+
+  return blocks.map((b) => {
+    const body = b.body.join("\n").trim();
+    const acMatch = body.match(/(?:acceptance(?:\s*criteria)?|驗收(?:條件)?|verification|tests?)[:：]?\s*([\s\S]+?)(?:\n\s*\n|$)/i);
+    const effortMatch = body.match(/(?:effort|工作量|estimated\s*effort)[:：]?\s*([SMLXxlsmh\d./\s大中小]+)/i);
+    const filesMatch = body.match(/(?:affected\s*files?|影響檔案|files?)[:：]?\s*([^\n]+)/i);
+    let files: string[] | undefined = undefined;
+    if (filesMatch) {
+      files = filesMatch[1].split(/[,，\s]+/).map((s) => s.replace(/^[`"\x27]+|[`"\x27]+$/g, "")).filter(Boolean);
+    }
+    if (!files || files.length === 0) {
+      const fromBody = extractFiles(body);
+      if (fromBody.length > 0) files = fromBody;
+    }
+    return normalizeParsed({
+      title: b.title,
+      why: body || undefined,
+      affected_files: files,
+      acceptance_criteria: acMatch?.[1].trim(),
+      estimated_effort: effortMatch?.[1].trim(),
+      priority: classifyPriority(b.title + "\n" + body),
+    });
+  }).filter((task): task is ParsedTask => task !== null);
+}
+
+/**
+ * Parse one or more roadmap tasks from an agent reply. Tries JSON fence
+ * first (most precise), then numbered list (multi-task), and finally
+ * falls back to a single-task heuristic so existing behavior is preserved.
+ */
+function parseTasksFromMessage(content: string): ParsedTask[] {
+  const json = tryParseJsonTasks(content);
+  if (json && json.length > 0) return json;
+
+  const numbered = tryParseNumberedList(content);
+  if (numbered && numbered.length > 1) return numbered;
+
+  // Single-task heuristic (legacy behavior)
+  const lines = content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
   const titleLine = lines[0] ?? "(untitled)";
   const title = titleLine
     .replace(/^[#*\-•·\d.\s]+/, "")
     .replace(/[*_`]+/g, "")
     .slice(0, 100)
     .trim() || "(untitled)";
-
   const why = lines.slice(1).join("\n").slice(0, 800).trim() || undefined;
-
-  const fileRe = /(?:[\w./-]+)\.(?:rs|ts|tsx|js|jsx|py|md|sql|toml|json|yaml|yml|swift|kt|java|go|html|css)\b/g;
-  const seen = new Set<string>();
-  const affected_files: string[] = [];
-  for (const m of content.matchAll(fileRe)) {
-    const path = m[0].replace(/^[`"\x27]+|[`"\x27]+$/g, "");
-    if (path.length > 120 || path.includes(" ")) continue;
-    if (seen.has(path)) continue;
-    seen.add(path);
-    affected_files.push(path);
-    if (affected_files.length >= 8) break;
-  }
-
-  const lower = content.toLowerCase();
-  const priority: "low" | "medium" | "high" | "critical" = lower.match(/critical|嚴重|安全漏洞/)
-    ? "critical"
-    : lower.match(/high priority|high\s|高優先|高風險/)
-    ? "high"
-    : lower.match(/low priority|low\s|nice to have|錦上添花/)
-    ? "low"
-    : "medium";
-
-  return {
+  const files = extractFiles(content);
+  return [{
     title,
     why,
-    affected_files: affected_files.length > 0 ? affected_files : undefined,
-    priority,
-  };
+    affected_files: files.length > 0 ? files : undefined,
+    priority: classifyPriority(content),
+  }];
 }

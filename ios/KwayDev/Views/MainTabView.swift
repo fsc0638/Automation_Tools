@@ -8,6 +8,16 @@ struct MainTabView: View {
                     Label("Projects", systemImage: "folder.fill")
                 }
 
+            GlobalRoadmapView()
+                .tabItem {
+                    Label("Roadmap", systemImage: "map.fill")
+                }
+
+            AgentsListView()
+                .tabItem {
+                    Label("Agents", systemImage: "person.2.circle.fill")
+                }
+
             SettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gearshape.fill")
@@ -94,35 +104,43 @@ struct ProjectDetailView: View {
     @State private var isLoading = true
 
     var body: some View {
-        Group {
-            if isLoading {
-                ProgressView()
-            } else if convsList.isEmpty {
-                ContentUnavailableView("No Conversations",
-                    systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Start a conversation in the web app"))
-            } else {
-                List(convsList) { conv in
-                    NavigationLink(destination: ConversationView(project: project, conversation: conv)) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 8) {
-                                Label(conv.title, systemImage: iconName(for: conv.mode))
-                                    .font(.body.weight(.medium))
-                                Spacer(minLength: 8)
-                                Text(conv.modeDisplayName)
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(modeColor(for: conv.mode).opacity(0.12))
-                                    .foregroundColor(modeColor(for: conv.mode))
-                                    .clipShape(Capsule())
+        List {
+            // Roadmap shortcut — read-only board for this project.
+            Section {
+                NavigationLink(destination: ProjectTasksView(project: project)) {
+                    Label("Roadmap (tasks)", systemImage: "checklist")
+                }
+            }
+
+            Section(header: Text("Conversations")) {
+                if isLoading {
+                    HStack { ProgressView(); Text("Loading…").foregroundColor(.secondary) }
+                } else if convsList.isEmpty {
+                    Text("No conversations yet — start one in the web app.")
+                        .font(.caption).foregroundColor(.secondary)
+                } else {
+                    ForEach(convsList) { conv in
+                        NavigationLink(destination: ConversationView(project: project, conversation: conv)) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 8) {
+                                    Label(conv.title, systemImage: iconName(for: conv.mode))
+                                        .font(.body.weight(.medium))
+                                    Spacer(minLength: 8)
+                                    Text(conv.modeDisplayName)
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(modeColor(for: conv.mode).opacity(0.12))
+                                        .foregroundColor(modeColor(for: conv.mode))
+                                        .clipShape(Capsule())
+                                }
                             }
                         }
                     }
                 }
-                .listStyle(.insetGrouped)
             }
         }
+        .listStyle(.insetGrouped)
         .navigationTitle(project.name)
         .task {
             do {

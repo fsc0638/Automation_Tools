@@ -53,6 +53,8 @@ pub struct AgentProfile {
     #[serde(skip_serializing)]
     pub api_key: String,
     pub enabled: bool,
+    /// B7: free-form labels for grouping in the /agents page.
+    pub labels: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

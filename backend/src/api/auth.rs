@@ -41,8 +41,26 @@ pub struct LoginRequest {
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub access_token: String,
+    pub refresh_token: String,
     pub token_type: String,
+    /// Refresh-token lifetime in seconds. Frontend uses this to decide
+    /// when to proactively rotate; the canonical authority is still the
+    /// hash stored server-side.
+    pub refresh_expires_in: i64,
     pub user: UserInfo,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RefreshResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: String,
+    pub refresh_expires_in: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +74,107 @@ pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
+        .route("/auth/refresh", post(refresh))
+        .route("/auth/logout", post(logout))
+}
+
+/// Generate a refresh token: 32 cryptographically random bytes encoded
+/// as URL-safe base64. The server stores only the SHA-256 hash, so even
+/// a DB leak doesn't expose live sessions.
+fn generate_refresh_token() -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn hash_refresh_token(token: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
+}
+
+/// Insert a refresh token row keyed by hash; returns the raw token.
+async fn issue_refresh_token(
+    state: &AppState,
+    user_id: Uuid,
+) -> AppResult<(String, i64)> {
+    let raw = generate_refresh_token();
+    let hash = hash_refresh_token(&raw);
+    let ttl_days = state.config.refresh_token_expiry_days;
+    let expires_at = Utc::now() + Duration::days(ttl_days);
+
+    sqlx::query(
+        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(user_id)
+    .bind(&hash)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await?;
+
+    // Opportunistically prune expired rows for this user so the table
+    // doesn't grow forever. Best-effort; ignore errors.
+    let _ = sqlx::query(
+        "DELETE FROM refresh_tokens
+         WHERE user_id = $1 AND expires_at < NOW()",
+    )
+    .bind(user_id)
+    .execute(&state.db)
+    .await;
+
+    Ok((raw, ttl_days * 86400))
+}
+
+async fn refresh(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshRequest>,
+) -> AppResult<Json<RefreshResponse>> {
+    let hash = hash_refresh_token(&req.refresh_token);
+
+    // Atomically delete the presented refresh token and capture its
+    // user_id only if it's not expired. This implements *rotation*:
+    // each refresh consumes the old token, so a leaked token is one-use.
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "DELETE FROM refresh_tokens
+         WHERE token_hash = $1 AND expires_at > NOW()
+         RETURNING user_id",
+    )
+    .bind(&hash)
+    .fetch_optional(&state.db)
+    .await?;
+    let user_id = row.ok_or_else(|| AppError::Unauthorized("Invalid or expired refresh token".into()))?.0;
+
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User no longer exists".into()))?;
+
+    let access = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    let (refresh_token, refresh_expires_in) = issue_refresh_token(&state, user.id).await?;
+
+    Ok(Json(RefreshResponse {
+        access_token: access,
+        refresh_token,
+        token_type: "Bearer".into(),
+        refresh_expires_in,
+    }))
+}
+
+async fn logout(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshRequest>,
+) -> AppResult<axum::http::StatusCode> {
+    let hash = hash_refresh_token(&req.refresh_token);
+    let _ = sqlx::query("DELETE FROM refresh_tokens WHERE token_hash = $1")
+        .bind(&hash)
+        .execute(&state.db)
+        .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn register(
@@ -91,10 +210,13 @@ async fn register(
     .fetch_one(&state.db)
     .await?;
 
-    let token = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    let access = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    let (refresh_token, refresh_expires_in) = issue_refresh_token(&state, user.id).await?;
     Ok(Json(AuthResponse {
-        access_token: token,
+        access_token: access,
+        refresh_token,
         token_type: "Bearer".into(),
+        refresh_expires_in,
         user: UserInfo {
             id: user.id,
             email: user.email,
@@ -118,10 +240,13 @@ async fn login(
         return Err(AppError::Unauthorized("Invalid credentials".into()));
     }
 
-    let token = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    let access = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    let (refresh_token, refresh_expires_in) = issue_refresh_token(&state, user.id).await?;
     Ok(Json(AuthResponse {
-        access_token: token,
+        access_token: access,
+        refresh_token,
         token_type: "Bearer".into(),
+        refresh_expires_in,
         user: UserInfo {
             id: user.id,
             email: user.email,

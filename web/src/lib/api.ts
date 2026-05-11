@@ -5,7 +5,51 @@ function getToken(): string | null {
   return localStorage.getItem("kway_token");
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+function getRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("kway_refresh_token");
+}
+
+function setSession(accessToken: string, refreshToken?: string) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("kway_token", accessToken);
+  if (refreshToken) localStorage.setItem("kway_refresh_token", refreshToken);
+}
+
+function clearSession() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("kway_token");
+  localStorage.removeItem("kway_refresh_token");
+}
+
+/** Single in-flight refresh — concurrent 401s share one fetch. */
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function tryRefresh(): Promise<boolean> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return false;
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) return false;
+      const data: { access_token: string; refresh_token: string } = await res.json();
+      setSession(data.access_token, data.refresh_token);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
+async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
   const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -16,17 +60,22 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     },
   });
 
-  // Auto-logout on expired/invalid session: when we sent a token but the
-  // server rejected it, clear local state and redirect to /login.
-  // Skipped for login/register pages so a wrong-password 401 stays as
-  // an inline form error rather than a redirect loop.
-  if (res.status === 401 && token && typeof window !== "undefined") {
+  // 401 path: try the refresh token once. If refresh succeeds, replay
+  // the original request transparently. If refresh fails (no refresh
+  // token, expired, server reject), fall through to the legacy logout
+  // behaviour below. Login/register endpoints skip this path entirely
+  // so a wrong-password 401 stays as a form error.
+  if (res.status === 401 && token && typeof window !== "undefined" && retry) {
     const currentPath = window.location.pathname;
-    if (currentPath !== "/login" && currentPath !== "/register") {
-      localStorage.removeItem("kway_token");
+    const isAuthEndpoint = path.startsWith("/auth/");
+    if (!isAuthEndpoint && currentPath !== "/login" && currentPath !== "/register") {
+      const refreshed = await tryRefresh();
+      if (refreshed) {
+        // Replay the original request with the new access token.
+        return request<T>(path, options, false);
+      }
+      clearSession();
       window.location.replace("/login");
-      // Block this promise so callers don't surface a runtime error during
-      // the brief moment before the navigation actually happens.
       return new Promise<T>(() => {});
     }
   }
@@ -42,16 +91,36 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 // Auth
 export const auth = {
   register: (data: { email: string; password: string; display_name: string }) =>
-    request<{ access_token: string; user: UserInfo }>("/auth/register", {
+    request<AuthResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify(data),
     }),
   login: (data: { email: string; password: string }) =>
-    request<{ access_token: string; user: UserInfo }>("/auth/login", {
+    request<AuthResponse>("/auth/login", {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  logout: () => {
+    const refreshToken = getRefreshToken();
+    clearSession();
+    if (!refreshToken) return Promise.resolve();
+    // Best-effort server-side invalidation. Even if this fails (network
+    // error, etc.) the local session is already gone.
+    return fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }).catch(() => undefined);
+  },
 };
+
+export interface AuthResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  refresh_expires_in: number;
+  user: UserInfo;
+}
 
 // Projects
 export const projects = {
@@ -97,6 +166,13 @@ export const projects = {
     request<MetricsSummary>(`/projects/${id}/metrics/summary`),
   metricsCost: (id: string) =>
     request<MetricsCost>(`/projects/${id}/metrics/cost`),
+  metricsBurndown: (id: string, opts?: { sprintId?: string; days?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.sprintId) params.set("sprint_id", opts.sprintId);
+    if (opts?.days) params.set("days", String(opts.days));
+    const qs = params.toString();
+    return request<MetricsBurndown>(`/projects/${id}/metrics/burndown${qs ? `?${qs}` : ""}`);
+  },
   metricsHealth: (id: string) =>
     request<MetricsHealth>(`/projects/${id}/metrics/health`),
   remoteBranches: (url: string, git_identity_id?: string) =>
@@ -115,8 +191,10 @@ export const feedback = {
 };
 
 export const tasks = {
-  list: (projectId: string) =>
-    request<ProjectTask[]>(`/projects/${projectId}/tasks`),
+  list: (projectId: string, opts?: { sprintId?: string | "none" }) => {
+    const params = opts?.sprintId ? `?sprint_id=${encodeURIComponent(opts.sprintId)}` : "";
+    return request<ProjectTask[]>(`/projects/${projectId}/tasks${params}`);
+  },
   create: (projectId: string, data: CreateTaskInput) =>
     request<ProjectTask>(`/projects/${projectId}/tasks`, {
       method: "POST",
@@ -129,6 +207,31 @@ export const tasks = {
     }),
   delete: (projectId: string, taskId: string) =>
     request<void>(`/projects/${projectId}/tasks/${taskId}`, { method: "DELETE" }),
+  history: (projectId: string, taskId: string) =>
+    request<TaskStatusEvent[]>(`/projects/${projectId}/tasks/${taskId}/history`),
+  attempts: (projectId: string, taskId: string) =>
+    request<TaskAttempt[]>(`/projects/${projectId}/tasks/${taskId}/attempts`),
+  dispatch: (projectId: string, taskId: string, data: DispatchTaskInput) =>
+    request<DispatchTaskResult>(`/projects/${projectId}/tasks/${taskId}/attempts`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  comments: (projectId: string, taskId: string) =>
+    request<TaskComment[]>(`/projects/${projectId}/tasks/${taskId}/comments`),
+  addComment: (projectId: string, taskId: string, content: string) =>
+    request<TaskComment>(`/projects/${projectId}/tasks/${taskId}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+  updateComment: (projectId: string, taskId: string, commentId: string, content: string) =>
+    request<TaskComment>(`/projects/${projectId}/tasks/${taskId}/comments/${commentId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ content }),
+    }),
+  deleteComment: (projectId: string, taskId: string, commentId: string) =>
+    request<void>(`/projects/${projectId}/tasks/${taskId}/comments/${commentId}`, {
+      method: "DELETE",
+    }),
 };
 
 export const gitIdentities = {
@@ -245,6 +348,8 @@ export interface AgentProfile {
   base_url?: string | null;
   role_prompt: string;
   enabled: boolean;
+  /** B7: free-form labels for grouping agents on the /agents page. */
+  labels: string[];
   created_at: string;
   updated_at: string;
 }
@@ -257,6 +362,7 @@ export interface CreateAgentProfileInput {
   role_prompt?: string;
   api_key: string;
   enabled?: boolean;
+  labels?: string[];
 }
 
 export interface UpdateAgentProfileInput {
@@ -266,6 +372,7 @@ export interface UpdateAgentProfileInput {
   base_url?: string;
   role_prompt?: string;
   api_key?: string;
+  labels?: string[];
   enabled?: boolean;
 }
 
@@ -296,6 +403,13 @@ export interface ConversationWithMessages extends Conversation {
 export type TaskStatus = "todo" | "in-progress" | "done" | "cancelled";
 export type TaskPriority = "low" | "medium" | "high" | "critical";
 
+export interface AcceptanceCriteriaV2 {
+  tests?: string[];
+  commands?: string[];
+  diff_hints?: string[];
+  behavior?: string[];
+}
+
 export interface ProjectTask {
   id: string;
   project_id: string;
@@ -307,6 +421,27 @@ export interface ProjectTask {
   priority: TaskPriority;
   status: TaskStatus;
   source_message_id?: string | null;
+  source_conversation_id?: string | null;
+  // P1 fields
+  assignee?: string | null;
+  due_date?: string | null;             // ISO date "YYYY-MM-DD"
+  test_plan?: string | null;
+  rollback_plan?: string | null;
+  definition_of_done?: string | null;
+  labels: string[];                     // always present, possibly empty
+  // P2 fields
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string | null;
+  linked_commit_sha?: string | null;
+  depends_on: string[];                 // always present, possibly empty
+  // P3 sprint binding
+  sprint_id?: string | null;
+  sprint_name?: string | null;
+  /** Server-computed via task_comments JOIN. Updated when re-listing. */
+  comment_count?: number;
+  // B3 epic binding (cross-project)
+  epic_id?: string | null;
+  epic_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -319,6 +454,18 @@ export interface CreateTaskInput {
   estimated_effort?: string;
   priority?: TaskPriority;
   source_message_id?: string;
+  assignee?: string;
+  due_date?: string;
+  test_plan?: string;
+  rollback_plan?: string;
+  definition_of_done?: string;
+  labels?: string[];
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string;
+  linked_commit_sha?: string;
+  depends_on?: string[];
+  sprint_id?: string;
+  epic_id?: string;
 }
 
 export interface UpdateTaskInput {
@@ -329,6 +476,279 @@ export interface UpdateTaskInput {
   estimated_effort?: string;
   priority?: TaskPriority;
   status?: TaskStatus;
+  assignee?: string;
+  due_date?: string | null;
+  test_plan?: string;
+  rollback_plan?: string;
+  definition_of_done?: string;
+  labels?: string[];
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string;
+  linked_commit_sha?: string;
+  depends_on?: string[];
+  /** P3: send a UUID string to bind to a sprint, send `null` to clear,
+   *  omit to leave alone. */
+  sprint_id?: string | null;
+  /** B3: same semantics as sprint_id, for cross-project epic binding. */
+  epic_id?: string | null;
+  status_note?: string;
+}
+
+export interface TaskAttempt {
+  id: string;
+  task_id: string;
+  conversation_id: string;
+  mode: string;
+  status: "pending" | "running" | "complete" | "failed" | "cancelled";
+  dispatched_by?: string | null;
+  dispatched_by_name?: string | null;
+  note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DispatchTaskInput {
+  mode: string;
+  note?: string;
+  conversation_id?: string;
+  title?: string;
+}
+
+export interface DispatchTaskResult {
+  attempt: TaskAttempt;
+  conversation_id: string;
+  prompt: string;
+}
+
+export interface Sprint {
+  id: string;
+  project_id: string;
+  name: string;
+  goal?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  status: "planned" | "active" | "closed";
+  task_total: number;
+  task_done: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSprintInput {
+  name: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  status?: "planned" | "active" | "closed";
+}
+
+export interface UpdateSprintInput {
+  name?: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  status?: "planned" | "active" | "closed";
+}
+
+// ---------------------------------------------------------------
+// B3 Epics — user-scoped cross-project milestone buckets
+// ---------------------------------------------------------------
+export interface Epic {
+  id: string;
+  user_id: string;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  status: "planned" | "active" | "done" | "archived";
+  target_date?: string | null;
+  task_total: number;
+  task_done: number;
+  project_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateEpicInput {
+  name: string;
+  description?: string;
+  color?: string;
+  status?: Epic["status"];
+  target_date?: string;
+}
+export interface UpdateEpicInput {
+  name?: string;
+  description?: string;
+  color?: string;
+  status?: Epic["status"];
+  target_date?: string;
+}
+
+export const epics = {
+  list: () => request<Epic[]>("/epics"),
+  create: (data: CreateEpicInput) =>
+    request<Epic>("/epics", { method: "POST", body: JSON.stringify(data) }),
+  update: (id: string, data: UpdateEpicInput) =>
+    request<Epic>(`/epics/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/epics/${id}`, { method: "DELETE" }),
+};
+
+// ---------------------------------------------------------------
+// B6 Shared memory notes
+// ---------------------------------------------------------------
+export interface SharedMemoryNote {
+  id: string;
+  user_id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  scope_projects: string[];
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+}
+export interface CreateNoteInput {
+  title: string;
+  body: string;
+  tags?: string[];
+  scope_projects?: string[];
+  pinned?: boolean;
+}
+export interface UpdateNoteInput {
+  title?: string;
+  body?: string;
+  tags?: string[];
+  scope_projects?: string[];
+  pinned?: boolean;
+}
+export const sharedMemory = {
+  list: (opts?: { projectId?: string; q?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.projectId) params.set("project_id", opts.projectId);
+    if (opts?.q) params.set("q", opts.q);
+    const qs = params.toString();
+    return request<SharedMemoryNote[]>(`/memory${qs ? `?${qs}` : ""}`);
+  },
+  create: (data: CreateNoteInput) =>
+    request<SharedMemoryNote>("/memory", { method: "POST", body: JSON.stringify(data) }),
+  update: (id: string, data: UpdateNoteInput) =>
+    request<SharedMemoryNote>(`/memory/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/memory/${id}`, { method: "DELETE" }),
+};
+
+// ---------------------------------------------------------------
+// User-level cross-project views (B1, B2, B4, B5)
+// ---------------------------------------------------------------
+export interface UserTask {
+  id: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assignee?: string | null;
+  due_date?: string | null;
+  labels: string[];
+  sprint_id?: string | null;
+  sprint_name?: string | null;
+  epic_id?: string | null;
+  epic_name?: string | null;
+  linked_pr_url?: string | null;
+  comment_count: number;
+  updated_at: string;
+}
+export interface ProjectUsage {
+  project_id: string;
+  project_name: string;
+  calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+}
+export interface UserUsage {
+  by_project: ProjectUsage[];
+  total_calls: number;
+  total_tokens_in: number;
+  total_tokens_out: number;
+  total_cost_usd: number;
+  daily: Array<{ day: string; calls: number; cost_usd: number }>;
+}
+export interface ConvHit {
+  conversation_id: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  mode: string;
+  message_id?: string | null;
+  snippet?: string | null;
+  updated_at: string;
+}
+export interface FileHit {
+  project_id: string;
+  project_name: string;
+  path: string;
+  size_bytes?: number | null;
+}
+export const userViews = {
+  tasks: (opts?: { projectId?: string; epicId?: string; status?: string; assignee?: string; label?: string; q?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.projectId) params.set("project_id", opts.projectId);
+    if (opts?.epicId) params.set("epic_id", opts.epicId);
+    if (opts?.status) params.set("status", opts.status);
+    if (opts?.assignee) params.set("assignee", opts.assignee);
+    if (opts?.label) params.set("label", opts.label);
+    if (opts?.q) params.set("q", opts.q);
+    const qs = params.toString();
+    return request<UserTask[]>(`/user/tasks${qs ? `?${qs}` : ""}`);
+  },
+  usage: () => request<UserUsage>("/user/usage"),
+  conversations: (q: string, limit?: number) => {
+    const params = new URLSearchParams({ q });
+    if (limit) params.set("limit", String(limit));
+    return request<ConvHit[]>(`/user/conversations?${params}`);
+  },
+  code: (q: string, limit?: number) => {
+    const params = new URLSearchParams({ q });
+    if (limit) params.set("limit", String(limit));
+    return request<FileHit[]>(`/user/code?${params}`);
+  },
+};
+
+export const sprints = {
+  list: (projectId: string) =>
+    request<Sprint[]>(`/projects/${projectId}/sprints`),
+  create: (projectId: string, data: CreateSprintInput) =>
+    request<Sprint>(`/projects/${projectId}/sprints`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (projectId: string, sprintId: string, data: UpdateSprintInput) =>
+    request<Sprint>(`/projects/${projectId}/sprints/${sprintId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  delete: (projectId: string, sprintId: string) =>
+    request<void>(`/projects/${projectId}/sprints/${sprintId}`, { method: "DELETE" }),
+};
+
+export interface TaskComment {
+  id: string;
+  task_id: string;
+  user_id: string;
+  author_name?: string | null;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskStatusEvent {
+  id: string;
+  task_id: string;
+  from_status: TaskStatus | null;
+  to_status: TaskStatus;
+  changed_by?: string | null;
+  changed_by_name?: string | null;
+  note?: string | null;
+  changed_at: string;
 }
 
 export interface MetricsHealth {
@@ -349,6 +769,21 @@ export interface MetricsHealth {
     evidence: string;
     evidence_items?: string[];
   }>;
+}
+
+export interface MetricsBurndownPoint {
+  day: string;       // YYYY-MM-DD
+  total: number;     // cumulative tasks created by EOD
+  done: number;      // cumulative tasks completed by EOD
+  remaining: number; // total - done
+  ideal: number;     // linear reference trajectory
+}
+
+export interface MetricsBurndown {
+  points: MetricsBurndownPoint[];
+  final_total: number;
+  final_remaining: number;
+  velocity_per_day: number;
 }
 
 export interface MetricsCost {
