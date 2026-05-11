@@ -515,6 +515,17 @@ export interface Message {
   agent_name?: string;
   file_path?: string;
   created_at: string;
+  /**
+   * Author identity for `role: "user"` messages. Populated from migration
+   * 0021 onward; older rows backfilled to the conversation creator. Null
+   * on assistant / system rows.
+   */
+  user_id?: string | null;
+  /**
+   * Display name JOINed from `users` on read paths. May be absent on the
+   * immediate INSERT response — UI falls back to "You" when missing.
+   */
+  author_name?: string | null;
 }
 
 export interface ConversationWithMessages extends Conversation {

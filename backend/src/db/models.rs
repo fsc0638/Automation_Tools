@@ -108,6 +108,17 @@ pub struct Message {
     pub agent_name: Option<String>,
     pub file_path: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Author user id for messages where `role = 'user'`. NULL on assistant
+    /// and system messages. Added by migration 0021 to support shared
+    /// conversations where multiple collaborators post into the same thread.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+    /// Optional display name, populated by SELECTs that JOIN users.id.
+    /// Not stored in the DB — leave as None for INSERT...RETURNING paths
+    /// and the frontend will fall back to "You" for the current viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub author_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]

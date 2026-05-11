@@ -1378,7 +1378,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     style={{ contentVisibility: "auto", containIntrinsicSize: "0 200px" }}
                     className="rounded-[24px] transition-shadow"
                   >
-                    <ChatMessage message={msg} projectId={id} />
+                    <ChatMessage message={msg} projectId={id} currentUserId={currentUserId} />
                   </div>
                 ))}
 
@@ -2106,7 +2106,7 @@ function StatusMessage({ label, status, now }: { label: string; status: StreamSt
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }: { message: Message; projectId: string; streaming?: boolean }) {
+const ChatMessage = memo(function ChatMessage({ message, projectId, streaming, currentUserId }: { message: Message; projectId: string; streaming?: boolean; currentUserId?: string }) {
   const isUser = message.role === "user";
   const isHermes = message.role === "hermes";
   const isOpenClaw = message.role === "openclaw";
@@ -2200,6 +2200,25 @@ const ChatMessage = memo(function ChatMessage({ message, projectId, streaming }:
               {streaming && <span className="ml-1 animate-pulse">●</span>}
             </span>
           )}
+          {/* Author label for user-authored messages. With project sharing
+              live, a single conversation can carry turns from multiple
+              collaborators — show the display name so threads stay
+              attributable. Falls back to "You" for the current viewer
+              when the joined name is missing (e.g. very fresh INSERTs
+              that haven't been re-fetched yet). */}
+          {isUser && (() => {
+            const isMe = !!currentUserId && message.user_id === currentUserId;
+            const label = message.author_name
+              ? message.author_name + (isMe ? " (you)" : "")
+              : isMe
+                ? "You"
+                : "User";
+            return (
+              <span className="block text-xs font-semibold text-[#002D62]">
+                {label}
+              </span>
+            );
+          })()}
           {streaming && <span className="rounded-full border border-[#E2E8F0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#64748B]">Streaming</span>}
           {timestamp && <span className="text-[11px] text-[#94A3B8]">{timestamp}</span>}
         </div>

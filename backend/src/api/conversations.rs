@@ -136,11 +136,18 @@ async fn get_conversation(
 
     let conv = conv.ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
 
-    let messages: Vec<Message> =
-        sqlx::query_as("SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC")
-            .bind(conv_id)
-            .fetch_all(&state.db)
-            .await?;
+    // JOIN users so each user-authored row carries `author_name`. Assistant
+    // and system rows have NULL user_id and therefore NULL author_name.
+    let messages: Vec<Message> = sqlx::query_as(
+        "SELECT m.*, u.display_name AS author_name
+         FROM messages m
+         LEFT JOIN users u ON u.id = m.user_id
+         WHERE m.conversation_id = $1
+         ORDER BY m.created_at ASC",
+    )
+    .bind(conv_id)
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(ConversationWithMessages {
         conversation: conv,
@@ -229,15 +236,17 @@ async fn send_message(
     let history = load_project_history(&state.db, project_id).await?;
     let project_summary = get_project_summary(&state.db, project_id).await?;
 
-    // Save user message so every turn is persisted.
+    // Save user message so every turn is persisted. user_id is required
+    // now (mig 0021) so we can attribute the turn in shared conversations.
     let _user_msg: Message = sqlx::query_as(
-        "INSERT INTO messages (conversation_id, role, content, file_path)
-         VALUES ($1, 'user', $2, $3)
+        "INSERT INTO messages (conversation_id, role, content, file_path, user_id)
+         VALUES ($1, 'user', $2, $3, $4)
          RETURNING *",
     )
     .bind(conv.id)
     .bind(&req.content)
     .bind(&req.file_path)
+    .bind(auth_user.id)
     .fetch_one(&state.db)
     .await?;
 

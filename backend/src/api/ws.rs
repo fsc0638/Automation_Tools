@@ -138,13 +138,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             .ok()
             .flatten();
 
+        // user_id (mig 0021) lets the chat UI display the author's name
+        // when the conversation lives in a shared project.
         let user_saved = sqlx::query(
-            "INSERT INTO messages (conversation_id, role, content, file_path)
-             VALUES ($1, 'user', $2, $3)",
+            "INSERT INTO messages (conversation_id, role, content, file_path, user_id)
+             VALUES ($1, 'user', $2, $3, $4)",
         )
         .bind(query.conversation_id)
         .bind(&content)
         .bind(&file_path)
+        .bind(user_id)
         .execute(&state.db)
         .await;
 
