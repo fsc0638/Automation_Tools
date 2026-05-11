@@ -53,6 +53,9 @@ pub struct ProjectTask {
     // P3: sprint binding
     pub sprint_id: Option<Uuid>,
     pub sprint_name: Option<String>,
+    /// Count of task_comments. Always present (COALESCE 0). Lets the
+    /// Roadmap card show a "💬 N" chip without a per-card fetch.
+    pub comment_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -65,10 +68,14 @@ const TASK_SELECT: &str = "SELECT t.id, t.project_id, t.title, t.why, t.affected
         t.acceptance_criteria_v2, t.linked_pr_url, t.linked_commit_sha,
         t.depends_on,
         t.sprint_id, sp.name AS sprint_name,
+        COALESCE(cc.n, 0) AS comment_count,
         t.created_at, t.updated_at
      FROM project_tasks t
      LEFT JOIN messages m ON m.id = t.source_message_id
-     LEFT JOIN sprints  sp ON sp.id = t.sprint_id";
+     LEFT JOIN sprints  sp ON sp.id = t.sprint_id
+     LEFT JOIN (
+        SELECT task_id, COUNT(*)::int8 AS n FROM task_comments GROUP BY task_id
+     ) cc ON cc.task_id = t.id";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTask {

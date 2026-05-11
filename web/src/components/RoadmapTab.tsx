@@ -674,6 +674,11 @@ function TaskCard({
             <CalendarRange size={9} /> {task.sprint_name}
           </span>
         )}
+        {!!task.comment_count && task.comment_count > 0 && (
+          <span className="inline-flex items-center gap-0.5 rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700" title={`${task.comment_count} comments`}>
+            <MessageCircle size={9} /> {task.comment_count}
+          </span>
+        )}
         {blocked && (
           <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-800" title={blockers.map((b) => b.title).join("\n")}>
             <Lock size={9} /> blocked × {blockers.length}

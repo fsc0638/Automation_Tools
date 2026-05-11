@@ -832,12 +832,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       setStreamBuffers({});
       setStreamStatuses({});
       setRefreshStatus(`Switched to ${branch}`);
-      pushToast({ tone: "success", title: "Branch switched", description: `Workspace is now on ${branch}.` });
+      pushToast({ tone: "success", title: t("toast.branchSwitched"), description: t("toast.branchSwitchedDesc").replace("{branch}", branch) });
       setTimeout(() => setRefreshStatus(""), 3000);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Branch switch failed";
+      const msg = err instanceof Error ? err.message : t("toast.branchSwitchFailed");
       setRefreshStatus(`Switch failed: ${msg}`);
-      pushToast({ tone: "error", title: "Branch switch failed", description: msg });
+      pushToast({ tone: "error", title: t("toast.branchSwitchFailed"), description: msg });
       setTimeout(() => setRefreshStatus(""), 6000);
     } finally {
       setSwitchingBranch(false);
@@ -926,7 +926,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           <div className="mt-3">
             <InlineBanner
               tone={refreshStatus.toLowerCase().includes("failed") ? "error" : "info"}
-              title="Workspace status"
+              title={t("toast.workspaceStatus")}
               description={refreshStatus}
             />
           </div>
@@ -1012,7 +1012,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             ) : filteredConvs.length === 0 ? (
               <SectionEmpty
                 className="px-4 py-8"
-                title={conversationQuery ? "No conversations found" : "No conversations yet"}
+                title={conversationQuery ? t("convList.noMatches") : t("convList.empty")}
                 description={conversationQuery
                   ? "Try another title or mode keyword, or create a fresh conversation."
                   : "Create a conversation to start building shared history across agents."}
@@ -1340,7 +1340,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   onClick={() => setShowComposerTools((value) => !value)}
                   className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[#475569] transition hover:border-[#94A3B8] hover:text-[#1A1A2E]"
                 >
-                  {showComposerTools ? "Hide suggestions" : "Show suggestions"}
+                  {showComposerTools ? t("chat.hideSuggestions") : t("chat.showSuggestions")}
                 </button>
               </div>
 

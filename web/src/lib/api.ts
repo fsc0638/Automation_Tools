@@ -97,8 +97,13 @@ export const projects = {
     request<MetricsSummary>(`/projects/${id}/metrics/summary`),
   metricsCost: (id: string) =>
     request<MetricsCost>(`/projects/${id}/metrics/cost`),
-  metricsBurndown: (id: string) =>
-    request<MetricsBurndown>(`/projects/${id}/metrics/burndown`),
+  metricsBurndown: (id: string, opts?: { sprintId?: string; days?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.sprintId) params.set("sprint_id", opts.sprintId);
+    if (opts?.days) params.set("days", String(opts.days));
+    const qs = params.toString();
+    return request<MetricsBurndown>(`/projects/${id}/metrics/burndown${qs ? `?${qs}` : ""}`);
+  },
   metricsHealth: (id: string) =>
     request<MetricsHealth>(`/projects/${id}/metrics/health`),
   remoteBranches: (url: string, git_identity_id?: string) =>
@@ -359,6 +364,8 @@ export interface ProjectTask {
   // P3 sprint binding
   sprint_id?: string | null;
   sprint_name?: string | null;
+  /** Server-computed via task_comments JOIN. Updated when re-listing. */
+  comment_count?: number;
   created_at: string;
   updated_at: string;
 }
