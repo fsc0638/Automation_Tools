@@ -1317,7 +1317,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </button>
                     );
                   })}
-                  {agentProfiles.length >= 2 && (
+                  {/* Always available now that the picker accepts the two
+                      built-in agents as participants. */}
+                  {true && (
                     <button
                       key="custom-debate"
                       onClick={() => setShowCustomDebatePicker(true)}
@@ -1888,10 +1890,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 }
 
 /**
- * C6: lets the user pick exactly which 2–4 enabled agents participate
- * in a Custom Debate. Without this, the previous shortcut grabbed the
- * first 2-4 enabled profiles automatically, which is fine when you
- * have exactly the right set up but gives no control otherwise.
+ * Debate participant picker. Originally custom-only ("C6"), but as of this
+ * commit also accepts the built-in OpenClaw + Hermes as participants so a
+ * user without any of their own agent profiles can still drive a focused
+ * 2-agent debate, or mix-and-match (e.g. OpenClaw + Hermes + Gemini).
+ *
+ * Encoding: tokens are either the literal `"openclaw"` / `"hermes"` or a
+ * UUID of an enabled agent profile. The backend's
+ * `ws.rs::agent_mode_from_str` performs the same parsing — kept in sync.
  */
 function CustomDebatePicker({
   profiles,
@@ -1909,6 +1915,18 @@ function CustomDebatePicker({
     ? initialMode.slice("agents:".length).split(",")
     : [];
   const [picked, setPicked] = useState<string[]>(presetIds);
+
+  // Built-in pseudo-profiles. Their `id` is the reserved literal accepted
+  // by the backend parser; provider/model are shown for parity with custom
+  // rows so the UI looks consistent.
+  const builtinRows = [
+    { id: "openclaw", name: "OpenClaw", provider: "built-in", model: "gpt-5.5 (OpenClaw gateway)" },
+    { id: "hermes",   name: "Hermes",   provider: "built-in", model: "hermes-agent (Hermes gateway)" },
+  ];
+  const allRows: { id: string; name: string; provider: string; model: string }[] = [
+    ...builtinRows,
+    ...profiles.map((p) => ({ id: p.id, name: p.name, provider: p.provider, model: p.model })),
+  ];
 
   function toggle(id: string) {
     setPicked((prev) => {
@@ -1931,19 +1949,20 @@ function CustomDebatePicker({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={onClose}>
-      <div className="w-full max-w-lg rounded-lg bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="border-b border-[#E2E8F0] px-5 py-3">
-          <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("chat.customDebateTitle")}</h3>
-          <p className="mt-1 text-xs text-[#64748B]">{t("chat.customDebateDesc")}</p>
+      <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-[#E2E8F0] px-5 py-4">
+          <h3 className="type-card-title">{t("chat.customDebateTitle")}</h3>
+          <p className="type-body-muted mt-1">{t("chat.customDebateDesc")}</p>
         </div>
-        <div className="max-h-[420px] overflow-y-auto px-5 py-3 space-y-1">
-          {profiles.map((p) => {
+        <div className="max-h-[420px] overflow-y-auto px-5 py-3 space-y-1.5">
+          {allRows.map((p) => {
             const order = picked.indexOf(p.id);
             const selected = order >= 0;
+            const isBuiltin = p.provider === "built-in";
             return (
               <label
                 key={p.id}
-                className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 ${
+                className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 transition ${
                   selected ? "border-[#0050A0] bg-[#EFF6FF]" : "border-[#E2E8F0] hover:border-[#94A3B8]"
                 }`}
               >
@@ -1951,22 +1970,29 @@ function CustomDebatePicker({
                   type="checkbox"
                   checked={selected}
                   onChange={() => toggle(p.id)}
-                  className="h-3 w-3"
+                  className="h-3.5 w-3.5"
                 />
                 {selected && (
-                  <span className="rounded-full bg-[#0050A0] px-1.5 text-[10px] font-semibold text-white">
+                  <span className="rounded-full bg-[#0050A0] px-1.5 text-[11px] font-semibold text-white">
                     #{order + 1}
                   </span>
                 )}
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-[#1A1A2E] truncate">{p.name}</div>
-                  <div className="text-[11px] text-[#64748B]">{p.provider} · {p.model}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[14px] font-medium tracking-[-0.01em] text-[#1A1A2E]">{p.name}</span>
+                    {isBuiltin && (
+                      <span className="rounded-full bg-[#F1F5F9] px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-[#64748B]">
+                        BUILT-IN
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[12px] leading-5 text-[#64748B]">{p.provider} · {p.model}</div>
                 </div>
                 {selected && order > 0 && (
                   <button
                     type="button"
                     onClick={(e) => { e.preventDefault(); moveUp(p.id); }}
-                    className="text-[11px] text-[#0050A0] hover:underline"
+                    className="text-[12px] text-[#0050A0] hover:underline"
                     title={t("chat.customDebateMoveUp")}
                   >
                     ↑
@@ -2024,7 +2050,10 @@ function NewConversationModal({
   onPickCustomDebate: () => void;
 }) {
   const t = useT();
-  const canCustomDebate = profiles.length >= 2;
+  // Custom Debate is always available now that the picker accepts OpenClaw
+  // and Hermes as participants — even a user with zero custom profiles can
+  // run an OpenClaw + Hermes debate through this code path.
+  const canCustomDebate = true;
 
   return (
     <div
@@ -2092,15 +2121,10 @@ function NewConversationModal({
               />
               <AgentChooserCard
                 label="Custom Debate"
-                detail={
-                  canCustomDebate
-                    ? "Pick 2–4 of your enabled agents to debate the same prompt"
-                    : "Needs at least 2 enabled custom agents"
-                }
+                detail="Pick 2–4 participants (OpenClaw, Hermes, or your own agents)"
                 tone="teal"
                 icon={<Zap size={16} />}
-                onClick={canCustomDebate ? onPickCustomDebate : undefined}
-                disabled={!canCustomDebate}
+                onClick={onPickCustomDebate}
               />
             </div>
           </section>

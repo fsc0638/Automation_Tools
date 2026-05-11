@@ -17,7 +17,8 @@ use crate::{
     agents::{
         generic::AgentProfileRuntime,
         orchestrator::{
-            build_project_scope, run_agent_stream, strip_role_prefix, AgentMode, ServerEvent,
+            build_project_scope, run_agent_stream, strip_role_prefix, AgentMode,
+            DebateParticipant, ServerEvent,
         },
     },
     api::{
@@ -406,22 +407,39 @@ async fn agent_mode_from_str(
         Some("hermes") => AgentMode::HermesOnly,
         Some("debate") => AgentMode::Debate,
         Some(value) if value.starts_with("agents:") => {
-            let ids = value
+            // Each comma-separated token is either the reserved built-in
+            // word `openclaw` / `hermes`, or a UUID pointing to one of the
+            // user's enabled agent profiles. The frontend picker enforces
+            // 2-4 entries up front; we additionally check here so a malformed
+            // payload can't drive a one-agent "debate".
+            let raw_tokens = value
                 .trim_start_matches("agents:")
                 .split(',')
-                .filter_map(|raw| Uuid::parse_str(raw.trim()).ok())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
                 .take(4)
                 .collect::<Vec<_>>();
-            if ids.len() < 2 {
+            if raw_tokens.len() < 2 {
                 return Err(AppError::BadRequest(
-                    "Custom debate requires at least 2 agent profiles".into(),
+                    "Custom debate requires at least 2 participants".into(),
                 ));
             }
-            let mut profiles = Vec::new();
-            for id in ids {
-                profiles.push(load_agent_profile_runtime(state, user_id, id).await?);
+            let mut participants: Vec<DebateParticipant> = Vec::new();
+            for tok in raw_tokens {
+                let lower = tok.to_ascii_lowercase();
+                if lower == "openclaw" {
+                    participants.push(DebateParticipant::OpenClaw);
+                } else if lower == "hermes" {
+                    participants.push(DebateParticipant::Hermes);
+                } else {
+                    let profile_id = Uuid::parse_str(tok)
+                        .map_err(|_| AppError::BadRequest(format!("Invalid debate participant: {tok}")))?;
+                    participants.push(DebateParticipant::Custom(
+                        load_agent_profile_runtime(state, user_id, profile_id).await?,
+                    ));
+                }
             }
-            AgentMode::CustomDebate(profiles)
+            AgentMode::CustomDebate(participants)
         }
         Some(value) if value.starts_with("agent:") => {
             let id = value.trim_start_matches("agent:");

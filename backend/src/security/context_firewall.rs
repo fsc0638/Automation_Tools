@@ -65,9 +65,21 @@ impl AgentDataPolicy {
     pub fn for_mode(mode: &AgentMode) -> Self {
         match mode {
             AgentMode::Custom(profile) => Self::from_runtime(profile),
-            AgentMode::CustomDebate(profiles) => profiles
+            AgentMode::CustomDebate(participants) => participants
                 .iter()
-                .map(Self::from_runtime)
+                .map(|p| match p {
+                    // Built-in participants inherit the platform's managed
+                    // default policy (matches what OpenClawOnly / HermesOnly
+                    // get); user-defined profiles bring their own per-agent
+                    // data policy from agent_profiles (mig 0017).
+                    crate::agents::orchestrator::DebateParticipant::OpenClaw
+                    | crate::agents::orchestrator::DebateParticipant::Hermes => {
+                        Self::managed_default()
+                    }
+                    crate::agents::orchestrator::DebateParticipant::Custom(profile) => {
+                        Self::from_runtime(profile)
+                    }
+                })
                 .reduce(Self::combine_most_restrictive)
                 .unwrap_or_else(Self::managed_default),
             AgentMode::OpenClawOnly | AgentMode::HermesOnly | AgentMode::Debate => {
