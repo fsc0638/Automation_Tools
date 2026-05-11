@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     api::{auth::AuthUser, AppState},
+    config::Config,
     error::AppResult,
 };
 
@@ -161,78 +162,172 @@ fn clamp_days(raw: Option<i64>) -> i64 {
     raw.unwrap_or(30).clamp(1, 365)
 }
 
+/// Per-token pricing helper. Mirrors `metrics.rs::price_for_event` so the
+/// global Insights page agrees with the per-project Insights tab on cost
+/// math. Custom agent profiles fall back to the OpenClaw price table for
+/// now — `cost_per_1k` lookup by `provider`/`model` is tracked separately.
+fn cost_for(cfg: &Config, agent: &str, tokens_in: i64, tokens_out: i64) -> f64 {
+    let (in_p, out_p) = if agent == "hermes" {
+        (cfg.hermes_price_per_1k_in, cfg.hermes_price_per_1k_out)
+    } else {
+        (cfg.openclaw_price_per_1k_in, cfg.openclaw_price_per_1k_out)
+    };
+    (tokens_in as f64 / 1000.0) * in_p + (tokens_out as f64 / 1000.0) * out_p
+}
+
 async fn user_usage(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Query(q): Query<UsageQuery>,
 ) -> AppResult<Json<UserUsage>> {
     let days = clamp_days(q.days);
+    let cfg = state.config.as_ref();
 
-    // NOTE: We splice `days` directly into the SQL as `INTERVAL '<n> days'`.
-    // It's a clamped integer, never a user-controlled string, so this is
-    // safe from injection. Parameterising INTERVAL via sqlx is awkward
-    // because Postgres expects either a literal or `make_interval(...)`,
-    // and we already validate the value above.
-    let by_project_sql = format!(
+    // `days` is the only string-interpolated value in this module's SQL;
+    // it is clamped to [1, 365] above, so no injection surface. We can't
+    // parameterise an INTERVAL literal directly with sqlx, and rebuilding
+    // each query with `make_interval($n)` adds noise without changing
+    // semantics for an internal clamped int.
+    //
+    // Schema reality (from migration 0007 + 0022): agent_usage_events
+    // stores `tokens_in INT`, `tokens_out INT`, and now `provider`/`model`.
+    // There is NO `cost_usd` column; cost is computed Rust-side from
+    // per-1k token prices the same way metrics.rs::cost_summary does it.
+
+    // ----- Raw rows: (project, agent, tokens_in, tokens_out, calls) -----
+    let raw_sql = format!(
         "SELECT
-            p.id   AS project_id,
-            p.name AS project_name,
-            COUNT(e.*)::int8                                AS calls,
-            COALESCE(SUM(e.input_tokens),  0)::int8         AS tokens_in,
-            COALESCE(SUM(e.output_tokens), 0)::int8         AS tokens_out,
-            COALESCE(SUM(e.cost_usd),      0)::float8       AS cost_usd
+            p.id                       AS project_id,
+            p.name                     AS project_name,
+            e.agent                    AS agent,
+            COALESCE(SUM(e.tokens_in),  0)::int8 AS tokens_in,
+            COALESCE(SUM(e.tokens_out), 0)::int8 AS tokens_out,
+            COUNT(*)::int8             AS calls
          FROM projects p
-         LEFT JOIN agent_usage_events e ON e.project_id = p.id
+         JOIN agent_usage_events e ON e.project_id = p.id
             AND e.created_at >= NOW() - INTERVAL '{days} days'
          WHERE user_can_access_project(p.id, $1, 'viewer')
-         GROUP BY p.id, p.name
-         ORDER BY cost_usd DESC, calls DESC"
+         GROUP BY p.id, p.name, e.agent"
     );
-    let by_project: Vec<ProjectUsage> = sqlx::query_as(&by_project_sql)
+    let rows: Vec<(Uuid, String, String, i64, i64, i64)> = sqlx::query_as(&raw_sql)
         .bind(auth_user.id)
         .fetch_all(&state.db)
         .await?;
 
-    let by_agent_sql = format!(
+    // Build by_project and by_agent rollups in one pass.
+    use std::collections::HashMap;
+    let mut project_map: HashMap<Uuid, ProjectUsage> = HashMap::new();
+    let mut agent_map: HashMap<String, AgentUsage> = HashMap::new();
+
+    for (project_id, project_name, agent, tokens_in, tokens_out, calls) in rows {
+        let cost = cost_for(cfg, &agent, tokens_in, tokens_out);
+        let p = project_map.entry(project_id).or_insert(ProjectUsage {
+            project_id,
+            project_name,
+            calls: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+        });
+        p.calls += calls;
+        p.tokens_in += tokens_in;
+        p.tokens_out += tokens_out;
+        p.cost_usd += cost;
+
+        let a = agent_map.entry(agent.clone()).or_insert(AgentUsage {
+            agent,
+            calls: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+        });
+        a.calls += calls;
+        a.tokens_in += tokens_in;
+        a.tokens_out += tokens_out;
+        a.cost_usd += cost;
+    }
+
+    // Include projects with zero usage so the side-bar listing stays
+    // stable across windows (e.g. you can still click into a project
+    // that didn't get any agent calls in the last N days).
+    let zero_projects: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT p.id, p.name FROM projects p
+         WHERE user_can_access_project(p.id, $1, 'viewer')",
+    )
+    .bind(auth_user.id)
+    .fetch_all(&state.db)
+    .await?;
+    for (id, name) in zero_projects {
+        project_map.entry(id).or_insert(ProjectUsage {
+            project_id: id,
+            project_name: name,
+            calls: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+        });
+    }
+
+    let mut by_project: Vec<ProjectUsage> = project_map.into_values().collect();
+    by_project.sort_by(|a, b| {
+        b.cost_usd
+            .partial_cmp(&a.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.calls.cmp(&a.calls))
+    });
+
+    let mut by_agent: Vec<AgentUsage> = agent_map.into_values().collect();
+    by_agent.sort_by(|a, b| {
+        b.cost_usd
+            .partial_cmp(&a.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.calls.cmp(&a.calls))
+    });
+
+    let total_calls: i64 = by_project.iter().map(|r| r.calls).sum();
+    let total_tokens_in: i64 = by_project.iter().map(|r| r.tokens_in).sum();
+    let total_tokens_out: i64 = by_project.iter().map(|r| r.tokens_out).sum();
+    let total_cost_usd: f64 = by_project.iter().map(|r| r.cost_usd).sum();
+
+    // ----- Daily trend: same raw shape but bucketed by day + agent so
+    //       the cost helper can be applied identically. -----
+    let daily_rows_sql = format!(
         "SELECT
-            e.agent                                         AS agent,
-            COUNT(*)::int8                                  AS calls,
-            COALESCE(SUM(e.input_tokens),  0)::int8         AS tokens_in,
-            COALESCE(SUM(e.output_tokens), 0)::int8         AS tokens_out,
-            COALESCE(SUM(e.cost_usd),      0)::float8       AS cost_usd
+            DATE_TRUNC('day', e.created_at)::date AS day,
+            e.agent                               AS agent,
+            COALESCE(SUM(e.tokens_in),  0)::int8  AS tokens_in,
+            COALESCE(SUM(e.tokens_out), 0)::int8  AS tokens_out,
+            COUNT(*)::int8                        AS calls
          FROM agent_usage_events e
          JOIN projects p ON p.id = e.project_id AND user_can_access_project(p.id, $1, 'viewer')
          WHERE e.created_at >= NOW() - INTERVAL '{days} days'
-         GROUP BY e.agent
-         ORDER BY cost_usd DESC, calls DESC"
+         GROUP BY 1, 2
+         ORDER BY 1"
     );
-    let by_agent: Vec<AgentUsage> = sqlx::query_as(&by_agent_sql)
-        .bind(auth_user.id)
-        .fetch_all(&state.db)
-        .await?;
+    let daily_rows: Vec<(NaiveDate, String, i64, i64, i64)> =
+        sqlx::query_as(&daily_rows_sql)
+            .bind(auth_user.id)
+            .fetch_all(&state.db)
+            .await?;
 
-    let total_calls       = by_project.iter().map(|r| r.calls).sum();
-    let total_tokens_in   = by_project.iter().map(|r| r.tokens_in).sum();
-    let total_tokens_out  = by_project.iter().map(|r| r.tokens_out).sum();
-    let total_cost_usd    = by_project.iter().map(|r| r.cost_usd).sum();
-
-    let daily_sql = format!(
-        "SELECT to_jsonb(d) FROM (
-            SELECT
-                DATE_TRUNC('day', e.created_at)::date AS day,
-                COUNT(*)::int8                          AS calls,
-                COALESCE(SUM(e.cost_usd), 0)::float8    AS cost_usd
-            FROM agent_usage_events e
-            JOIN projects p ON p.id = e.project_id AND user_can_access_project(p.id, $1, 'viewer')
-            WHERE e.created_at >= NOW() - INTERVAL '{days} days'
-            GROUP BY 1
-            ORDER BY 1
-         ) d"
-    );
-    let daily: Vec<JsonValue> = sqlx::query_scalar(&daily_sql)
-        .bind(auth_user.id)
-        .fetch_all(&state.db)
-        .await?;
+    let mut daily_map: std::collections::BTreeMap<NaiveDate, (i64, f64)> =
+        std::collections::BTreeMap::new();
+    for (day, agent, tokens_in, tokens_out, calls) in daily_rows {
+        let cost = cost_for(cfg, &agent, tokens_in, tokens_out);
+        let entry = daily_map.entry(day).or_insert((0, 0.0));
+        entry.0 += calls;
+        entry.1 += cost;
+    }
+    let daily: Vec<JsonValue> = daily_map
+        .into_iter()
+        .map(|(day, (calls, cost_usd))| {
+            serde_json::json!({
+                "day": day.format("%Y-%m-%d").to_string(),
+                "calls": calls,
+                "cost_usd": cost_usd,
+            })
+        })
+        .collect();
 
     Ok(Json(UserUsage {
         by_project,
