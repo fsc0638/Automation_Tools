@@ -186,6 +186,36 @@ export const organizations = {
   list: () => request<Organization[]>("/organizations"),
   workspaces: (organizationId: string) =>
     request<Workspace[]>(`/organizations/${organizationId}/workspaces`),
+  members: (organizationId: string) =>
+    request<AclMember[]>(`/organizations/${organizationId}/members`),
+  addMember: (organizationId: string, data: { email: string; role: OrgRole }) =>
+    request<AclMember>(`/organizations/${organizationId}/members`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateMember: (organizationId: string, userId: string, role: OrgRole) =>
+    request<AclMember>(`/organizations/${organizationId}/members/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  removeMember: (organizationId: string, userId: string) =>
+    request<void>(`/organizations/${organizationId}/members/${userId}`, { method: "DELETE" }),
+};
+
+export const projectAcl = {
+  list: (projectId: string) => request<AclMember[]>(`/projects/${projectId}/acl`),
+  add: (projectId: string, data: { email: string; role: ProjectRole }) =>
+    request<AclMember>(`/projects/${projectId}/acl`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (projectId: string, userId: string, role: ProjectRole) =>
+    request<AclMember>(`/projects/${projectId}/acl/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  remove: (projectId: string, userId: string) =>
+    request<void>(`/projects/${projectId}/acl/${userId}`, { method: "DELETE" }),
 };
 
 export const feedback = {
@@ -335,11 +365,22 @@ export interface Project {
   updated_at: string;
 }
 
+export type OrgRole = "owner" | "admin" | "member" | "viewer";
+export type ProjectRole = "owner" | "admin" | "editor" | "viewer";
+
+export interface AclMember {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: OrgRole | ProjectRole;
+  created_at: string;
+}
+
 export interface Organization {
   id: string;
   name: string;
   owner_user_id: string;
-  role?: "owner" | "admin" | "member" | "viewer" | null;
+  role?: OrgRole | null;
   created_at: string;
   updated_at: string;
 }
@@ -348,7 +389,7 @@ export interface Workspace {
   id: string;
   organization_id: string;
   name: string;
-  role?: "owner" | "admin" | "member" | "viewer" | null;
+  role?: OrgRole | null;
   created_at: string;
   updated_at: string;
 }

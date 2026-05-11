@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, Sparkles, Target, UserCog } from "lucide-react";
+import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Sparkles, Target, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { auth } from "@/lib/api";
@@ -56,6 +56,12 @@ export function Sidebar() {
       label: t("sidebar.agents"),
       description: t("sidebar.agentsDesc"),
       icon: UserCog,
+    },
+    {
+      href: "/access",
+      label: "Access",
+      description: "Organizations, workspaces, and sharing",
+      icon: ShieldCheck,
     },
   ];
 
