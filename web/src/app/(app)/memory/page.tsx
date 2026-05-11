@@ -141,50 +141,50 @@ export default function MemoryPage() {
     <div className="mx-auto flex max-w-4xl flex-col gap-4 p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-[#1A1A2E]">
+          <h1 className="type-page-title">
             <NotebookPen size={20} className="mr-2 inline" /> {t("memory.title")}
           </h1>
-          <p className="text-xs text-[#94A3B8]">{t("memory.subtitle")}</p>
+          <p className="type-meta mt-1">{t("memory.subtitle")}</p>
         </div>
         <button
           onClick={() => setShowCreate((v) => !v)}
-          className="inline-flex items-center gap-1 rounded-md bg-[#0050A0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#003B7A]"
+          className="inline-flex items-center gap-1.5 rounded-xl bg-[#0050A0] px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-white shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition hover:bg-[#003B7A]"
         >
-          <Plus size={12} /> {t("memory.newNote")}
+          <Plus size={13} /> {t("memory.newNote")}
         </button>
       </header>
 
-      <section className="rounded-lg border border-[#E2E8F0] bg-white p-4">
+      <section className="rounded-2xl border border-[#E2E8F0] bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2 text-sm font-semibold text-[#1A1A2E]">
+            <div className="type-card-title flex items-center gap-2">
               Project memory review
-              <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+              <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold tracking-[0.04em] text-amber-700">
                 {pendingCount} pending
               </span>
             </div>
-            <p className="mt-1 text-xs text-[#64748B]">Approve AI-generated project memory before it becomes durable context.</p>
+            <p className="type-body-muted mt-1">Approve AI-generated project memory before it becomes durable context.</p>
           </div>
           <select
             value={selectedProjectId}
             onChange={(e) => setSelectedProjectId(e.target.value)}
-            className="h-9 min-w-56 rounded-md border border-[#E2E8F0] bg-white px-3 text-xs"
+            className="h-10 min-w-56 rounded-xl border border-[#D6DFEA] bg-white px-3 text-[13px] outline-none focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
           >
             {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
         </div>
         {candidateLoading ? (
-          <div className="mt-4 rounded-md border border-dashed border-[#E2E8F0] p-6 text-center text-xs text-[#94A3B8]">Loading candidates…</div>
+          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">Loading candidates…</div>
         ) : candidates.length === 0 ? (
-          <div className="mt-4 rounded-md border border-dashed border-[#E2E8F0] p-6 text-center text-xs text-[#94A3B8]">No pending memory candidates for this project.</div>
+          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">No pending memory candidates for this project.</div>
         ) : (
           <div className="mt-4 space-y-3">
             {candidates.map((candidate) => (
-              <article key={candidate.id} className="rounded-lg border border-amber-200 bg-amber-50/35 p-4">
+              <article key={candidate.id} className="rounded-2xl border border-amber-200 bg-amber-50/35 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <div className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">Pending project summary</div>
-                    <div className="mt-1 text-[10px] text-[#94A3B8]">
+                    <div className="type-overline text-amber-700">Pending project summary</div>
+                    <div className="mt-1 text-[11px] text-[#94A3B8]">
                       {candidate.source_message_count} source messages · {new Date(candidate.created_at).toLocaleString()}
                     </div>
                   </div>
@@ -192,20 +192,20 @@ export default function MemoryPage() {
                     <button
                       disabled={reviewBusyId === candidate.id}
                       onClick={() => void approveCandidate(candidate)}
-                      className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-white shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition hover:bg-emerald-700 disabled:opacity-60"
                     >
                       <CheckCircle2 size={13} /> Approve
                     </button>
                     <button
                       disabled={reviewBusyId === candidate.id}
                       onClick={() => void rejectCandidate(candidate)}
-                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-red-700 transition hover:bg-red-50 disabled:opacity-60"
                     >
                       <XCircle size={13} /> Reject
                     </button>
                   </div>
                 </div>
-                <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-white p-3 text-xs leading-5 text-[#334155]">
+                <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-white p-3 text-[13px] leading-6 text-[#334155]">
                   {candidate.proposed_content}
                 </pre>
               </article>
@@ -218,16 +218,16 @@ export default function MemoryPage() {
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         placeholder={t("memory.searchPlaceholder")}
-        className="h-9 rounded-md border border-[#E2E8F0] bg-white px-3 text-sm"
+        className="h-10 rounded-xl border border-[#D6DFEA] bg-white px-3.5 text-[14px] leading-6 outline-none focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
       />
 
       {showCreate && (
-        <form onSubmit={(e) => void submit(e)} className="space-y-3 rounded-lg border border-[#E2E8F0] bg-white p-4">
+        <form onSubmit={(e) => void submit(e)} className="space-y-3 rounded-2xl border border-[#E2E8F0] bg-white p-5 shadow-sm">
           <input
             value={draft.title}
             onChange={(e) => setDraft({ ...draft, title: e.target.value })}
             placeholder={t("memory.titlePlaceholder")}
-            className="h-10 w-full rounded-md border border-[#E2E8F0] px-3 text-sm"
+            className="h-11 w-full rounded-xl border border-[#D6DFEA] px-3.5 text-[14px] leading-6 outline-none focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
             required
           />
           <textarea
@@ -235,7 +235,7 @@ export default function MemoryPage() {
             onChange={(e) => setDraft({ ...draft, body: e.target.value })}
             placeholder={t("memory.bodyPlaceholder")}
             rows={5}
-            className="w-full rounded-md border border-[#E2E8F0] px-3 py-2 text-sm leading-6"
+            className="w-full rounded-xl border border-[#D6DFEA] px-3.5 py-2.5 text-[14px] leading-7 outline-none focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
             required
           />
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -271,23 +271,23 @@ export default function MemoryPage() {
       {loading ? (
         <div className="p-8 text-center text-sm text-[#94A3B8]">{t("common.loading")}</div>
       ) : list.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-[#E2E8F0] p-12 text-center text-sm text-[#94A3B8]">{t("memory.empty")}</div>
+        <div className="type-meta rounded-2xl border border-dashed border-[#E2E8F0] p-12 text-center">{t("memory.empty")}</div>
       ) : (
-        <ul className="space-y-2">
+        <ul className="space-y-2.5">
           {list.map((n) => (
-            <li key={n.id} className="rounded-lg border border-[#E2E8F0] bg-white p-4">
+            <li key={n.id} className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-sm">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
-                    <h2 className="text-sm font-semibold text-[#1A1A2E]">{n.title}</h2>
-                    {n.pinned && <Pin size={11} className="text-amber-600" />}
+                    <h2 className="type-card-title">{n.title}</h2>
+                    {n.pinned && <Pin size={12} className="text-amber-600" />}
                   </div>
-                  <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[#475569]">{n.body}</p>
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
+                  <p className="mt-1 whitespace-pre-wrap text-[13px] leading-6 text-[#475569]">{n.body}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
                     {n.tags.map((tag) => (
-                      <span key={tag} className="rounded-full bg-slate-100 px-1.5 py-0.5 text-slate-600">{tag}</span>
+                      <span key={tag} className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{tag}</span>
                     ))}
-                    <span className="rounded-full bg-blue-50 px-1.5 py-0.5 text-blue-700">
+                    <span className="rounded-full bg-blue-50 px-2 py-0.5 text-blue-700">
                       {n.scope_projects.length === 0 ? t("memory.scopeAll") : t("memory.scopeN").replace("{n}", String(n.scope_projects.length))}
                     </span>
                     <span className="text-[#94A3B8]">{new Date(n.updated_at).toLocaleString()}</span>

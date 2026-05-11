@@ -207,11 +207,11 @@ export default function AccessPage() {
       <section className="rounded-[28px] border border-[#E2E8F0] bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full bg-[#EEF4FF] px-3 py-1 text-xs font-semibold text-[#0050A0]">
+            <div className="inline-flex items-center gap-2 rounded-full bg-[#EEF4FF] px-3 py-1 text-[12px] font-semibold tracking-[0.05em] text-[#0050A0]">
               <ShieldCheck size={13} /> Access control
             </div>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[#1A1A2E]">ACL Management</h1>
-            <p className="mt-2 max-w-2xl text-sm text-[#64748B]">
+            <h1 className="type-page-title mt-3">ACL Management</h1>
+            <p className="type-body-muted mt-2 max-w-2xl">
               Manage organization members and per-project sharing without touching the database.
             </p>
           </div>
@@ -231,24 +231,24 @@ export default function AccessPage() {
           <Card className="p-5">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="flex items-center gap-2 text-sm font-semibold text-[#1A1A2E]"><Building2 size={16} /> Organization access</div>
-                <p className="mt-1 text-sm text-[#64748B]">Invite users by account email and assign org-wide roles.</p>
+                <div className="type-card-title flex items-center gap-2"><Building2 size={16} /> Organization access</div>
+                <p className="type-body-muted mt-1">Invite users by account email and assign org-wide roles.</p>
               </div>
-              <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-[#0050A0]">{workspaceSummary}</span>
+              <span className="rounded-full bg-blue-50 px-3 py-1 text-[12px] font-semibold tracking-[0.05em] text-[#0050A0]">{workspaceSummary}</span>
             </div>
 
-            <label className="mt-5 block text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Organization</label>
+            <label className="type-overline mt-5 block">Organization</label>
             <select
               value={selectedOrgId}
               onChange={(event) => setSelectedOrgId(event.target.value)}
-              className="mt-2 w-full rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
+              className="mt-2 w-full rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-[14px] leading-6 outline-none transition focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
             >
               {orgList.map((org) => <option key={org.id} value={org.id}>{org.name} · {org.role}</option>)}
             </select>
 
             {selectedOrg && (
-              <div className="mt-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4 text-sm text-[#64748B]">
-                <div className="font-medium text-[#1A1A2E]">{selectedOrg.name}</div>
+              <div className="type-meta mt-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
+                <div className="text-[14px] font-medium leading-6 text-[#1A1A2E]">{selectedOrg.name}</div>
                 <div className="mt-1">Your role: <span className="font-semibold text-[#0050A0]">{selectedOrg.role}</span></div>
                 <div className="mt-1">Updated {formatDate(selectedOrg.updated_at)}</div>
               </div>
@@ -273,24 +273,24 @@ export default function AccessPage() {
           <Card className="p-5">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="flex items-center gap-2 text-sm font-semibold text-[#1A1A2E]"><FolderKey size={16} /> Project sharing</div>
-                <p className="mt-1 text-sm text-[#64748B]">Grant project-level owner, admin, editor, or viewer access.</p>
+                <div className="type-card-title flex items-center gap-2"><FolderKey size={16} /> Project sharing</div>
+                <p className="type-body-muted mt-1">Grant project-level owner, admin, editor, or viewer access.</p>
               </div>
-              <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">{projectList.length} projects</span>
+              <span className="rounded-full bg-emerald-50 px-3 py-1 text-[12px] font-semibold tracking-[0.05em] text-emerald-700">{projectList.length} projects</span>
             </div>
 
-            <label className="mt-5 block text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Project</label>
+            <label className="type-overline mt-5 block">Project</label>
             <select
               value={selectedProjectId}
               onChange={(event) => setSelectedProjectId(event.target.value)}
-              className="mt-2 w-full rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
+              className="mt-2 w-full rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-[14px] leading-6 outline-none transition focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
             >
               {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
 
             {selectedProject && (
-              <div className="mt-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4 text-sm text-[#64748B]">
-                <div className="font-medium text-[#1A1A2E]">{selectedProject.name}</div>
+              <div className="type-meta mt-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
+                <div className="text-[14px] font-medium leading-6 text-[#1A1A2E]">{selectedProject.name}</div>
                 <div className="mt-1">Source: <span className="font-semibold">{selectedProject.source_type}</span></div>
                 <div className="mt-1 truncate">{selectedProject.source_path}</div>
               </div>
@@ -322,7 +322,7 @@ function RoleSelect({ roles, value, onChange }: { roles: string[]; value: string
     <select
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      className="rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
+      className="rounded-2xl border border-[#D6DFEA] bg-white px-4 py-3 text-[14px] leading-6 outline-none transition focus:border-[#0050A0] focus:ring-2 focus:ring-blue-100"
     >
       {roles.map((role) => <option key={role} value={role}>{role}</option>)}
     </select>
@@ -353,9 +353,9 @@ function MemberList({
       {members.map((member) => (
         <div key={member.user_id} className="grid gap-3 border-b border-[#E2E8F0] p-4 last:border-b-0 md:grid-cols-[1fr_150px_auto] md:items-center">
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-[#1A1A2E]">{member.display_name || member.email}</div>
-            <div className="mt-1 truncate text-xs text-[#64748B]">{member.email}</div>
-            <div className="mt-2 text-xs text-[#94A3B8]">{ROLE_HELP[member.role]} · Added {formatDate(member.created_at)}</div>
+            <div className="truncate text-[14px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">{member.display_name || member.email}</div>
+            <div className="mt-1 truncate text-[12px] leading-5 text-[#64748B]">{member.email}</div>
+            <div className="mt-2 text-[12px] leading-5 text-[#94A3B8]">{ROLE_HELP[member.role]} · Added {formatDate(member.created_at)}</div>
           </div>
           <RoleSelect roles={roles} value={member.role} onChange={(role) => onRoleChange(member.user_id, role)} />
           <Button variant="ghost" disabled={busy} onClick={() => onRemove(member.user_id)}>

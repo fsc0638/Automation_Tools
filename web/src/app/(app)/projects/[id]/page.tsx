@@ -1180,9 +1180,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 )}
 
                 {showConversationSummary && activeConv && (
-                  {/* Outer space-y-2 stacks the 3-card grid above the per-conv
-                      summary chip (fsc-only addition). Typography inside the
-                      cards follows Hermes's [12px]/[14px] scale. */}
+                  // Outer space-y-2 stacks the 3-card grid above the per-conv
+                  // summary chip (fsc-only addition). Typography inside the
+                  // cards follows Hermes's [12px]/[14px] scale.
                   <div className="space-y-2">
                     <div className="grid gap-3 sm:grid-cols-3">
                       <div className="rounded-2xl border border-[#E2E8F0] bg-[#FBFCFE] px-4 py-3">
@@ -1197,30 +1197,31 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         <div className="text-[12px] font-semibold tracking-[0.05em] text-[#94A3B8]">Last user turn</div>
                         <div className="mt-1.5 text-[14px] font-semibold leading-6 text-[#1A1A2E]">{activeThreadSummary.lastUserAt ? formatRelativeTime(activeThreadSummary.lastUserAt) : "Not yet"}</div>
                       </div>
+                    </div>
 
                     {/* LLM-generated per-conversation summary. Backend refreshes
                         this after each turn; the chip is hidden until the first
                         successful refresh produces a row. */}
                     {convSummary && convSummary.summary && (
-                      <div className="rounded-2xl border border-[#DBEAFE] bg-[#EFF6FF] px-3 py-2">
+                      <div className="rounded-2xl border border-[#DBEAFE] bg-[#EFF6FF] px-4 py-3">
                         <div className="flex items-center justify-between gap-2">
-                          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#1D4ED8]">Conversation summary</div>
-                          <div className="text-[10px] text-[#64748B]">
+                          <div className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#1D4ED8]">Conversation summary</div>
+                          <div className="text-[11px] text-[#64748B]">
                             {formatRelativeTime(convSummary.updated_at)} · {convSummary.source_message_count} msgs
                           </div>
                         </div>
-                        <p className="mt-1 whitespace-pre-wrap text-sm text-[#1E3A8A]">{convSummary.summary}</p>
+                        <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-6 text-[#1E3A8A]">{convSummary.summary}</p>
                         {convSummary.highlights.length > 0 && (
-                          <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-[#1E3A8A]">
+                          <ul className="mt-2 list-disc space-y-1 pl-5 text-[12px] leading-5 text-[#1E3A8A]">
                             {convSummary.highlights.map((h, i) => (
                               <li key={i}>{h}</li>
                             ))}
                           </ul>
                         )}
                         {convSummary.keywords.length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-1">
+                          <div className="mt-2.5 flex flex-wrap gap-1.5">
                             {convSummary.keywords.map((k) => (
-                              <span key={k} className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-[#1D4ED8] ring-1 ring-[#BFDBFE]">
+                              <span key={k} className="rounded-full bg-white px-2 py-0.5 text-[11px] font-medium tracking-[-0.005em] text-[#1D4ED8] ring-1 ring-[#BFDBFE]">
                                 {k}
                               </span>
                             ))}
