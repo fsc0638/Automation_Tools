@@ -765,19 +765,23 @@ function TaskDetailDrawer({
     try {
       const filesArr = form.affected_files.split(/[\s,]+/).map((f) => f.trim()).filter(Boolean);
       const labelsArr = form.labels.split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
+      // Always send the AC v2 object (even when all 4 lists are empty)
+      // so the backend's COALESCE actually writes. Sending null silently
+      // no-ops via COALESCE(NULL, old) = old, leaving the textareas blank
+      // but DB unchanged, which kept the form dirty forever. The empty-
+      // object case is treated as "no structured AC" by the prompt
+      // builder, so falling through to the legacy free-text AC still works.
       const acV2: AcceptanceCriteriaV2 = {
         tests: splitList(form.ac_tests),
         commands: splitList(form.ac_commands),
         diff_hints: splitList(form.ac_diff_hints),
         behavior: splitList(form.ac_behavior),
       };
-      const acV2HasContent = (acV2.tests?.length ?? 0) + (acV2.commands?.length ?? 0)
-        + (acV2.diff_hints?.length ?? 0) + (acV2.behavior?.length ?? 0) > 0;
       const patch: UpdateTaskInput = {
         title: form.title.trim(),
         why: form.why.trim(),
         acceptance_criteria: form.acceptance_criteria.trim(),
-        acceptance_criteria_v2: acV2HasContent ? acV2 : null,
+        acceptance_criteria_v2: acV2,
         test_plan: form.test_plan.trim(),
         rollback_plan: form.rollback_plan.trim(),
         definition_of_done: form.definition_of_done.trim(),

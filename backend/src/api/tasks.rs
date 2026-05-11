@@ -413,19 +413,37 @@ fn build_task_prompt(task: &ProjectTask) -> String {
         out.push_str(why.trim());
         out.push_str("\n\n");
     }
-    if let Some(ac_v2) = task.acceptance_criteria_v2.as_ref() {
+    // Collect AC v2 items first so we can tell whether the v2 object has
+    // any actual content. An empty {} or {tests:[],commands:[],...} is
+    // sent by the frontend whenever the user clears the structured form,
+    // and we want those cases to fall through to the legacy free-text AC.
+    let ac_v2_sections: Vec<(&str, Vec<&str>)> = task
+        .acceptance_criteria_v2
+        .as_ref()
+        .map(|v| {
+            ["tests", "commands", "diff_hints", "behavior"]
+                .into_iter()
+                .filter_map(|key| {
+                    let arr = v.get(key)?.as_array()?;
+                    let items: Vec<&str> = arr
+                        .iter()
+                        .filter_map(|x| x.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                        .collect();
+                    if items.is_empty() { None } else { Some((key, items)) }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !ac_v2_sections.is_empty() {
         out.push_str("## 驗收條件 (機器可驗證)\n");
-        for key in ["tests", "commands", "diff_hints", "behavior"] {
-            if let Some(arr) = ac_v2.get(key).and_then(|v| v.as_array()) {
-                let items: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).filter(|s| !s.trim().is_empty()).collect();
-                if !items.is_empty() {
-                    out.push_str(&format!("**{key}**\n"));
-                    for it in items {
-                        out.push_str(&format!("- {it}\n"));
-                    }
-                    out.push('\n');
-                }
+        for (key, items) in ac_v2_sections {
+            out.push_str(&format!("**{key}**\n"));
+            for it in items {
+                out.push_str(&format!("- {it}\n"));
             }
+            out.push('\n');
         }
     } else if let Some(ac) = task.acceptance_criteria.as_deref().filter(|s| !s.trim().is_empty()) {
         out.push_str("## 驗收條件\n");
