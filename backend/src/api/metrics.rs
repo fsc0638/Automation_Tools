@@ -1,10 +1,10 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::Json,
     routing::get,
     Extension, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
@@ -549,28 +549,47 @@ struct BurndownResponse {
     velocity_per_day: f64,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct BurndownQuery {
+    /// Scope to a single sprint (UUID) or "none" for backlog-only.
+    /// Omit / "all" to include every task in the project.
+    pub sprint_id: Option<String>,
+    /// Window in days, clamped 7..=180. Default 60.
+    pub days: Option<i64>,
+}
+
 async fn metrics_burndown(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(project_id): Path<Uuid>,
+    Query(query): Query<BurndownQuery>,
 ) -> AppResult<Json<BurndownResponse>> {
     verify_project_access(&state.db, project_id, auth_user.id).await?;
     let db = &state.db;
 
-    // Cap the chart window at 60 days. For projects with their oldest task
-    // older than 60 days we still anchor at "today − 60d" so the chart
-    // stays readable. For very young projects (no tasks at all, or all
-    // recent), use the earliest task's date as the start.
-    let rows: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(
+    let days = query.days.unwrap_or(60).clamp(7, 180);
+    let (sprint_filter, sprint_bind): (&str, Option<Uuid>) = match query.sprint_id.as_deref() {
+        Some("none") | Some("backlog") => (" AND t.sprint_id IS NULL", None),
+        Some(other) if !other.is_empty() && other != "all" => {
+            let id = Uuid::parse_str(other)
+                .map_err(|_| AppError::BadRequest("invalid sprint_id".into()))?;
+            (" AND t.sprint_id = $3", Some(id))
+        }
+        _ => ("", None),
+    };
+
+    // Build SQL with the optional sprint filter inlined into both CTE
+    // references so totals + completion both respect the scope.
+    let sql = format!(
         "WITH bounds AS (
             SELECT
                 GREATEST(
                     COALESCE(MIN(created_at)::date, CURRENT_DATE),
-                    CURRENT_DATE - INTERVAL '60 days'
+                    CURRENT_DATE - ($2 || ' days')::interval
                 )::date AS start_day,
                 CURRENT_DATE AS end_day
-            FROM project_tasks
-            WHERE project_id = $1
+            FROM project_tasks t
+            WHERE t.project_id = $1{sprint_filter}
          ),
          days AS (
             SELECT generate_series(start_day, end_day, INTERVAL '1 day')::date AS day
@@ -587,18 +606,23 @@ async fn metrics_burndown(
                     CASE WHEN t.status = 'done' THEN t.updated_at ELSE NULL END
                 ) AS done_at
             FROM project_tasks t
-            WHERE t.project_id = $1
+            WHERE t.project_id = $1{sprint_filter}
          )
          SELECT
             d.day,
             (SELECT COUNT(*)::int8 FROM task_done_at t WHERE t.created_at::date <= d.day)                                                AS total,
             (SELECT COUNT(*)::int8 FROM task_done_at t WHERE t.done_at IS NOT NULL AND t.done_at::date <= d.day)                          AS done
          FROM days d
-         ORDER BY d.day",
-    )
-    .bind(project_id)
-    .fetch_all(db)
-    .await?;
+         ORDER BY d.day"
+    );
+
+    let mut q = sqlx::query_as::<_, (chrono::NaiveDate, i64, i64)>(&sql)
+        .bind(project_id)
+        .bind(days);
+    if let Some(s) = sprint_bind {
+        q = q.bind(s);
+    }
+    let rows = q.fetch_all(db).await?;
 
     let n = rows.len();
     if n == 0 {

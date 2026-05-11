@@ -22,7 +22,7 @@ git2 = "0.19"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 anyhow = "1"
 thiserror = "2"
@@ -35,3 +35,5 @@ aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
 zip = "2"
+metrics = "0.23"
+metrics-exporter-prometheus = { version = "0.15", default-features = false }

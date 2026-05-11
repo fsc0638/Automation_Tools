@@ -183,6 +183,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
         let mut timing: HashMap<String, AgentCallTiming> = HashMap::new();
+        // Track stream outcome so we can flip any pending task_attempts
+        // for this conversation to 'complete' or 'failed' once the run
+        // finishes. A single conversation can host multiple dispatches
+        // over its lifetime; we only flip rows still in 'pending'.
+        let mut stream_had_error = false;
+        let mut stream_had_done = false;
 
         while let Some(event) = stream.next().await {
             match &event {
@@ -280,8 +286,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                             .await;
                         }
                     }
+                    stream_had_done = true;
                 }
                 ServerEvent::Error { message } => {
+                    stream_had_error = true;
                     let _ = sqlx::query(
                         "INSERT INTO messages (conversation_id, role, content, agent_name)
                          VALUES ($1, 'system', $2, 'System')",
@@ -297,6 +305,25 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             if sender.send(WsMessage::Text(json.into())).await.is_err() {
                 return;
             }
+        }
+
+        // Flip any pending task_attempts on this conversation to
+        // 'complete' or 'failed' so the Roadmap drawer's Dispatch
+        // History reflects the run outcome. Only rows still pending
+        // are touched — re-runs of the same conv only update their
+        // own latest attempt. An error anywhere in the stream wins
+        // over a partial success.
+        if stream_had_error || stream_had_done {
+            let new_status = if stream_had_error { "failed" } else { "complete" };
+            let _ = sqlx::query(
+                "UPDATE task_attempts
+                 SET status = $1, updated_at = NOW()
+                 WHERE conversation_id = $2 AND status = 'pending'",
+            )
+            .bind(new_status)
+            .bind(query.conversation_id)
+            .execute(&state.db)
+            .await;
         }
 
         let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;

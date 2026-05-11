@@ -53,6 +53,12 @@ pub struct ProjectTask {
     // P3: sprint binding
     pub sprint_id: Option<Uuid>,
     pub sprint_name: Option<String>,
+    /// Count of task_comments. Always present (COALESCE 0). Lets the
+    /// Roadmap card show a "💬 N" chip without a per-card fetch.
+    pub comment_count: i64,
+    // B3: cross-project epic binding (nullable)
+    pub epic_id: Option<Uuid>,
+    pub epic_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -65,10 +71,16 @@ const TASK_SELECT: &str = "SELECT t.id, t.project_id, t.title, t.why, t.affected
         t.acceptance_criteria_v2, t.linked_pr_url, t.linked_commit_sha,
         t.depends_on,
         t.sprint_id, sp.name AS sprint_name,
+        COALESCE(cc.n, 0) AS comment_count,
+        t.epic_id, ep.name AS epic_name,
         t.created_at, t.updated_at
      FROM project_tasks t
      LEFT JOIN messages m ON m.id = t.source_message_id
-     LEFT JOIN sprints  sp ON sp.id = t.sprint_id";
+     LEFT JOIN sprints  sp ON sp.id = t.sprint_id
+     LEFT JOIN epics    ep ON ep.id = t.epic_id
+     LEFT JOIN (
+        SELECT task_id, COUNT(*)::int8 AS n FROM task_comments GROUP BY task_id
+     ) cc ON cc.task_id = t.id";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTask {
@@ -90,6 +102,7 @@ pub struct CreateTask {
     pub linked_commit_sha: Option<String>,
     pub depends_on: Option<Vec<Uuid>>,
     pub sprint_id: Option<Uuid>,
+    pub epic_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +129,10 @@ pub struct UpdateTask {
     /// a UUID to set. Omit to leave alone.
     #[serde(default, deserialize_with = "deserialize_some")]
     pub sprint_id: Option<Option<Uuid>>,
+    /// B3: same double-Option pattern as sprint_id — null clears the
+    /// epic binding, value sets it, absent leaves it alone.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub epic_id: Option<Option<Uuid>>,
     /// Optional explanation attached to a status transition; recorded
     /// in task_status_history. Ignored when status doesn't actually change.
     pub status_note: Option<String>,
@@ -191,6 +208,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/projects/:id/tasks/:task_id/attempts",
             get(list_task_attempts).post(dispatch_task),
+        )
+        .route(
+            "/projects/:id/tasks/:task_id/audit",
+            get(list_task_audit),
         )
         .route(
             "/projects/:id/tasks/:task_id/comments",
@@ -280,9 +301,9 @@ async fn create_task(
           estimated_effort, priority, source_message_id,
           assignee, due_date, test_plan, rollback_plan, definition_of_done, labels,
           acceptance_criteria_v2, linked_pr_url, linked_commit_sha, depends_on,
-          sprint_id)
+          sprint_id, epic_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                 $15, $16, $17, $18, $19)
+                 $15, $16, $17, $18, $19, $20)
          RETURNING id",
     )
     .bind(project_id)
@@ -304,6 +325,7 @@ async fn create_task(
     .bind(req.linked_commit_sha.as_deref())
     .bind(&depends_on)
     .bind(req.sprint_id)
+    .bind(req.epic_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -346,15 +368,32 @@ async fn update_task(
         }
     }
 
-    // Capture the pre-update status so we know if a transition happened.
-    let prev: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM project_tasks WHERE id = $1 AND project_id = $2",
+    // Capture the pre-update snapshot of every audited field so we can
+    // diff after the UPDATE and write task_audit_log rows for whatever
+    // actually changed. status still goes to task_status_history, not
+    // here, so we don't duplicate that timeline.
+    #[allow(clippy::type_complexity)]
+    let prev: Option<(
+        String,                 // status (for status_history below)
+        Option<Uuid>,           // sprint_id
+        Option<String>,         // assignee
+        String,                 // priority
+        Option<NaiveDate>,      // due_date
+        Option<String>,         // linked_pr_url
+        Option<String>,         // linked_commit_sha
+        Vec<String>,            // labels
+        Vec<Uuid>,              // depends_on
+    )> = sqlx::query_as(
+        "SELECT status, sprint_id, assignee, priority, due_date,
+                linked_pr_url, linked_commit_sha, labels, depends_on
+         FROM project_tasks WHERE id = $1 AND project_id = $2",
     )
     .bind(task_id)
     .bind(project_id)
     .fetch_optional(&state.db)
     .await?;
-    let prev_status = prev.map(|(s,)| s);
+    let prev_status = prev.as_ref().map(|p| p.0.clone());
+    let prev_snapshot = prev.clone();
 
     // Reject self-dependency.
     if let Some(deps) = req.depends_on.as_deref() {
@@ -363,11 +402,14 @@ async fn update_task(
         }
     }
 
-    // sprint_id uses double-Option so the client can distinguish
-    // "leave alone" (absent / None) from "clear" (explicit null / Some(None)).
-    // The SQL uses CASE WHEN $20 THEN $21 ELSE sprint_id END so $21 may be NULL.
+    // sprint_id and epic_id both use double-Option semantics so the
+    // client can distinguish "leave alone" (absent / None) from "clear"
+    // (explicit null / Some(None)). SQL uses CASE WHEN $set THEN $val
+    // ELSE col END so $val may be NULL.
     let sprint_set = req.sprint_id.is_some();
     let sprint_val: Option<Uuid> = req.sprint_id.unwrap_or(None);
+    let epic_set   = req.epic_id.is_some();
+    let epic_val: Option<Uuid> = req.epic_id.unwrap_or(None);
 
     let updated: Option<(Uuid,)> = sqlx::query_as(
         "UPDATE project_tasks SET
@@ -389,6 +431,7 @@ async fn update_task(
             linked_commit_sha = COALESCE($16, linked_commit_sha),
             depends_on = COALESCE($17, depends_on),
             sprint_id = CASE WHEN $20 THEN $21 ELSE sprint_id END,
+            epic_id   = CASE WHEN $22 THEN $23 ELSE epic_id   END,
             updated_at = NOW()
          WHERE id = $18 AND project_id = $19
          RETURNING id",
@@ -414,6 +457,8 @@ async fn update_task(
     .bind(project_id)
     .bind(sprint_set)
     .bind(sprint_val)
+    .bind(epic_set)
+    .bind(epic_val)
     .fetch_optional(&state.db)
     .await?;
 
@@ -433,6 +478,86 @@ async fn update_task(
             .bind(req.status_note.as_deref())
             .execute(&state.db)
             .await;
+        }
+    }
+
+    // Audit log for non-status field changes (E1). Best-effort: if any
+    // INSERT fails, we don't fail the whole update — the user's edit
+    // already landed. status changes are skipped (covered by
+    // task_status_history above) to keep history canonical and avoid
+    // double-counting in PM rollups.
+    if let Some(snap) = prev_snapshot {
+        let (_status, p_sprint, p_assignee, p_priority, p_due, p_pr, p_commit, p_labels, p_deps) = snap;
+
+        async fn write_audit(
+            db: &sqlx::PgPool,
+            task_id: Uuid,
+            field: &str,
+            old: Option<String>,
+            new: Option<String>,
+            actor: Uuid,
+        ) {
+            // Skip writing when both sides are None/None or equal — no real change.
+            if old == new { return; }
+            let _ = sqlx::query(
+                "INSERT INTO task_audit_log (task_id, field, old_value, new_value, actor_id)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(task_id)
+            .bind(field)
+            .bind(old)
+            .bind(new)
+            .bind(actor)
+            .execute(db)
+            .await;
+        }
+
+        // sprint_id: double-Option semantics — only audit when client
+        // actually sent it. Persist as the UUID string (or empty for
+        // "moved to backlog" so old_value distinguishes "was unset").
+        if req.sprint_id.is_some() {
+            let new_val = sprint_val.map(|u| u.to_string());
+            let old_val = p_sprint.map(|u| u.to_string());
+            write_audit(&state.db, id, "sprint", old_val, new_val, auth_user.id).await;
+        }
+        // assignee
+        if let Some(new_a) = req.assignee.as_deref() {
+            let new_v = if new_a.is_empty() { None } else { Some(new_a.to_string()) };
+            write_audit(&state.db, id, "assignee", p_assignee, new_v, auth_user.id).await;
+        }
+        // priority
+        if let Some(new_p) = req.priority.as_deref() {
+            if p_priority != new_p {
+                write_audit(&state.db, id, "priority", Some(p_priority), Some(new_p.to_string()), auth_user.id).await;
+            }
+        }
+        // due_date
+        if let Some(new_d) = req.due_date {
+            let new_v = Some(new_d.to_string());
+            let old_v = p_due.map(|d| d.to_string());
+            write_audit(&state.db, id, "due_date", old_v, new_v, auth_user.id).await;
+        }
+        // PR url
+        if let Some(new_pr) = req.linked_pr_url.as_deref() {
+            let new_v = if new_pr.is_empty() { None } else { Some(new_pr.to_string()) };
+            write_audit(&state.db, id, "linked_pr_url", p_pr, new_v, auth_user.id).await;
+        }
+        // commit sha
+        if let Some(new_c) = req.linked_commit_sha.as_deref() {
+            let new_v = if new_c.is_empty() { None } else { Some(new_c.to_string()) };
+            write_audit(&state.db, id, "linked_commit_sha", p_commit, new_v, auth_user.id).await;
+        }
+        // labels (compare as JSON to keep order-deterministic)
+        if let Some(new_l) = req.labels.as_deref() {
+            let old_v = Some(serde_json::to_string(&p_labels).unwrap_or_default());
+            let new_v = Some(serde_json::to_string(new_l).unwrap_or_default());
+            write_audit(&state.db, id, "labels", old_v, new_v, auth_user.id).await;
+        }
+        // depends_on (JSON array of UUIDs)
+        if let Some(new_d) = req.depends_on.as_deref() {
+            let old_v = Some(serde_json::to_string(&p_deps).unwrap_or_default());
+            let new_v = Some(serde_json::to_string(new_d).unwrap_or_default());
+            write_audit(&state.db, id, "depends_on", old_v, new_v, auth_user.id).await;
         }
     }
 
@@ -815,6 +940,48 @@ async fn delete_task_comment(
         return Err(AppError::NotFound("Comment not found or not yours".into()));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct TaskAuditEntry {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub field: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub actor_id: Option<Uuid>,
+    pub actor_name: Option<String>,
+    pub changed_at: DateTime<Utc>,
+}
+
+async fn list_task_audit(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((project_id, task_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<Json<Vec<TaskAuditEntry>>> {
+    verify_access(&state, project_id, auth_user.id).await?;
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM project_tasks WHERE id = $1 AND project_id = $2",
+    )
+    .bind(task_id)
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("Task not found".into()));
+    }
+    let rows: Vec<TaskAuditEntry> = sqlx::query_as(
+        "SELECT a.id, a.task_id, a.field, a.old_value, a.new_value,
+                a.actor_id, u.display_name AS actor_name, a.changed_at
+         FROM task_audit_log a
+         LEFT JOIN users u ON u.id = a.actor_id
+         WHERE a.task_id = $1
+         ORDER BY a.changed_at DESC",
+    )
+    .bind(task_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows))
 }
 
 async fn list_task_history(

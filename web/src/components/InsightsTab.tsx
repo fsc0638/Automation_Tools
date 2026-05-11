@@ -6,7 +6,7 @@ import {
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
   ComposedChart, Area, Line, Legend,
 } from "recharts";
-import { projects as projectsApi, type MetricsBurndown, type MetricsSummary, type MetricsHealth } from "@/lib/api";
+import { projects as projectsApi, sprints as sprintsApi, type MetricsBurndown, type MetricsSummary, type MetricsHealth, type Sprint } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
 const MODE_COLORS: Record<string, string> = {
@@ -24,6 +24,9 @@ export function InsightsTab({ projectId }: { projectId: string }) {
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [health, setHealth] = useState<MetricsHealth | null>(null);
   const [burndown, setBurndown] = useState<MetricsBurndown | null>(null);
+  const [sprintList, setSprintList] = useState<Sprint[]>([]);
+  const [burndownSprint, setBurndownSprint] = useState<string>("all"); // "all" | "none" | uuid
+  const [burndownDays, setBurndownDays] = useState<number>(60);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
   const t = useT();
@@ -32,20 +35,24 @@ export function InsightsTab({ projectId }: { projectId: string }) {
     setLoading(true);
     setError("");
     try {
-      const [m, h, b] = await Promise.all([
+      const sprintOpts: { sprintId?: string; days?: number } = { days: burndownDays };
+      if (burndownSprint !== "all") sprintOpts.sprintId = burndownSprint;
+      const [m, h, b, sp] = await Promise.all([
         projectsApi.metricsSummary(projectId),
         projectsApi.metricsHealth(projectId).catch(() => null),
-        projectsApi.metricsBurndown(projectId).catch(() => null),
+        projectsApi.metricsBurndown(projectId, sprintOpts).catch(() => null),
+        sprintsApi.list(projectId).catch(() => [] as Sprint[]),
       ]);
       setMetrics(m);
       setHealth(h);
       setBurndown(b);
+      setSprintList(sp);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load metrics");
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, burndownSprint, burndownDays]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void refresh(); }, 0);
@@ -253,6 +260,36 @@ export function InsightsTab({ projectId }: { projectId: string }) {
             : t("insights.burndownDesc")
         }
       >
+        {/* Filter row — always visible so users can switch scope even on
+            an empty chart and watch it repopulate. Refetches via the
+            refresh useCallback dep array. */}
+        <div className="flex flex-wrap items-center gap-2 pb-3 text-xs">
+          <label className="text-[#64748B]">{t("roadmap.sprint")}:</label>
+          <select
+            value={burndownSprint}
+            onChange={(e) => setBurndownSprint(e.target.value)}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+          >
+            <option value="all">{t("roadmap.allSprints")}</option>
+            <option value="none">{t("roadmap.sprintBacklog")}</option>
+            {sprintList.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <label className="ml-2 text-[#64748B]">{t("insights.burndownWindow")}:</label>
+          <select
+            value={burndownDays}
+            onChange={(e) => setBurndownDays(Number(e.target.value))}
+            className="h-7 rounded-md border border-[#E2E8F0] bg-white px-2"
+          >
+            <option value={7}>7d</option>
+            <option value={14}>14d</option>
+            <option value={30}>30d</option>
+            <option value={60}>60d</option>
+            <option value={90}>90d</option>
+            <option value={180}>180d</option>
+          </select>
+        </div>
         {!burndown || burndown.points.length === 0 ? (
           <Empty hint={t("insights.burndownEmpty")} />
         ) : (
