@@ -135,6 +135,38 @@ function modeStyle(value: ChatMode) {
   return "bg-emerald-50 text-emerald-700 border border-emerald-200";
 }
 
+/**
+ * Infer the conversation's display mode/label from its title.
+ *
+ * Reason: `conversations.mode` in the DB is restricted by a CHECK
+ * constraint (mig 0002) to "openclaw" | "hermes" | "debate", so a
+ * custom-agent or custom-debate conversation always lands as
+ * "openclaw". The auto-generated title (`{modeLabel} Conversation N`)
+ * is currently the only signal we have for the real intent until
+ * backlog #25 widens the constraint.
+ *
+ * Returns null when the title carries no usable hint and the caller
+ * should fall back to the raw `conv.mode` styling.
+ */
+function inferConversationMode(conv: { title: string; mode: ChatMode }):
+  | { label: string; className: string }
+  | null {
+  const t = conv.title.trim();
+  if (t.startsWith("Custom Debate")) {
+    return {
+      label: "Custom Debate",
+      className: "bg-teal-50 text-teal-700 border border-teal-200",
+    };
+  }
+  if (t.startsWith("Custom Agent")) {
+    return {
+      label: "Custom Agent",
+      className: "bg-emerald-50 text-emerald-700 border border-emerald-200",
+    };
+  }
+  return null;
+}
+
 type StreamStatus = {
   agent: string;
   message: string;
@@ -1144,12 +1176,26 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       <div className="flex items-center gap-2">
                         <MessageSquarePlus size={14} className={activeConv?.id === conv.id ? "text-[#0050A0]" : "text-[#94A3B8]"} />
                         <span className="truncate text-[15px] font-medium tracking-[-0.01em] text-[#1A1A2E]">{conv.title}</span>
-                        {activeConv?.id === conv.id && <span className="rounded-full bg-white/90 px-2 py-0.5 text-[11px] font-semibold text-[#0050A0]">{t("convList.active")}</span>}
+                        {/* Active / streaming pills removed — the row already
+                            highlights the selected conversation via background
+                            colour, and the streaming state has its own
+                            indicator in the chat header. */}
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-[#64748B]">
-                        <span className={cn("rounded-full px-2 py-0.5", MODE_STYLES[conv.mode])}>{MODE_LABELS[conv.mode]}</span>
+                        {(() => {
+                          // Custom Debate / Custom Agent conversations land in
+                          // DB as mode="openclaw" because of the mig 0002 CHECK
+                          // constraint; infer the real intent from the
+                          // auto-generated title until backlog #25 widens the
+                          // constraint and we can store the actual mode.
+                          const inferred = inferConversationMode(conv);
+                          const style = inferred?.className ?? MODE_STYLES[conv.mode];
+                          const label = inferred?.label ?? MODE_LABELS[conv.mode];
+                          return (
+                            <span className={cn("rounded-full px-2 py-0.5", style)}>{label}</span>
+                          );
+                        })()}
                         <span>{formatRelativeTime(conv.updated_at)}</span>
-                        {streaming && activeConv?.id === conv.id && <span className="rounded-full border border-[#BFDBFE] bg-white px-2 py-0.5 text-[#1D4ED8]">Live</span>}
                       </div>
                       <div className="mt-2 line-clamp-2 text-[13px] leading-6 text-[#64748B]">
                         {activeConv?.id === conv.id
