@@ -97,6 +97,8 @@ export const projects = {
     request<MetricsSummary>(`/projects/${id}/metrics/summary`),
   metricsCost: (id: string) =>
     request<MetricsCost>(`/projects/${id}/metrics/cost`),
+  metricsBurndown: (id: string) =>
+    request<MetricsBurndown>(`/projects/${id}/metrics/burndown`),
   metricsHealth: (id: string) =>
     request<MetricsHealth>(`/projects/${id}/metrics/health`),
   remoteBranches: (url: string, git_identity_id?: string) =>
@@ -115,8 +117,10 @@ export const feedback = {
 };
 
 export const tasks = {
-  list: (projectId: string) =>
-    request<ProjectTask[]>(`/projects/${projectId}/tasks`),
+  list: (projectId: string, opts?: { sprintId?: string | "none" }) => {
+    const params = opts?.sprintId ? `?sprint_id=${encodeURIComponent(opts.sprintId)}` : "";
+    return request<ProjectTask[]>(`/projects/${projectId}/tasks${params}`);
+  },
   create: (projectId: string, data: CreateTaskInput) =>
     request<ProjectTask>(`/projects/${projectId}/tasks`, {
       method: "POST",
@@ -129,6 +133,31 @@ export const tasks = {
     }),
   delete: (projectId: string, taskId: string) =>
     request<void>(`/projects/${projectId}/tasks/${taskId}`, { method: "DELETE" }),
+  history: (projectId: string, taskId: string) =>
+    request<TaskStatusEvent[]>(`/projects/${projectId}/tasks/${taskId}/history`),
+  attempts: (projectId: string, taskId: string) =>
+    request<TaskAttempt[]>(`/projects/${projectId}/tasks/${taskId}/attempts`),
+  dispatch: (projectId: string, taskId: string, data: DispatchTaskInput) =>
+    request<DispatchTaskResult>(`/projects/${projectId}/tasks/${taskId}/attempts`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  comments: (projectId: string, taskId: string) =>
+    request<TaskComment[]>(`/projects/${projectId}/tasks/${taskId}/comments`),
+  addComment: (projectId: string, taskId: string, content: string) =>
+    request<TaskComment>(`/projects/${projectId}/tasks/${taskId}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+  updateComment: (projectId: string, taskId: string, commentId: string, content: string) =>
+    request<TaskComment>(`/projects/${projectId}/tasks/${taskId}/comments/${commentId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ content }),
+    }),
+  deleteComment: (projectId: string, taskId: string, commentId: string) =>
+    request<void>(`/projects/${projectId}/tasks/${taskId}/comments/${commentId}`, {
+      method: "DELETE",
+    }),
 };
 
 export const gitIdentities = {
@@ -296,6 +325,13 @@ export interface ConversationWithMessages extends Conversation {
 export type TaskStatus = "todo" | "in-progress" | "done" | "cancelled";
 export type TaskPriority = "low" | "medium" | "high" | "critical";
 
+export interface AcceptanceCriteriaV2 {
+  tests?: string[];
+  commands?: string[];
+  diff_hints?: string[];
+  behavior?: string[];
+}
+
 export interface ProjectTask {
   id: string;
   project_id: string;
@@ -307,6 +343,22 @@ export interface ProjectTask {
   priority: TaskPriority;
   status: TaskStatus;
   source_message_id?: string | null;
+  source_conversation_id?: string | null;
+  // P1 fields
+  assignee?: string | null;
+  due_date?: string | null;             // ISO date "YYYY-MM-DD"
+  test_plan?: string | null;
+  rollback_plan?: string | null;
+  definition_of_done?: string | null;
+  labels: string[];                     // always present, possibly empty
+  // P2 fields
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string | null;
+  linked_commit_sha?: string | null;
+  depends_on: string[];                 // always present, possibly empty
+  // P3 sprint binding
+  sprint_id?: string | null;
+  sprint_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -319,6 +371,17 @@ export interface CreateTaskInput {
   estimated_effort?: string;
   priority?: TaskPriority;
   source_message_id?: string;
+  assignee?: string;
+  due_date?: string;
+  test_plan?: string;
+  rollback_plan?: string;
+  definition_of_done?: string;
+  labels?: string[];
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string;
+  linked_commit_sha?: string;
+  depends_on?: string[];
+  sprint_id?: string;
 }
 
 export interface UpdateTaskInput {
@@ -329,6 +392,114 @@ export interface UpdateTaskInput {
   estimated_effort?: string;
   priority?: TaskPriority;
   status?: TaskStatus;
+  assignee?: string;
+  due_date?: string | null;
+  test_plan?: string;
+  rollback_plan?: string;
+  definition_of_done?: string;
+  labels?: string[];
+  acceptance_criteria_v2?: AcceptanceCriteriaV2 | null;
+  linked_pr_url?: string;
+  linked_commit_sha?: string;
+  depends_on?: string[];
+  /** P3: send a UUID string to bind to a sprint, send `null` to clear,
+   *  omit to leave alone. */
+  sprint_id?: string | null;
+  status_note?: string;
+}
+
+export interface TaskAttempt {
+  id: string;
+  task_id: string;
+  conversation_id: string;
+  mode: string;
+  status: "pending" | "running" | "complete" | "failed" | "cancelled";
+  dispatched_by?: string | null;
+  dispatched_by_name?: string | null;
+  note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DispatchTaskInput {
+  mode: string;
+  note?: string;
+  conversation_id?: string;
+  title?: string;
+}
+
+export interface DispatchTaskResult {
+  attempt: TaskAttempt;
+  conversation_id: string;
+  prompt: string;
+}
+
+export interface Sprint {
+  id: string;
+  project_id: string;
+  name: string;
+  goal?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  status: "planned" | "active" | "closed";
+  task_total: number;
+  task_done: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSprintInput {
+  name: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  status?: "planned" | "active" | "closed";
+}
+
+export interface UpdateSprintInput {
+  name?: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  status?: "planned" | "active" | "closed";
+}
+
+export const sprints = {
+  list: (projectId: string) =>
+    request<Sprint[]>(`/projects/${projectId}/sprints`),
+  create: (projectId: string, data: CreateSprintInput) =>
+    request<Sprint>(`/projects/${projectId}/sprints`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (projectId: string, sprintId: string, data: UpdateSprintInput) =>
+    request<Sprint>(`/projects/${projectId}/sprints/${sprintId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  delete: (projectId: string, sprintId: string) =>
+    request<void>(`/projects/${projectId}/sprints/${sprintId}`, { method: "DELETE" }),
+};
+
+export interface TaskComment {
+  id: string;
+  task_id: string;
+  user_id: string;
+  author_name?: string | null;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskStatusEvent {
+  id: string;
+  task_id: string;
+  from_status: TaskStatus | null;
+  to_status: TaskStatus;
+  changed_by?: string | null;
+  changed_by_name?: string | null;
+  note?: string | null;
+  changed_at: string;
 }
 
 export interface MetricsHealth {
@@ -341,6 +512,21 @@ export interface MetricsHealth {
     level: "Low" | "Medium" | "High";
     evidence: string;
   }>;
+}
+
+export interface MetricsBurndownPoint {
+  day: string;       // YYYY-MM-DD
+  total: number;     // cumulative tasks created by EOD
+  done: number;      // cumulative tasks completed by EOD
+  remaining: number; // total - done
+  ideal: number;     // linear reference trajectory
+}
+
+export interface MetricsBurndown {
+  points: MetricsBurndownPoint[];
+  final_total: number;
+  final_remaining: number;
+  velocity_per_day: number;
 }
 
 export interface MetricsCost {

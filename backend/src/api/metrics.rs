@@ -20,6 +20,7 @@ pub fn routes() -> Router<AppState> {
         .route("/projects/:id/metrics/summary", get(metrics_summary))
         .route("/projects/:id/metrics/cost", get(metrics_cost))
         .route("/projects/:id/metrics/health", get(metrics_health))
+        .route("/projects/:id/metrics/burndown", get(metrics_burndown))
 }
 
 #[derive(Debug, Serialize)]
@@ -516,4 +517,142 @@ async fn metrics_health(
         "dimensions": dimensions,
         "indexed_files": total_files,
     })))
+}
+
+#[derive(Debug, Serialize)]
+struct BurndownPoint {
+    /// ISO `YYYY-MM-DD`.
+    day: String,
+    /// Cumulative tasks created by EOD `day`.
+    total: i64,
+    /// Cumulative tasks that reached status='done' by EOD `day`. Uses
+    /// task_status_history (the audit log added in P1) for the actual
+    /// transition time, and falls back to project_tasks.updated_at for
+    /// pre-history tasks that have status='done'.
+    done: i64,
+    /// Tasks still open by EOD `day` (= total - done). Convenience for
+    /// the "remaining" line on the chart.
+    remaining: i64,
+    /// Linear ideal trajectory — full scope at the first day, drops to 0
+    /// at the last day. Frontend renders this as a dashed reference line.
+    ideal: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct BurndownResponse {
+    points: Vec<BurndownPoint>,
+    /// Final scope (total tasks today). Useful for the chart's y-axis cap.
+    final_total: i64,
+    /// Final remaining (open) tasks.
+    final_remaining: i64,
+    /// Average tasks closed per day over the window (velocity).
+    velocity_per_day: f64,
+}
+
+async fn metrics_burndown(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+) -> AppResult<Json<BurndownResponse>> {
+    verify_project_access(&state.db, project_id, auth_user.id).await?;
+    let db = &state.db;
+
+    // Cap the chart window at 60 days. For projects with their oldest task
+    // older than 60 days we still anchor at "today − 60d" so the chart
+    // stays readable. For very young projects (no tasks at all, or all
+    // recent), use the earliest task's date as the start.
+    let rows: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(
+        "WITH bounds AS (
+            SELECT
+                GREATEST(
+                    COALESCE(MIN(created_at)::date, CURRENT_DATE),
+                    CURRENT_DATE - INTERVAL '60 days'
+                )::date AS start_day,
+                CURRENT_DATE AS end_day
+            FROM project_tasks
+            WHERE project_id = $1
+         ),
+         days AS (
+            SELECT generate_series(start_day, end_day, INTERVAL '1 day')::date AS day
+            FROM bounds
+         ),
+         task_done_at AS (
+            SELECT
+                t.id,
+                t.created_at,
+                COALESCE(
+                    (SELECT MAX(h.changed_at)
+                       FROM task_status_history h
+                       WHERE h.task_id = t.id AND h.new_status = 'done'),
+                    CASE WHEN t.status = 'done' THEN t.updated_at ELSE NULL END
+                ) AS done_at
+            FROM project_tasks t
+            WHERE t.project_id = $1
+         )
+         SELECT
+            d.day,
+            (SELECT COUNT(*)::int8 FROM task_done_at t WHERE t.created_at::date <= d.day)                                                AS total,
+            (SELECT COUNT(*)::int8 FROM task_done_at t WHERE t.done_at IS NOT NULL AND t.done_at::date <= d.day)                          AS done
+         FROM days d
+         ORDER BY d.day",
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+
+    let n = rows.len();
+    if n == 0 {
+        return Ok(Json(BurndownResponse {
+            points: vec![],
+            final_total: 0,
+            final_remaining: 0,
+            velocity_per_day: 0.0,
+        }));
+    }
+
+    let final_total = rows.last().map(|r| r.1).unwrap_or(0);
+    let final_done = rows.last().map(|r| r.2).unwrap_or(0);
+    let final_remaining = final_total - final_done;
+
+    // Ideal line: start at final_total (the eventual scope) and linearly
+    // drop to 0 at the last day. Indexing-safe even when n == 1.
+    let scope = final_total as f64;
+    let denom = (n.saturating_sub(1)).max(1) as f64;
+
+    let points: Vec<BurndownPoint> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, &(day, total, done))| {
+            let ideal = scope * (1.0 - (i as f64) / denom);
+            BurndownPoint {
+                day: day.to_string(),
+                total,
+                done,
+                remaining: total - done,
+                ideal,
+            }
+        })
+        .collect();
+
+    // Velocity = sum of done deltas / days. Use windowed diffs so a
+    // single point window doesn't divide by zero.
+    let velocity_per_day = if n < 2 {
+        0.0
+    } else {
+        let mut closed: i64 = 0;
+        for win in rows.windows(2) {
+            let d = win[1].2 - win[0].2;
+            if d > 0 {
+                closed += d;
+            }
+        }
+        closed as f64 / (n - 1) as f64
+    };
+
+    Ok(Json(BurndownResponse {
+        points,
+        final_total,
+        final_remaining,
+        velocity_per_day,
+    }))
 }
