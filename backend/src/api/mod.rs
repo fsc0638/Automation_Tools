@@ -41,7 +41,9 @@ async fn healthz() -> &'static str {
 /// this into the orchestrator's actual readiness gate — `/healthz` only
 /// confirms the binary is listening, not that downstream deps are up.
 async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
-    match sqlx::query_scalar::<_, i64>("SELECT 1")
+    // Postgres `SELECT 1` returns INT4. Use i32 to avoid a decode error
+    // that would otherwise turn a healthy DB into a false readiness fail.
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.db)
         .await
     {
