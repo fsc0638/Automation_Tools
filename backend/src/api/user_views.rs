@@ -1,7 +1,7 @@
 //! User-scoped cross-project queries: a global Roadmap (B1), global
 //! conversation search (B2), global usage / cost aggregation (B4), and
 //! a cross-project code search (B5). Everything in this module is
-//! filtered by user_id so each user only sees their own data.
+//! filtered through project ACLs so each user only sees projects they can access.
 
 use axum::{
     extract::{Query, State},
@@ -76,7 +76,7 @@ async fn list_user_tasks(
                 COALESCE(cc.n, 0)::int8 AS comment_count,
                 t.updated_at
          FROM project_tasks t
-         JOIN projects   p  ON p.id  = t.project_id AND p.user_id = $1
+         JOIN projects   p  ON p.id  = t.project_id AND user_can_access_project(p.id, $1, 'viewer')
          LEFT JOIN sprints sp ON sp.id = t.sprint_id
          LEFT JOIN epics   e  ON e.id  = t.epic_id
          LEFT JOIN (
@@ -148,7 +148,7 @@ async fn user_usage(
          FROM projects p
          LEFT JOIN agent_usage_events e ON e.project_id = p.id
             AND e.created_at >= NOW() - INTERVAL '30 days'
-         WHERE p.user_id = $1
+         WHERE user_can_access_project(p.id, $1, 'viewer')
          GROUP BY p.id, p.name
          ORDER BY cost_usd DESC, calls DESC",
     )
@@ -170,7 +170,7 @@ async fn user_usage(
                 COUNT(*)::int8                          AS calls,
                 COALESCE(SUM(e.cost_usd), 0)::float8    AS cost_usd
             FROM agent_usage_events e
-            JOIN projects p ON p.id = e.project_id AND p.user_id = $1
+            JOIN projects p ON p.id = e.project_id AND user_can_access_project(p.id, $1, 'viewer')
             WHERE e.created_at >= NOW() - INTERVAL '30 days'
             GROUP BY 1
             ORDER BY 1
@@ -242,7 +242,7 @@ async fn search_conversations(
                 c.updated_at,
                 ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY m.created_at DESC) AS rn
             FROM conversations c
-            JOIN projects p ON p.id = c.project_id AND p.user_id = $1
+            JOIN projects p ON p.id = c.project_id AND user_can_access_project(p.id, $1, 'viewer')
             LEFT JOIN messages m ON m.conversation_id = c.id
                AND LOWER(m.content) LIKE $2
             WHERE LOWER(c.title) LIKE $2
@@ -298,7 +298,7 @@ async fn search_code(
             f.path,
             f.size_bytes
          FROM project_files f
-         JOIN projects p ON p.id = f.project_id AND p.user_id = $1
+         JOIN projects p ON p.id = f.project_id AND user_can_access_project(p.id, $1, 'viewer')
          WHERE LOWER(f.path) LIKE $2
          ORDER BY p.name, f.path
          LIMIT $3",
