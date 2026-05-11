@@ -55,6 +55,13 @@ pub struct AgentProfile {
     pub enabled: bool,
     /// B7: free-form labels for grouping in the /agents page.
     pub labels: Vec<String>,
+    pub allowed_classification_max: String,
+    pub allow_code_context: bool,
+    pub allow_project_memory: bool,
+    pub allow_conversation_history: bool,
+    pub require_redaction: bool,
+    pub external_processing_allowed: bool,
+    pub retention_policy: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

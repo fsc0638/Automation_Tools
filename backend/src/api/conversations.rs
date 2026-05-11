@@ -17,7 +17,7 @@ use crate::{
     },
     db::models::{Conversation, Message, Project},
     error::{AppError, AppResult},
-    security::context_firewall::secure_agent_context,
+    security::context_firewall::{secure_agent_context, AgentDataPolicy},
 };
 
 #[derive(Debug, Deserialize)]
@@ -209,12 +209,14 @@ async fn send_message(
 
     let mode = agent_mode_from_str(req.mode.as_deref());
     let mode_label = normalize_mode(req.mode.as_deref());
+    let data_policy = AgentDataPolicy::for_mode(&mode);
     let secured_context = secure_agent_context(
         &state.db,
         auth_user.id,
         project_id,
         conv_id,
         mode_label,
+        &data_policy,
         &project_scope,
         &history,
         project_summary.map(|summary| summary.summary),

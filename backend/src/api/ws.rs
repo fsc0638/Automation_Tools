@@ -26,7 +26,7 @@ use crate::{
     },
     db::models::{AgentProfile, Project},
     error::AppError,
-    security::context_firewall::secure_agent_context,
+    security::context_firewall::{secure_agent_context, AgentDataPolicy},
 };
 
 #[derive(Debug, Deserialize)]
@@ -176,12 +176,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                 .flatten();
 
         let mode_label = mode_label(&agent_mode);
+        let data_policy = AgentDataPolicy::for_mode(&agent_mode);
         let secured_context = match secure_agent_context(
             &state.db,
             user_id,
             query.project_id,
             query.conversation_id,
             mode_label,
+            &data_policy,
             &project_scope,
             &history,
             project_summary.map(|summary| summary.summary),
@@ -418,6 +420,13 @@ async fn load_agent_profile_runtime(
         base_url: profile.base_url,
         role_prompt: profile.role_prompt,
         api_key,
+        allowed_classification_max: profile.allowed_classification_max,
+        allow_code_context: profile.allow_code_context,
+        allow_project_memory: profile.allow_project_memory,
+        allow_conversation_history: profile.allow_conversation_history,
+        require_redaction: profile.require_redaction,
+        external_processing_allowed: profile.external_processing_allowed,
+        retention_policy: profile.retention_policy,
     })
 }
 

@@ -11,6 +11,17 @@ pub enum DataClassification {
 }
 
 impl DataClassification {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "public" => Some(Self::Public),
+            "internal" => Some(Self::Internal),
+            "confidential" => Some(Self::Confidential),
+            "restricted" => Some(Self::Restricted),
+            "secret" => Some(Self::Secret),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Public => "public",

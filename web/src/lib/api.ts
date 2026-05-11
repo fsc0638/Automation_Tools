@@ -350,6 +350,13 @@ export interface AgentProfile {
   enabled: boolean;
   /** B7: free-form labels for grouping agents on the /agents page. */
   labels: string[];
+  allowed_classification_max: "public" | "internal" | "confidential" | "restricted" | "secret";
+  allow_code_context: boolean;
+  allow_project_memory: boolean;
+  allow_conversation_history: boolean;
+  require_redaction: boolean;
+  external_processing_allowed: boolean;
+  retention_policy: "none" | "session" | "provider_default";
   created_at: string;
   updated_at: string;
 }
@@ -363,6 +370,13 @@ export interface CreateAgentProfileInput {
   api_key: string;
   enabled?: boolean;
   labels?: string[];
+  allowed_classification_max?: string;
+  allow_code_context?: boolean;
+  allow_project_memory?: boolean;
+  allow_conversation_history?: boolean;
+  require_redaction?: boolean;
+  external_processing_allowed?: boolean;
+  retention_policy?: string;
 }
 
 export interface UpdateAgentProfileInput {
@@ -374,6 +388,13 @@ export interface UpdateAgentProfileInput {
   api_key?: string;
   labels?: string[];
   enabled?: boolean;
+  allowed_classification_max?: string;
+  allow_code_context?: boolean;
+  allow_project_memory?: boolean;
+  allow_conversation_history?: boolean;
+  require_redaction?: boolean;
+  external_processing_allowed?: boolean;
+  retention_policy?: string;
 }
 
 export interface Conversation {

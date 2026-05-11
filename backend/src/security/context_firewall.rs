@@ -6,7 +6,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    agents::orchestrator::ProjectScope,
+    agents::{
+        generic::AgentProfileRuntime,
+        orchestrator::{AgentMode, ProjectScope},
+    },
     db::models::Message,
     security::redaction::{classify_path, redact_secrets, DataClassification},
 };
@@ -18,6 +21,82 @@ pub struct SecuredAgentContext {
     pub project_summary: Option<String>,
     pub user_message: String,
     pub report: ContextFirewallReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentDataPolicy {
+    pub allowed_classification_max: DataClassification,
+    pub allow_code_context: bool,
+    pub allow_project_memory: bool,
+    pub allow_conversation_history: bool,
+    pub require_redaction: bool,
+    pub external_processing_allowed: bool,
+    pub retention_policy: String,
+}
+
+impl AgentDataPolicy {
+    pub fn managed_default() -> Self {
+        Self {
+            allowed_classification_max: DataClassification::Confidential,
+            allow_code_context: true,
+            allow_project_memory: true,
+            allow_conversation_history: true,
+            require_redaction: true,
+            external_processing_allowed: true,
+            retention_policy: "provider_default".into(),
+        }
+    }
+
+    pub fn from_runtime(profile: &AgentProfileRuntime) -> Self {
+        Self {
+            allowed_classification_max: DataClassification::parse(
+                &profile.allowed_classification_max,
+            )
+            .unwrap_or(DataClassification::Confidential),
+            allow_code_context: profile.allow_code_context,
+            allow_project_memory: profile.allow_project_memory,
+            allow_conversation_history: profile.allow_conversation_history,
+            require_redaction: profile.require_redaction,
+            external_processing_allowed: profile.external_processing_allowed,
+            retention_policy: profile.retention_policy.clone(),
+        }
+    }
+
+    pub fn for_mode(mode: &AgentMode) -> Self {
+        match mode {
+            AgentMode::Custom(profile) => Self::from_runtime(profile),
+            AgentMode::CustomDebate(profiles) => profiles
+                .iter()
+                .map(Self::from_runtime)
+                .reduce(Self::combine_most_restrictive)
+                .unwrap_or_else(Self::managed_default),
+            AgentMode::OpenClawOnly | AgentMode::HermesOnly | AgentMode::Debate => {
+                Self::managed_default()
+            }
+        }
+    }
+
+    fn combine_most_restrictive(a: Self, b: Self) -> Self {
+        Self {
+            allowed_classification_max: a
+                .allowed_classification_max
+                .min(b.allowed_classification_max),
+            allow_code_context: a.allow_code_context && b.allow_code_context,
+            allow_project_memory: a.allow_project_memory && b.allow_project_memory,
+            allow_conversation_history: a.allow_conversation_history
+                && b.allow_conversation_history,
+            require_redaction: a.require_redaction || b.require_redaction,
+            external_processing_allowed: a.external_processing_allowed
+                && b.external_processing_allowed,
+            retention_policy: if a.retention_policy == "none" || b.retention_policy == "none" {
+                "none".into()
+            } else if a.retention_policy == "session" || b.retention_policy == "session" {
+                "session".into()
+            } else {
+                "provider_default".into()
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -51,6 +130,7 @@ pub async fn secure_agent_context(
     project_id: Uuid,
     conversation_id: Uuid,
     agent_mode: &str,
+    policy: &AgentDataPolicy,
     project_scope: &ProjectScope,
     history: &[Message],
     project_summary: Option<String>,
@@ -59,30 +139,61 @@ pub async fn secure_agent_context(
     let mut acc = FirewallAccumulator::default();
 
     let mut secured_scope = project_scope.clone();
-    secured_scope.file_snapshot = project_scope.file_snapshot.as_deref().map(|text| {
-        sanitize_file_block_context("file_snapshot", text, FileBlockKind::Snapshot, &mut acc)
-    });
-    secured_scope.relevant_file_context =
-        project_scope.relevant_file_context.as_deref().map(|text| {
+    let allow_context = policy.external_processing_allowed;
+    if !allow_context {
+        acc.blocked_items
+            .push("external_processing_disabled_by_policy".into());
+    }
+    if allow_context && policy.allow_code_context {
+        secured_scope.file_snapshot = project_scope.file_snapshot.as_deref().map(|text| {
             sanitize_file_block_context(
-                "relevant_file_context",
+                "file_snapshot",
                 text,
-                FileBlockKind::Indexed,
+                FileBlockKind::Snapshot,
+                policy,
                 &mut acc,
             )
         });
+        secured_scope.relevant_file_context =
+            project_scope.relevant_file_context.as_deref().map(|text| {
+                sanitize_file_block_context(
+                    "relevant_file_context",
+                    text,
+                    FileBlockKind::Indexed,
+                    policy,
+                    &mut acc,
+                )
+            });
+    } else {
+        secured_scope.file_snapshot = Some("[Code context blocked by agent data policy]".into());
+        secured_scope.relevant_file_context =
+            Some("[Indexed code context blocked by agent data policy]".into());
+        acc.blocked_items
+            .push("code_context_disabled_by_policy".into());
+    }
 
-    let secured_summary =
-        project_summary.map(|summary| sanitize_plain("project_summary", &summary, &mut acc));
-    let secured_user_message = sanitize_plain("user_message", user_message, &mut acc);
-    let secured_history = history
-        .iter()
-        .map(|message| {
-            let mut m = message.clone();
-            m.content = sanitize_plain("history_message", &message.content, &mut acc);
-            m
-        })
-        .collect::<Vec<_>>();
+    let secured_summary = if allow_context && policy.allow_project_memory {
+        project_summary.map(|summary| sanitize_plain("project_summary", &summary, policy, &mut acc))
+    } else {
+        acc.blocked_items
+            .push("project_memory_disabled_by_policy".into());
+        None
+    };
+    let secured_user_message = sanitize_plain("user_message", user_message, policy, &mut acc);
+    let secured_history = if allow_context && policy.allow_conversation_history {
+        history
+            .iter()
+            .map(|message| {
+                let mut m = message.clone();
+                m.content = sanitize_plain("history_message", &message.content, policy, &mut acc);
+                m
+            })
+            .collect::<Vec<_>>()
+    } else {
+        acc.blocked_items
+            .push("conversation_history_disabled_by_policy".into());
+        Vec::new()
+    };
 
     let combined = acc.outbound_parts.join("\n---SECTION---\n");
     let hash = format!("{:x}", Sha256::digest(combined.as_bytes()));
@@ -144,8 +255,20 @@ async fn write_context_audit(
     Ok(())
 }
 
-fn sanitize_plain(label: &str, text: &str, acc: &mut FirewallAccumulator) -> String {
-    let sanitized = redact_secrets(text);
+fn sanitize_plain(
+    label: &str,
+    text: &str,
+    policy: &AgentDataPolicy,
+    acc: &mut FirewallAccumulator,
+) -> String {
+    let sanitized = if policy.require_redaction {
+        redact_secrets(text)
+    } else {
+        let mut result = redact_secrets(text);
+        result.text = text.to_string();
+        result.report.redacted_count = 0;
+        result
+    };
     acc.redacted_count += sanitized.report.redacted_count;
     acc.classification_max = acc.classification_max.max(sanitized.classification);
     acc.outbound_parts
@@ -163,6 +286,7 @@ fn sanitize_file_block_context(
     label: &str,
     text: &str,
     kind: FileBlockKind,
+    policy: &AgentDataPolicy,
     acc: &mut FirewallAccumulator,
 ) -> String {
     let mut output = String::new();
@@ -177,6 +301,7 @@ fn sanitize_file_block_context(
                 &mut current_header,
                 &mut current_path,
                 &mut current_body,
+                policy,
                 acc,
             );
             current_header = Some(line.to_string());
@@ -198,11 +323,19 @@ fn sanitize_file_block_context(
         &mut current_header,
         &mut current_path,
         &mut current_body,
+        policy,
         acc,
     );
 
     // Redact any secrets in non-file prose such as file-tree listings.
-    let sanitized = redact_secrets(&output);
+    let sanitized = if policy.require_redaction {
+        redact_secrets(&output)
+    } else {
+        let mut result = redact_secrets(&output);
+        result.text = output.clone();
+        result.report.redacted_count = 0;
+        result
+    };
     acc.redacted_count += sanitized.report.redacted_count;
     acc.classification_max = acc.classification_max.max(sanitized.classification);
     acc.outbound_parts
@@ -215,6 +348,7 @@ fn flush_file_block(
     current_header: &mut Option<String>,
     current_path: &mut Option<String>,
     current_body: &mut String,
+    policy: &AgentDataPolicy,
     acc: &mut FirewallAccumulator,
 ) {
     let Some(header) = current_header.take() else {
@@ -224,18 +358,41 @@ fn flush_file_block(
     let path_classification = classify_path(&path);
     acc.classification_max = acc.classification_max.max(path_classification);
 
-    if path_classification >= DataClassification::Restricted {
+    if path_classification > policy.allowed_classification_max
+        || path_classification >= DataClassification::Restricted
+    {
         acc.blocked_items.push(path.clone());
         output.push_str(&header);
         output.push('\n');
-        output.push_str("[BLOCKED_BY_CONTEXT_FIREWALL: restricted or secret file path]\n");
+        output.push_str("[BLOCKED_BY_CONTEXT_FIREWALL: file exceeds agent data policy]\n");
         current_body.clear();
         return;
     }
 
-    let sanitized = redact_secrets(current_body);
+    let sanitized = if policy.require_redaction {
+        redact_secrets(current_body)
+    } else {
+        let mut result = redact_secrets(current_body);
+        result.text = current_body.clone();
+        result.report.redacted_count = 0;
+        result
+    };
     acc.redacted_count += sanitized.report.redacted_count;
     acc.classification_max = acc.classification_max.max(sanitized.classification);
+    let effective_classification =
+        if policy.require_redaction && sanitized.report.redacted_count > 0 {
+            path_classification.max(DataClassification::Confidential)
+        } else {
+            sanitized.classification
+        };
+    if effective_classification > policy.allowed_classification_max {
+        acc.blocked_items.push(path.clone());
+        output.push_str(&header);
+        output.push('\n');
+        output.push_str("[BLOCKED_BY_CONTEXT_FIREWALL: content exceeds agent data policy]\n");
+        current_body.clear();
+        return;
+    }
     acc.included_files.push(path);
     output.push_str(&header);
     output.push('\n');
@@ -275,8 +432,14 @@ mod tests {
         let mut acc = FirewallAccumulator::default();
         let input = "Relevant files\n--- INDEXED FILE: .env [chunk 0] ---\nOPENAI_API_KEY=sk-secretsecretsecretsecret\n--- INDEXED FILE: src/main.rs [chunk 1] ---\nlet token = \"ghp_abcdefghijklmnopqrstuvwxyz\";\n";
 
-        let output =
-            sanitize_file_block_context("relevant", input, FileBlockKind::Indexed, &mut acc);
+        let policy = AgentDataPolicy::managed_default();
+        let output = sanitize_file_block_context(
+            "relevant",
+            input,
+            FileBlockKind::Indexed,
+            &policy,
+            &mut acc,
+        );
         assert!(output.contains("[BLOCKED_BY_CONTEXT_FIREWALL"));
         assert!(!output.contains("sk-secret"));
         assert!(!output.contains("ghp_abcdefghijklmnopqrstuvwxyz"));
@@ -289,8 +452,14 @@ mod tests {
     fn snapshot_context_blocks_restricted_key_files() {
         let mut acc = FirewallAccumulator::default();
         let input = "Tree\n--- FILE: keys/service.pem ---\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n--- FILE: README.md ---\nhello\n";
-        let output =
-            sanitize_file_block_context("snapshot", input, FileBlockKind::Snapshot, &mut acc);
+        let policy = AgentDataPolicy::managed_default();
+        let output = sanitize_file_block_context(
+            "snapshot",
+            input,
+            FileBlockKind::Snapshot,
+            &policy,
+            &mut acc,
+        );
         assert!(output.contains("keys/service.pem"));
         assert!(output.contains("[BLOCKED_BY_CONTEXT_FIREWALL"));
         assert!(!output.contains("BEGIN PRIVATE KEY"));
