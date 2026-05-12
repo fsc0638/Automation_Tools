@@ -141,28 +141,42 @@ function modeStyle(value: ChatMode) {
  * Reason: `conversations.mode` in the DB is restricted by a CHECK
  * constraint (mig 0002) to "openclaw" | "hermes" | "debate", so a
  * custom-agent or custom-debate conversation always lands as
- * "openclaw". The auto-generated title (`{modeLabel} Conversation N`)
- * is currently the only signal we have for the real intent until
- * backlog #25 widens the constraint.
+ * "openclaw". The auto-generated title carries the real intent:
+ *   - "Custom Debate Conversation N" → custom debate
+ *   - "<AgentName> Conversation N"   → that single custom agent
+ *   - "OpenClaw Conversation N"      → just OpenClaw (matches conv.mode)
+ *   - "Hermes / Debate Mode …"       → matches conv.mode
+ * Until backlog #25 widens the CHECK constraint and we can store
+ * the real mode string, we recover the intent by matching the
+ * title prefix against the enabled agent profile list.
  *
  * Returns null when the title carries no usable hint and the caller
  * should fall back to the raw `conv.mode` styling.
  */
-function inferConversationMode(conv: { title: string; mode: ChatMode }):
+function inferConversationMode(
+  conv: { title: string; mode: ChatMode },
+  profiles: AgentProfile[] = [],
+):
   | { label: string; className: string }
   | null {
-  const t = conv.title.trim();
-  if (t.startsWith("Custom Debate")) {
+  const title = conv.title.trim();
+  if (title.startsWith("Custom Debate")) {
     return {
       label: "Custom Debate",
       className: "bg-teal-50 text-teal-700 border border-teal-200",
     };
   }
-  if (t.startsWith("Custom Agent")) {
-    return {
-      label: "Custom Agent",
-      className: "bg-emerald-50 text-emerald-700 border border-emerald-200",
-    };
+  // Match any enabled custom agent profile by name prefix. Sort by
+  // length descending so a longer name ("Gemini-lite") wins over a
+  // shorter one ("Gemini") that would otherwise match first.
+  const sorted = [...profiles].sort((a, b) => b.name.length - a.name.length);
+  for (const profile of sorted) {
+    if (title.startsWith(`${profile.name} `) || title === profile.name) {
+      return {
+        label: profile.name,
+        className: "bg-emerald-50 text-emerald-700 border border-emerald-200",
+      };
+    }
   }
   return null;
 }
@@ -1202,7 +1216,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                           // constraint; infer the real intent from the
                           // auto-generated title until backlog #25 widens the
                           // constraint and we can store the actual mode.
-                          const inferred = inferConversationMode(conv);
+                          const inferred = inferConversationMode(conv, agentProfiles);
                           const style = inferred?.className ?? MODE_STYLES[conv.mode];
                           const label = inferred?.label ?? MODE_LABELS[conv.mode];
                           return (
