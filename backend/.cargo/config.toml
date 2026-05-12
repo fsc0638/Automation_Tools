@@ -1,0 +1,21 @@
+# Move cargo's build output outside OneDrive.
+#
+# Windows Smart App Control / AppLocker blocks DLLs and EXEs that
+# come from OneDrive-synced paths because every newly-written file
+# is born with Mark-of-the-Web (MOTW). That manifests two ways here:
+#
+#   1. `cargo run`        → "os error 4551" / "Application control
+#                          policy blocked this file."
+#   2. `cargo build`      → "can't find crate for `displaydoc`" /
+#                          proc-macro DLLs that exist on disk but
+#                          rustc cannot load.
+#
+# Pointing the target dir at a local-only directory bypasses both
+# entirely. The path is outside the project tree, so it doesn't
+# clash with `.gitignore` and OneDrive never sees these files.
+#
+# If C:\rust-build doesn't suit your machine, override this with
+# the CARGO_TARGET_DIR env var — that takes precedence over this
+# config.
+[build]
+target-dir = "C:/rust-build/kway-backend"

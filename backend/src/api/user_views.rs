@@ -116,6 +116,11 @@ async fn list_user_tasks(
 pub struct ProjectUsage {
     pub project_id: Uuid,
     pub project_name: String,
+    /// True when the original project has been deleted and only a
+    /// `project_name_snapshot` remains. Frontend uses this to render
+    /// the row in a muted / strikethrough style. (mig 0023)
+    #[serde(default)]
+    pub project_deleted: bool,
     pub calls: i64,
     pub tokens_in: i64,
     pub tokens_out: i64,
@@ -194,22 +199,34 @@ async fn user_usage(
     // There is NO `cost_usd` column; cost is computed Rust-side from
     // per-1k token prices the same way metrics.rs::cost_summary does it.
 
-    // ----- Raw rows: (project, agent, tokens_in, tokens_out, calls) -----
+    // ----- Raw rows: (project_id_opt, project_name, agent, tokens_in, tokens_out, calls) -----
+    //
+    // mig 0023: events now carry e.user_id directly, so we filter the
+    // user's own spend without going through user_can_access_project().
+    // That keeps history visible even when the project (or the user's
+    // ACL on it) has since been deleted. project_id can be NULL when the
+    // project itself is gone — we fall back to project_name_snapshot
+    // and a synthesized zero-uuid so the rest of the rollup keeps a
+    // stable key per "logical project".
     let raw_sql = format!(
         "SELECT
-            p.id                       AS project_id,
-            p.name                     AS project_name,
-            e.agent                    AS agent,
-            COALESCE(SUM(e.tokens_in),  0)::int8 AS tokens_in,
-            COALESCE(SUM(e.tokens_out), 0)::int8 AS tokens_out,
-            COUNT(*)::int8             AS calls
-         FROM projects p
-         JOIN agent_usage_events e ON e.project_id = p.id
-            AND e.created_at >= NOW() - INTERVAL '{days} days'
-         WHERE user_can_access_project(p.id, $1, 'viewer')
-         GROUP BY p.id, p.name, e.agent"
+            COALESCE(p.id, '00000000-0000-0000-0000-000000000000'::uuid) AS project_id,
+            COALESCE(p.name, e.project_name_snapshot, '(deleted project)') AS project_name,
+            (p.id IS NULL)                                                AS project_deleted,
+            e.agent                                                       AS agent,
+            COALESCE(SUM(e.tokens_in),  0)::int8                          AS tokens_in,
+            COALESCE(SUM(e.tokens_out), 0)::int8                          AS tokens_out,
+            COUNT(*)::int8                                                AS calls
+         FROM agent_usage_events e
+         LEFT JOIN projects p ON p.id = e.project_id
+         WHERE e.user_id = $1
+           AND e.created_at >= NOW() - INTERVAL '{days} days'
+         GROUP BY COALESCE(p.id, '00000000-0000-0000-0000-000000000000'::uuid),
+                  COALESCE(p.name, e.project_name_snapshot, '(deleted project)'),
+                  (p.id IS NULL),
+                  e.agent"
     );
-    let rows: Vec<(Uuid, String, String, i64, i64, i64)> = sqlx::query_as(&raw_sql)
+    let rows: Vec<(Uuid, String, bool, String, i64, i64, i64)> = sqlx::query_as(&raw_sql)
         .bind(auth_user.id)
         .fetch_all(&state.db)
         .await?;
@@ -219,11 +236,12 @@ async fn user_usage(
     let mut project_map: HashMap<Uuid, ProjectUsage> = HashMap::new();
     let mut agent_map: HashMap<String, AgentUsage> = HashMap::new();
 
-    for (project_id, project_name, agent, tokens_in, tokens_out, calls) in rows {
+    for (project_id, project_name, project_deleted, agent, tokens_in, tokens_out, calls) in rows {
         let cost = cost_for(cfg, &agent, tokens_in, tokens_out);
         let p = project_map.entry(project_id).or_insert(ProjectUsage {
             project_id,
             project_name,
+            project_deleted,
             calls: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -261,6 +279,7 @@ async fn user_usage(
         project_map.entry(id).or_insert(ProjectUsage {
             project_id: id,
             project_name: name,
+            project_deleted: false,
             calls: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -290,7 +309,9 @@ async fn user_usage(
     let total_cost_usd: f64 = by_project.iter().map(|r| r.cost_usd).sum();
 
     // ----- Daily trend: same raw shape but bucketed by day + agent so
-    //       the cost helper can be applied identically. -----
+    //       the cost helper can be applied identically. Filter by
+    //       e.user_id (mig 0023) so historical days from deleted projects
+    //       still show up in the user's own time series. -----
     let daily_rows_sql = format!(
         "SELECT
             DATE_TRUNC('day', e.created_at)::date AS day,
@@ -299,8 +320,8 @@ async fn user_usage(
             COALESCE(SUM(e.tokens_out), 0)::int8  AS tokens_out,
             COUNT(*)::int8                        AS calls
          FROM agent_usage_events e
-         JOIN projects p ON p.id = e.project_id AND user_can_access_project(p.id, $1, 'viewer')
-         WHERE e.created_at >= NOW() - INTERVAL '{days} days'
+         WHERE e.user_id = $1
+           AND e.created_at >= NOW() - INTERVAL '{days} days'
          GROUP BY 1, 2
          ORDER BY 1"
     );
@@ -355,6 +376,10 @@ async fn user_usage(
 pub struct ProjectDebateHealth {
     pub project_id: Uuid,
     pub project_name: String,
+    /// True when the project was deleted but historical debate events
+    /// remain (project_name comes from the snapshot column). mig 0023.
+    #[serde(default)]
+    pub project_deleted: bool,
     pub debate_turns: i64,
     pub consensus_turns: i64,
     pub citation_turns: i64,
@@ -383,41 +408,45 @@ async fn user_debate_health(
 ) -> AppResult<Json<DebateHealth>> {
     let days = clamp_days(q.days);
 
-    // Per-project rollup: count debate turns, how many had a consensus
-    // marker, and how many cited at least one file.
+    // Per-project rollup: count debate turns, consensus, file-citation.
+    // mig 0023: filter by e.user_id (LEFT JOIN projects for live name),
+    // so deleted projects still surface their historical debate metrics
+    // via project_name_snapshot.
     let by_project_sql = format!(
         "SELECT
-            p.id                                                  AS project_id,
-            p.name                                                AS project_name,
-            COUNT(*) FILTER (WHERE e.mode = 'debate')::int8       AS debate_turns,
+            COALESCE(p.id, '00000000-0000-0000-0000-000000000000'::uuid) AS project_id,
+            COALESCE(p.name, e.project_name_snapshot, '(deleted project)') AS project_name,
+            (p.id IS NULL)                                                AS project_deleted,
+            COUNT(*) FILTER (WHERE e.mode = 'debate')::int8               AS debate_turns,
             COUNT(*) FILTER (
                 WHERE e.mode = 'debate' AND e.has_consensus_marker
-            )::int8                                                AS consensus_turns,
+            )::int8                                                       AS consensus_turns,
             COUNT(*) FILTER (
                 WHERE e.has_file_citation
-            )::int8                                                AS citation_turns
-         FROM projects p
-         LEFT JOIN agent_usage_events e ON e.project_id = p.id
-            AND e.created_at >= NOW() - INTERVAL '{days} days'
-         WHERE user_can_access_project(p.id, $1, 'viewer')
-         GROUP BY p.id, p.name
-         ORDER BY debate_turns DESC, p.name"
+            )::int8                                                       AS citation_turns
+         FROM agent_usage_events e
+         LEFT JOIN projects p ON p.id = e.project_id
+         WHERE e.user_id = $1
+           AND e.created_at >= NOW() - INTERVAL '{days} days'
+         GROUP BY COALESCE(p.id, '00000000-0000-0000-0000-000000000000'::uuid),
+                  COALESCE(p.name, e.project_name_snapshot, '(deleted project)'),
+                  (p.id IS NULL)
+         ORDER BY debate_turns DESC, project_name"
     );
     let by_project: Vec<ProjectDebateHealth> = sqlx::query_as(&by_project_sql)
         .bind(auth_user.id)
         .fetch_all(&state.db)
         .await?;
 
-    // Round distribution: for debate mode, count how many turns settled
-    // at each round number. Useful for spotting "always-9-rounds" patterns
-    // that suggest the consensus heuristic is too strict.
+    // Round distribution: same e.user_id-direct filter; no project join
+    // needed because we don't display the project here.
     let round_sql = format!(
         "SELECT
             COALESCE(e.round_number, 0)::int4 AS rounds,
             COUNT(*)::int8                    AS count
          FROM agent_usage_events e
-         JOIN projects p ON p.id = e.project_id AND user_can_access_project(p.id, $1, 'viewer')
-         WHERE e.mode = 'debate'
+         WHERE e.user_id = $1
+           AND e.mode = 'debate'
            AND e.phase = 'final'
            AND e.created_at >= NOW() - INTERVAL '{days} days'
          GROUP BY 1

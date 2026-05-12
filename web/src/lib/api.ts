@@ -806,6 +806,11 @@ export interface UserTask {
 export interface ProjectUsage {
   project_id: string;
   project_name: string;
+  /** mig 0023: true when the underlying project was deleted but its
+   *  historical cost events are still attributed to this user via the
+   *  snapshot column. Frontend renders these rows with a muted /
+   *  strikethrough label. */
+  project_deleted?: boolean;
   calls: number;
   tokens_in: number;
   tokens_out: number;
@@ -831,6 +836,10 @@ export interface UserUsage {
 export interface ProjectDebateHealth {
   project_id: string;
   project_name: string;
+  /** Same semantics as ProjectUsage.project_deleted — true when the
+   *  source project has been deleted but events still attribute to
+   *  this user. mig 0023. */
+  project_deleted?: boolean;
   debate_turns: number;
   consensus_turns: number;
   citation_turns: number;

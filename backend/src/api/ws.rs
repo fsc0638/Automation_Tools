@@ -138,6 +138,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             .await
             .ok()
             .flatten();
+        // Fetch the conversation title for the cost-events snapshot (mig 0023).
+        // We grab it per-message rather than once at session start so a
+        // rename mid-session is reflected in subsequent rows. Failure
+        // collapses to an empty string — the snapshot is best-effort and
+        // never blocks the chat.
+        let conversation_title_snapshot: String = sqlx::query_scalar(
+            "SELECT title FROM conversations WHERE id = $1",
+        )
+        .bind(query.conversation_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
 
         // user_id (mig 0021) lets the chat UI display the author's name
         // when the conversation lives in a shared project.
@@ -335,6 +349,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                                 &state.db,
                                 query.project_id,
                                 query.conversation_id,
+                                user_id,
+                                &project.name,
+                                &conversation_title_snapshot,
                                 saved_id.map(|(id,)| id),
                                 role,
                                 mode_label,
@@ -591,6 +608,9 @@ async fn record_usage_event(
     db: &sqlx::PgPool,
     project_id: Uuid,
     conversation_id: Uuid,
+    user_id: Uuid,
+    project_name_snapshot: &str,
+    conversation_title_snapshot: &str,
     message_id: Option<Uuid>,
     agent_role: &str,
     mode: &str,
@@ -616,15 +636,22 @@ async fn record_usage_event(
 
     let chars_out = content.chars().count() as i32;
 
+    // mig 0023: denormalize user_id + project/conv labels into the event row
+    // so the row survives conv/project deletion (FKs now ON DELETE SET NULL).
+    // The snapshot strings can be empty if the conv title fetch failed
+    // upstream; readers should COALESCE through current live name → snapshot
+    // → "(deleted)" placeholder.
     let _ = sqlx::query(
         "INSERT INTO agent_usage_events (
-             project_id, conversation_id, message_id, agent, mode, phase,
+             project_id, conversation_id, user_id, message_id, agent, mode, phase,
              round_number, ttft_ms, total_ms, tokens_in, tokens_out, chars_out,
-             has_consensus_marker, has_file_citation, provider, model
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+             has_consensus_marker, has_file_citation, provider, model,
+             project_name_snapshot, conversation_title_snapshot
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
     )
     .bind(project_id)
     .bind(conversation_id)
+    .bind(user_id)
     .bind(message_id)
     .bind(agent_role)
     .bind(mode)
@@ -639,6 +666,8 @@ async fn record_usage_event(
     .bind(detect_file_citation(content))
     .bind(provider)
     .bind(model)
+    .bind(project_name_snapshot)
+    .bind(conversation_title_snapshot)
     .execute(db)
     .await;
 }
