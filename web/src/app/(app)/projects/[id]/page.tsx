@@ -1,6 +1,6 @@
 "use client";
 import { memo, use, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
@@ -232,6 +232,11 @@ function formatRelativeTime(value: string) {
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  // Deep-link target tab. The global Roadmap (/roadmap) links each card
+  // to /projects/{id}?tab=roadmap so the user lands on that project's
+  // Roadmap board, not the chat composer. Insights / Cost can be reached
+  // the same way later if other surfaces want to deep-link them.
+  const searchParams = useSearchParams();
   const pushToast = useToastStore((state) => state.pushToast);
   const t = useT();
   const setShowAppSidebar = useWorkspaceChromeStore((state) => state.setShowAppSidebar);
@@ -274,7 +279,16 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [refreshStatus, setRefreshStatus] = useState("");
   const [conversationQuery, setConversationQuery] = useState("");
   const [contextTab, setContextTab] = useState<ContextTab>("files");
-  const [projectTab, setProjectTab] = useState<ProjectTab>("workspace");
+  const [projectTab, setProjectTab] = useState<ProjectTab>(() => {
+    // Read the desired tab from the URL once on mount. After this, manual
+    // tab clicks update local state only — we don't rewrite the URL on
+    // every tab switch to avoid spurious browser-history entries.
+    const requested = searchParams.get("tab");
+    if (requested === "roadmap" || requested === "insights" || requested === "cost") {
+      return requested;
+    }
+    return "workspace";
+  });
   const [fileQuery, setFileQuery] = useState("");
   const [selectedFilePath, setSelectedFilePath] = useState("");
   const [selectedFileContent, setSelectedFileContent] = useState("");

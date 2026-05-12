@@ -220,7 +220,7 @@ export default function GlobalInsightsPage() {
                   return (
                     <li key={p.project_id} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
                       <Link
-                        href={`/projects/${p.project_id}`}
+                        href={`/projects/${p.project_id}?tab=insights`}
                         className="truncate font-medium text-[#1A1A2E] hover:text-[#0050A0] hover:underline"
                       >
                         {p.project_name}
@@ -247,7 +247,7 @@ export default function GlobalInsightsPage() {
             <li key={p.project_id} className="flex items-center justify-between gap-3 px-4 py-3">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: PROJECT_COLORS[i % PROJECT_COLORS.length] }} />
-                <Link href={`/projects/${p.project_id}`} className="truncate text-sm font-medium text-[#1A1A2E] hover:text-[#0050A0] hover:underline">
+                <Link href={`/projects/${p.project_id}?tab=insights`} className="truncate text-sm font-medium text-[#1A1A2E] hover:text-[#0050A0] hover:underline">
                   {p.project_name}
                 </Link>
               </div>
@@ -255,7 +255,7 @@ export default function GlobalInsightsPage() {
                 <span>${p.cost_usd.toFixed(2)}</span>
                 <span>{p.calls} {t("globalInsights.callsShort")}</span>
                 <span>{(p.tokens_in + p.tokens_out).toLocaleString()} {t("globalInsights.tokensShort")}</span>
-                <Link href={`/projects/${p.project_id}`} className="text-[#0050A0]">
+                <Link href={`/projects/${p.project_id}?tab=insights`} className="text-[#0050A0]">
                   <ExternalLink size={12} />
                 </Link>
               </div>
