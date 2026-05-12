@@ -139,7 +139,7 @@ export default function GlobalInsightsPage() {
         {/* DEFERRED 11: by-agent breakdown. OpenClaw vs Hermes vs any custom
             agent profiles registered under that user. */}
         <section className="rounded-lg border border-[#E2E8F0] bg-white p-4">
-          <div className="mb-3 text-sm font-semibold text-[#1A1A2E]">By agent</div>
+          <div className="mb-3 text-sm font-semibold text-[#1A1A2E]">{t("insights.byAgentTitle")}</div>
           {usage.by_agent.length === 0 ? (
             <Empty />
           ) : (
@@ -184,20 +184,20 @@ export default function GlobalInsightsPage() {
       {health && (
         <section className="rounded-lg border border-[#E2E8F0] bg-white p-4">
           <div className="mb-3 flex items-center justify-between text-sm font-semibold text-[#1A1A2E]">
-            <span>Debate health (cross-project)</span>
+            <span>{t("insights.debateHealthTitle")}</span>
             <span className="text-xs font-normal text-[#94A3B8]">
-              {health.total_debate_turns} debate turns · last {health.days} days
+              {health.total_debate_turns} {t("insights.debateTurnsLabel")} · {t("insights.windowLast").replace("{days}", String(health.days))}
             </span>
           </div>
           <div className="grid gap-3 md:grid-cols-3">
-            <Kpi label="Consensus rate"   value={`${(health.consensus_rate * 100).toFixed(1)}%`} />
-            <Kpi label="File-citation rate" value={`${(health.file_citation_rate * 100).toFixed(1)}%`} />
-            <Kpi label="Projects active"  value={String(health.by_project.filter((p) => p.debate_turns > 0).length)} />
+            <Kpi label={t("insights.consensusRate")}     value={`${(health.consensus_rate * 100).toFixed(1)}%`} />
+            <Kpi label={t("insights.fileCitationRate")}  value={`${(health.file_citation_rate * 100).toFixed(1)}%`} />
+            <Kpi label={t("insights.projectsActive")}    value={String(health.by_project.filter((p) => p.debate_turns > 0).length)} />
           </div>
 
           {health.round_distribution.length > 0 && (
             <div className="mt-4">
-              <div className="mb-2 text-xs text-[#64748B]">Rounds-to-final distribution</div>
+              <div className="mb-2 text-xs text-[#64748B]">{t("insights.roundsDistribution")}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <BarChart data={health.round_distribution}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
@@ -226,9 +226,9 @@ export default function GlobalInsightsPage() {
                         {p.project_name}
                       </Link>
                       <div className="flex flex-shrink-0 items-center gap-3 text-[#475569]">
-                        <span>{p.debate_turns} turns</span>
-                        <span>consensus {(cRate * 100).toFixed(0)}%</span>
-                        <span>citation {(fRate * 100).toFixed(0)}%</span>
+                        <span>{p.debate_turns} {t("insights.turnsSuffix")}</span>
+                        <span>{t("insights.consensusSuffix")} {(cRate * 100).toFixed(0)}%</span>
+                        <span>{t("insights.citationSuffix")} {(fRate * 100).toFixed(0)}%</span>
                       </div>
                     </li>
                   );

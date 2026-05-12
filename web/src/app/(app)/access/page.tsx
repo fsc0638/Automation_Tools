@@ -18,20 +18,28 @@ import { Input } from "@/components/ui/input";
 import { Card, InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
 import { formatDate } from "@/lib/utils";
 import { useToastStore } from "@/lib/toast-store";
+import { useT } from "@/lib/i18n";
 
 const ORG_ROLES: OrgRole[] = ["owner", "admin", "member", "viewer"];
 const PROJECT_ROLES: ProjectRole[] = ["owner", "admin", "editor", "viewer"];
 
-const ROLE_HELP: Record<OrgRole | ProjectRole, string> = {
-  owner: "Full control, including owners and destructive actions.",
-  admin: "Manage members and most settings.",
-  member: "Workspace collaborator with standard access.",
-  editor: "Can operate project workflows and write actions.",
-  viewer: "Read-only visibility.",
-};
+// Build the role-help map inside a hook so `t(...)` re-evaluates on locale
+// change. (Module-level constants are frozen at module-eval time and would
+// only render in the locale that was active during the first import.)
+function useRoleHelp(): Record<OrgRole | ProjectRole, string> {
+  const t = useT();
+  return {
+    owner: t("access.roleHelpOwner"),
+    admin: t("access.roleHelpAdmin"),
+    member: t("access.roleHelpMember"),
+    editor: t("access.roleHelpEditor"),
+    viewer: t("access.roleHelpViewer"),
+  };
+}
 
 export default function AccessPage() {
   const pushToast = useToastStore((state) => state.pushToast);
+  const t = useT();
   const [orgList, setOrgList] = useState<Organization[]>([]);
   const [workspaceList, setWorkspaceList] = useState<Workspace[]>([]);
   const [projectList, setProjectList] = useState<Project[]>([]);
@@ -208,18 +216,16 @@ export default function AccessPage() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <div className="inline-flex items-center gap-2 rounded-full bg-[#EEF4FF] px-3 py-1 text-[12px] font-semibold tracking-[0.05em] text-[#0050A0]">
-              <ShieldCheck size={13} /> Access control
+              <ShieldCheck size={13} /> {t("access.headerBadge")}
             </div>
-            <h1 className="type-page-title mt-3">ACL Management</h1>
-            <p className="type-body-muted mt-2 max-w-2xl">
-              Manage organization members and per-project sharing without touching the database.
-            </p>
+            <h1 className="type-page-title mt-3">{t("access.title")}</h1>
+            <p className="type-body-muted mt-2 max-w-2xl">{t("access.subtitle")}</p>
           </div>
-          <Button onClick={() => void loadRoot()} disabled={loading || busy}>Refresh</Button>
+          <Button onClick={() => void loadRoot()} disabled={loading || busy}>{t("access.refresh")}</Button>
         </div>
       </section>
 
-      {error && <InlineBanner tone="error" title="Access settings unavailable" description={error} />}
+      {error && <InlineBanner tone="error" title={t("access.unavailable")} description={error} />}
 
       {loading ? (
         <div className="grid gap-5 xl:grid-cols-2">
@@ -231,13 +237,13 @@ export default function AccessPage() {
           <Card className="p-5">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="type-card-title flex items-center gap-2"><Building2 size={16} /> Organization access</div>
-                <p className="type-body-muted mt-1">Invite users by account email and assign org-wide roles.</p>
+                <div className="type-card-title flex items-center gap-2"><Building2 size={16} /> {t("access.orgAccessTitle")}</div>
+                <p className="type-body-muted mt-1">{t("access.orgAccessDesc")}</p>
               </div>
               <span className="rounded-full bg-blue-50 px-3 py-1 text-[12px] font-semibold tracking-[0.05em] text-[#0050A0]">{workspaceSummary}</span>
             </div>
 
-            <label className="type-overline mt-5 block">Organization</label>
+            <label className="type-overline mt-5 block">{t("access.orgLabel")}</label>
             <select
               value={selectedOrgId}
               onChange={(event) => setSelectedOrgId(event.target.value)}
@@ -249,21 +255,21 @@ export default function AccessPage() {
             {selectedOrg && (
               <div className="type-meta mt-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
                 <div className="text-[14px] font-medium leading-6 text-[#1A1A2E]">{selectedOrg.name}</div>
-                <div className="mt-1">Your role: <span className="font-semibold text-[#0050A0]">{selectedOrg.role}</span></div>
-                <div className="mt-1">Updated {formatDate(selectedOrg.updated_at)}</div>
+                <div className="mt-1">{t("access.yourRole")}: <span className="font-semibold text-[#0050A0]">{selectedOrg.role}</span></div>
+                <div className="mt-1">{t("access.updatedAt")} {formatDate(selectedOrg.updated_at)}</div>
               </div>
             )}
 
             <form onSubmit={addOrgMember} className="mt-5 grid gap-3 rounded-2xl border border-[#E2E8F0] p-4 md:grid-cols-[1fr_150px_auto]">
-              <Input placeholder="user@example.com" value={orgEmail} onChange={(event) => setOrgEmail(event.target.value)} />
+              <Input placeholder={t("access.emailPlaceholder")} value={orgEmail} onChange={(event) => setOrgEmail(event.target.value)} />
               <RoleSelect roles={ORG_ROLES} value={orgRole} onChange={(role) => setOrgRole(role as OrgRole)} />
-              <Button type="submit" disabled={busy || !selectedOrgId || !orgEmail.trim()}><UserPlus size={15} /> Add</Button>
+              <Button type="submit" disabled={busy || !selectedOrgId || !orgEmail.trim()}><UserPlus size={15} /> {t("access.addButton")}</Button>
             </form>
 
             <MemberList
               members={orgMembers}
               roles={ORG_ROLES}
-              emptyTitle="No organization members"
+              emptyTitle={t("access.noOrgMembers")}
               busy={busy}
               onRoleChange={(userId, role) => updateOrgMember(userId, role as OrgRole)}
               onRemove={removeOrgMember}
@@ -273,13 +279,13 @@ export default function AccessPage() {
           <Card className="p-5">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="type-card-title flex items-center gap-2"><FolderKey size={16} /> Project sharing</div>
-                <p className="type-body-muted mt-1">Grant project-level owner, admin, editor, or viewer access.</p>
+                <div className="type-card-title flex items-center gap-2"><FolderKey size={16} /> {t("access.projectSharingTitle")}</div>
+                <p className="type-body-muted mt-1">{t("access.projectSharingDesc")}</p>
               </div>
-              <span className="rounded-full bg-emerald-50 px-3 py-1 text-[12px] font-semibold tracking-[0.05em] text-emerald-700">{projectList.length} projects</span>
+              <span className="rounded-full bg-emerald-50 px-3 py-1 text-[12px] font-semibold tracking-[0.05em] text-emerald-700">{projectList.length} {t("access.projectsCountSuffix")}</span>
             </div>
 
-            <label className="type-overline mt-5 block">Project</label>
+            <label className="type-overline mt-5 block">{t("access.projectLabel")}</label>
             <select
               value={selectedProjectId}
               onChange={(event) => setSelectedProjectId(event.target.value)}
@@ -291,21 +297,21 @@ export default function AccessPage() {
             {selectedProject && (
               <div className="type-meta mt-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
                 <div className="text-[14px] font-medium leading-6 text-[#1A1A2E]">{selectedProject.name}</div>
-                <div className="mt-1">Source: <span className="font-semibold">{selectedProject.source_type}</span></div>
+                <div className="mt-1">{t("access.sourceLabel")}: <span className="font-semibold">{selectedProject.source_type}</span></div>
                 <div className="mt-1 truncate">{selectedProject.source_path}</div>
               </div>
             )}
 
             <form onSubmit={addProjectMember} className="mt-5 grid gap-3 rounded-2xl border border-[#E2E8F0] p-4 md:grid-cols-[1fr_150px_auto]">
-              <Input placeholder="user@example.com" value={projectEmail} onChange={(event) => setProjectEmail(event.target.value)} />
+              <Input placeholder={t("access.emailPlaceholder")} value={projectEmail} onChange={(event) => setProjectEmail(event.target.value)} />
               <RoleSelect roles={PROJECT_ROLES} value={projectRole} onChange={(role) => setProjectRole(role as ProjectRole)} />
-              <Button type="submit" disabled={busy || !selectedProjectId || !projectEmail.trim()}><UserPlus size={15} /> Share</Button>
+              <Button type="submit" disabled={busy || !selectedProjectId || !projectEmail.trim()}><UserPlus size={15} /> {t("access.shareButton")}</Button>
             </form>
 
             <MemberList
               members={projectMembers}
               roles={PROJECT_ROLES}
-              emptyTitle="No project ACL entries"
+              emptyTitle={t("access.noProjectMembers")}
               busy={busy}
               onRoleChange={(userId, role) => updateProjectMember(userId, role as ProjectRole)}
               onRemove={removeProjectMember}
@@ -344,8 +350,10 @@ function MemberList({
   onRoleChange: (userId: string, role: string) => void;
   onRemove: (userId: string) => void;
 }) {
+  const t = useT();
+  const roleHelp = useRoleHelp();
   if (!members.length) {
-    return <SectionEmpty title={emptyTitle} description="Add an existing user by email to create the first ACL entry." />;
+    return <SectionEmpty title={emptyTitle} description={t("access.addFirstHint")} />;
   }
 
   return (
@@ -355,11 +363,11 @@ function MemberList({
           <div className="min-w-0">
             <div className="truncate text-[14px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">{member.display_name || member.email}</div>
             <div className="mt-1 truncate text-[12px] leading-5 text-[#64748B]">{member.email}</div>
-            <div className="mt-2 text-[12px] leading-5 text-[#94A3B8]">{ROLE_HELP[member.role]} · Added {formatDate(member.created_at)}</div>
+            <div className="mt-2 text-[12px] leading-5 text-[#94A3B8]">{roleHelp[member.role]} · {t("access.addedAt")} {formatDate(member.created_at)}</div>
           </div>
           <RoleSelect roles={roles} value={member.role} onChange={(role) => onRoleChange(member.user_id, role)} />
           <Button variant="ghost" disabled={busy} onClick={() => onRemove(member.user_id)}>
-            <Trash2 size={15} /> Remove
+            <Trash2 size={15} /> {t("access.removeButton")}
           </Button>
         </div>
       ))}

@@ -414,22 +414,22 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const hasFinal = statusText.includes("final") || statusText.includes("synthesis");
     return [
       {
-        title: "OpenClaw proposes",
-        detail: "Fast first pass and implementation angle.",
+        title: t("debate.stepOpenClaw"),
+        detail: t("debate.detailOpenClaw"),
         state: hasOpenClaw ? (hasHermes || hasFinal ? "done" : "active") : mode === "debate" && streaming ? "active" : "idle",
       },
       {
-        title: "Hermes challenges",
-        detail: "Counterpoints, risks, and stronger reasoning.",
+        title: t("debate.stepHermes"),
+        detail: t("debate.detailHermes"),
         state: hasHermes ? (hasFinal ? "done" : "active") : mode === "debate" && (hasOpenClaw || streaming) ? "queued" : "idle",
       },
       {
-        title: "Final synthesis",
-        detail: "Unified recommendation with trade-offs resolved.",
+        title: t("debate.stepFinal"),
+        detail: t("debate.detailFinal"),
         state: hasFinal ? "active" : mode === "debate" && (hasOpenClaw || hasHermes || streaming) ? "queued" : "idle",
       },
     ] as const;
-  }, [mode, streamStatusEntries, streaming]);
+  }, [mode, streamStatusEntries, streaming, t]);
 
   function syncTextareaHeight() {
     const target = textareaRef.current;
@@ -1978,7 +1978,8 @@ function CustomDebatePicker({
 
   // Built-in pseudo-profiles. Their `id` is the reserved literal accepted
   // by the backend parser; provider/model are shown for parity with custom
-  // rows so the UI looks consistent.
+  // rows so the UI looks consistent. provider="built-in" is used as a
+  // marker for the BUILT-IN badge — translated below.
   const builtinRows = [
     { id: "openclaw", name: "OpenClaw", provider: "built-in", model: "gpt-5.5 (OpenClaw gateway)" },
     { id: "hermes",   name: "Hermes",   provider: "built-in", model: "hermes-agent (Hermes gateway)" },
@@ -2042,7 +2043,7 @@ function CustomDebatePicker({
                     <span className="truncate text-[14px] font-medium tracking-[-0.01em] text-[#1A1A2E]">{p.name}</span>
                     {isBuiltin && (
                       <span className="rounded-full bg-[#F1F5F9] px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-[#64748B]">
-                        BUILT-IN
+                        {t("agents.badgeBuiltIn")}
                       </span>
                     )}
                   </div>
@@ -2125,27 +2126,25 @@ function NewConversationModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="border-b border-[#E2E8F0] px-6 py-5">
-          <h3 className="type-card-title">New conversation</h3>
-          <p className="type-body-muted mt-1">
-            Pick a single agent to start a focused chat, or set up a debate to compare multiple agents on the same prompt.
-          </p>
+          <h3 className="type-card-title">{t("chat.newConvModalTitle")}</h3>
+          <p className="type-body-muted mt-1">{t("chat.newConvModalDesc")}</p>
         </div>
 
         <div className="max-h-[60vh] space-y-5 overflow-y-auto px-6 py-5">
           {/* Single-agent section: 2 built-ins + each enabled custom profile */}
           <section>
-            <div className="type-overline mb-2.5">Single agent</div>
+            <div className="type-overline mb-2.5">{t("chat.singleAgentSection")}</div>
             <div className="grid gap-2.5 sm:grid-cols-2">
               <AgentChooserCard
-                label="OpenClaw"
-                detail="Codebase-aware, structured, conservative reviewer"
+                label={t("chat.modeOpenClaw")}
+                detail={t("agents.descOpenClaw")}
                 tone="blue"
                 icon={<Cpu size={16} />}
                 onClick={() => onPickSingle("openclaw")}
               />
               <AgentChooserCard
-                label="Hermes"
-                detail="Free-form reasoning, broader synthesis, faster turns"
+                label={t("chat.modeHermes")}
+                detail={t("agents.descHermes")}
                 tone="violet"
                 icon={<Bot size={16} />}
                 onClick={() => onPickSingle("hermes")}
@@ -2162,26 +2161,24 @@ function NewConversationModal({
               ))}
             </div>
             {profiles.length === 0 && (
-              <p className="type-meta mt-2">
-                Tip: add your own OpenAI / Gemini / Anthropic key on the Agents page to see more options here.
-              </p>
+              <p className="type-meta mt-2">{t("chat.customAgentTip")}</p>
             )}
           </section>
 
           {/* Multi-agent: built-in two-agent debate + custom 2–4 debate */}
           <section>
-            <div className="type-overline mb-2.5">Multi-agent debate</div>
+            <div className="type-overline mb-2.5">{t("chat.multiAgentSection")}</div>
             <div className="grid gap-2.5 sm:grid-cols-2">
               <AgentChooserCard
-                label="Debate Mode"
-                detail="OpenClaw and Hermes debate the same prompt with consensus heuristics"
+                label={t("chat.modeDebate")}
+                detail={t("chat.debateModeShortDesc")}
                 tone="amber"
                 icon={<Zap size={16} />}
                 onClick={() => onPickSingle("debate")}
               />
               <AgentChooserCard
-                label="Custom Debate"
-                detail="Pick 2–4 participants (OpenClaw, Hermes, or your own agents)"
+                label={t("chat.modeCustomDebate")}
+                detail={t("chat.customDebateShortDesc")}
                 tone="teal"
                 icon={<Zap size={16} />}
                 onClick={onPickCustomDebate}
@@ -2263,6 +2260,7 @@ function DebateStepCard({
   detail: string;
   state: "idle" | "queued" | "active" | "done";
 }) {
+  const t = useT();
   const toneClass = state === "done"
     ? "border-[#FDE68A] bg-white"
     : state === "active"
@@ -2280,12 +2278,12 @@ function DebateStepCard({
         : "bg-white text-[#A16207]";
 
   const statusLabel = state === "done"
-    ? "Done"
+    ? t("debate.statusDone")
     : state === "active"
-      ? "Running"
+      ? t("debate.statusRunning")
       : state === "queued"
-        ? "Queued"
-        : "Waiting";
+        ? t("debate.statusQueued")
+        : t("debate.statusWaiting");
 
   return (
     <div className={cn("rounded-2xl border p-4 shadow-sm", toneClass)}>
