@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Sparkles, Target, UserCog } from "lucide-react";
+import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Target, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { auth } from "@/lib/api";
@@ -50,18 +50,10 @@ export function Sidebar() {
           </div>
           <LocaleSwitcher tone="dark" />
         </div>
-
-        <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
-          <div className="flex items-start gap-3">
-            <div className="rounded-xl bg-[#3A7ECC]/20 p-2 text-blue-100">
-              <Sparkles size={15} />
-            </div>
-            <div>
-              <div className="text-[14px] font-medium tracking-[-0.01em] text-white">{t("sidebar.workspaceStatus")}</div>
-              <p className="mt-1 text-[13px] leading-6 text-blue-100/76">{t("sidebar.workspaceStatusDesc")}</p>
-            </div>
-          </div>
-        </div>
+        {/* Removed the "Workspace status" promo card — it was a static
+            marketing-style summary that duplicated information already
+            visible elsewhere (Projects list, conversation rail) and only
+            took vertical room from the actual nav. */}
       </div>
 
       {/* `min-h-0` releases the flex child from its intrinsic content
