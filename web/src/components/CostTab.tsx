@@ -40,7 +40,7 @@ export function CostTab({ projectId }: { projectId: string }) {
     return () => window.clearTimeout(timer);
   }, [refresh]);
 
-  if (loading && !data) return <div className="p-8 text-center text-[#94A3B8]">Loading…</div>;
+  if (loading && !data) return <div className="p-8 text-center text-[#94A3B8]">{t("common.loading")}</div>;
   if (error) return <div className="p-8 text-center text-[#C8102E]">{error}</div>;
   if (!data) return null;
 
@@ -79,7 +79,7 @@ export function CostTab({ projectId }: { projectId: string }) {
 
       <Card title={t("cost.dailyTrend")} subtitle="USD per day · stacked by agent">
         {dailySorted.length === 0 ? (
-          <Empty hint="No usage in the last 30 days" />
+          <Empty hint={t("cost.noUsage")} />
         ) : (
           <ResponsiveContainer width="100%" height={240}>
             <AreaChart data={dailySorted}>
@@ -113,7 +113,7 @@ export function CostTab({ projectId }: { projectId: string }) {
           )}
         </Card>
 
-        <Card title={t("cost.byMode")} subtitle="Debate is naturally more expensive (multiple rounds)">
+        <Card title={t("cost.byMode")} subtitle={t("cost.debateExpensiveNote")}>
           {data.by_mode.length === 0 ? (
             <Empty />
           ) : (
@@ -134,13 +134,13 @@ export function CostTab({ projectId }: { projectId: string }) {
 
       <Card title={t("cost.pricingInUse")}>
         <div className="grid grid-cols-2 gap-3 pt-2 text-[13px] md:grid-cols-4">
-          <Stat label="OpenClaw in" value={`$${data.pricing.openclaw_per_1k_in}/1k`} />
-          <Stat label="OpenClaw out" value={`$${data.pricing.openclaw_per_1k_out}/1k`} />
-          <Stat label="Hermes in" value={`$${data.pricing.hermes_per_1k_in}/1k`} />
-          <Stat label="Hermes out" value={`$${data.pricing.hermes_per_1k_out}/1k`} />
+          <Stat label={t("cost.openclawIn")} value={`$${data.pricing.openclaw_per_1k_in}/1k`} />
+          <Stat label={t("cost.openclawOut")} value={`$${data.pricing.openclaw_per_1k_out}/1k`} />
+          <Stat label={t("cost.hermesIn")} value={`$${data.pricing.hermes_per_1k_in}/1k`} />
+          <Stat label={t("cost.hermesOut")} value={`$${data.pricing.hermes_per_1k_out}/1k`} />
         </div>
         <div className="mt-2 text-[13px] leading-6 text-[#94A3B8]">
-          Tune via env: OPENCLAW_PRICE_PER_1K_INPUT/OUTPUT, HERMES_PRICE_PER_1K_INPUT/OUTPUT.
+          {t("cost.envTuningNote")}
         </div>
       </Card>
     </div>

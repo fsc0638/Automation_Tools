@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Sparkles, Target, UserCog } from "lucide-react";
+import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Target, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { auth } from "@/lib/api";
@@ -37,7 +37,7 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-full w-[17.5rem] flex-shrink-0 flex-col border-r border-white/10 bg-[radial-gradient(circle_at_top,_rgba(58,126,204,0.18),_transparent_38%),linear-gradient(180deg,#061936_0%,#08142B_100%)] text-white">
-      <div className="border-b border-white/10 px-5 py-5">
+      <div className="flex-shrink-0 border-b border-white/10 px-5 py-5">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/10 shadow-[0_12px_30px_rgba(0,0,0,0.22)] backdrop-blur-sm">
@@ -50,21 +50,17 @@ export function Sidebar() {
           </div>
           <LocaleSwitcher tone="dark" />
         </div>
-
-        <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
-          <div className="flex items-start gap-3">
-            <div className="rounded-xl bg-[#3A7ECC]/20 p-2 text-blue-100">
-              <Sparkles size={15} />
-            </div>
-            <div>
-              <div className="text-[14px] font-medium tracking-[-0.01em] text-white">{t("sidebar.workspaceStatus")}</div>
-              <p className="mt-1 text-[13px] leading-6 text-blue-100/76">{t("sidebar.workspaceStatusDesc")}</p>
-            </div>
-          </div>
-        </div>
+        {/* Removed the "Workspace status" promo card — it was a static
+            marketing-style summary that duplicated information already
+            visible elsewhere (Projects list, conversation rail) and only
+            took vertical room from the actual nav. */}
       </div>
 
-      <nav className="flex-1 px-3 py-4">
+      {/* `min-h-0` releases the flex child from its intrinsic content
+          height so `overflow-y-auto` can engage when nav items grow
+          past the viewport. Without min-h-0, flex-1 keeps stretching
+          to fit content and pushes the user-info block off-screen. */}
+      <nav className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
         <div className="mb-2 px-3 text-[12px] font-semibold tracking-[0.08em] text-blue-100/48">
           {t("sidebar.navigation")}
         </div>
@@ -98,7 +94,10 @@ export function Sidebar() {
         </div>
       </nav>
 
-      <div className="border-t border-white/10 p-4">
+      {/* Pinned user block. `flex-shrink-0` guards against an edge case
+          where a flex sibling could squeeze this region; the avatar +
+          email + sign-out button should always be visible. */}
+      <div className="flex-shrink-0 border-t border-white/10 p-4">
         <div className="rounded-2xl border border-white/10 bg-white/6 p-4 backdrop-blur-sm">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl bg-[#3A7ECC]/25 text-sm font-semibold text-white">

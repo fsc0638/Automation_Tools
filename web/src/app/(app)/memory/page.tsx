@@ -127,7 +127,7 @@ export default function MemoryPage() {
 
   async function rejectCandidate(candidate: ProjectMemoryCandidate) {
     if (!selectedProjectId) return;
-    if (!confirm("Reject this memory candidate?")) return;
+    if (!confirm(t("memory.rejectConfirm"))) return;
     setReviewBusyId(candidate.id);
     try {
       await projectMemory.rejectCandidate(selectedProjectId, candidate.id, "Rejected from memory review page");
@@ -158,12 +158,12 @@ export default function MemoryPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="type-card-title flex items-center gap-2">
-              Project memory review
+              {t("memory.reviewTitle")}
               <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold tracking-[0.04em] text-amber-700">
-                {pendingCount} pending
+                {t("memory.pendingCount").replace("{n}", String(pendingCount))}
               </span>
             </div>
-            <p className="type-body-muted mt-1">Approve AI-generated project memory before it becomes durable context.</p>
+            <p className="type-body-muted mt-1">{t("memory.reviewDesc")}</p>
           </div>
           <select
             value={selectedProjectId}
@@ -174,18 +174,18 @@ export default function MemoryPage() {
           </select>
         </div>
         {candidateLoading ? (
-          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">Loading candidates…</div>
+          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">{t("memory.loadingCandidates")}</div>
         ) : candidates.length === 0 ? (
-          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">No pending memory candidates for this project.</div>
+          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">{t("memory.noPendingCandidates")}</div>
         ) : (
           <div className="mt-4 space-y-3">
             {candidates.map((candidate) => (
               <article key={candidate.id} className="rounded-2xl border border-amber-200 bg-amber-50/35 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <div className="type-overline text-amber-700">Pending project summary</div>
+                    <div className="type-overline text-amber-700">{t("memory.candidateLabel")}</div>
                     <div className="mt-1 text-[11px] text-[#94A3B8]">
-                      {candidate.source_message_count} source messages · {new Date(candidate.created_at).toLocaleString()}
+                      {candidate.source_message_count} {t("memory.sourceMessagesSuffix")} · {new Date(candidate.created_at).toLocaleString()}
                     </div>
                   </div>
                   <div className="flex gap-2">
@@ -194,14 +194,14 @@ export default function MemoryPage() {
                       onClick={() => void approveCandidate(candidate)}
                       className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-white shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition hover:bg-emerald-700 disabled:opacity-60"
                     >
-                      <CheckCircle2 size={13} /> Approve
+                      <CheckCircle2 size={13} /> {t("memory.approve")}
                     </button>
                     <button
                       disabled={reviewBusyId === candidate.id}
                       onClick={() => void rejectCandidate(candidate)}
                       className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-red-700 transition hover:bg-red-50 disabled:opacity-60"
                     >
-                      <XCircle size={13} /> Reject
+                      <XCircle size={13} /> {t("memory.reject")}
                     </button>
                   </div>
                 </div>

@@ -139,7 +139,7 @@ export default function GlobalInsightsPage() {
         {/* DEFERRED 11: by-agent breakdown. OpenClaw vs Hermes vs any custom
             agent profiles registered under that user. */}
         <section className="rounded-lg border border-[#E2E8F0] bg-white p-4">
-          <div className="mb-3 text-sm font-semibold text-[#1A1A2E]">By agent</div>
+          <div className="mb-3 text-sm font-semibold text-[#1A1A2E]">{t("insights.byAgentTitle")}</div>
           {usage.by_agent.length === 0 ? (
             <Empty />
           ) : (
@@ -184,20 +184,20 @@ export default function GlobalInsightsPage() {
       {health && (
         <section className="rounded-lg border border-[#E2E8F0] bg-white p-4">
           <div className="mb-3 flex items-center justify-between text-sm font-semibold text-[#1A1A2E]">
-            <span>Debate health (cross-project)</span>
+            <span>{t("insights.debateHealthTitle")}</span>
             <span className="text-xs font-normal text-[#94A3B8]">
-              {health.total_debate_turns} debate turns · last {health.days} days
+              {health.total_debate_turns} {t("insights.debateTurnsLabel")} · {t("insights.windowLast").replace("{days}", String(health.days))}
             </span>
           </div>
           <div className="grid gap-3 md:grid-cols-3">
-            <Kpi label="Consensus rate"   value={`${(health.consensus_rate * 100).toFixed(1)}%`} />
-            <Kpi label="File-citation rate" value={`${(health.file_citation_rate * 100).toFixed(1)}%`} />
-            <Kpi label="Projects active"  value={String(health.by_project.filter((p) => p.debate_turns > 0).length)} />
+            <Kpi label={t("insights.consensusRate")}     value={`${(health.consensus_rate * 100).toFixed(1)}%`} />
+            <Kpi label={t("insights.fileCitationRate")}  value={`${(health.file_citation_rate * 100).toFixed(1)}%`} />
+            <Kpi label={t("insights.projectsActive")}    value={String(health.by_project.filter((p) => p.debate_turns > 0).length)} />
           </div>
 
           {health.round_distribution.length > 0 && (
             <div className="mt-4">
-              <div className="mb-2 text-xs text-[#64748B]">Rounds-to-final distribution</div>
+              <div className="mb-2 text-xs text-[#64748B]">{t("insights.roundsDistribution")}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <BarChart data={health.round_distribution}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
@@ -219,16 +219,22 @@ export default function GlobalInsightsPage() {
                   const fRate = p.debate_turns > 0 ? p.citation_turns  / p.debate_turns : 0;
                   return (
                     <li key={p.project_id} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
-                      <Link
-                        href={`/projects/${p.project_id}`}
-                        className="truncate font-medium text-[#1A1A2E] hover:text-[#0050A0] hover:underline"
-                      >
-                        {p.project_name}
-                      </Link>
+                      {p.project_deleted ? (
+                        <span className="truncate font-medium text-[#94A3B8] line-through" title="Project has been deleted; historical debate metrics preserved.">
+                          {p.project_name}
+                        </span>
+                      ) : (
+                        <Link
+                          href={`/projects/${p.project_id}?tab=insights`}
+                          className="truncate font-medium text-[#1A1A2E] hover:text-[#0050A0] hover:underline"
+                        >
+                          {p.project_name}
+                        </Link>
+                      )}
                       <div className="flex flex-shrink-0 items-center gap-3 text-[#475569]">
-                        <span>{p.debate_turns} turns</span>
-                        <span>consensus {(cRate * 100).toFixed(0)}%</span>
-                        <span>citation {(fRate * 100).toFixed(0)}%</span>
+                        <span>{p.debate_turns} {t("insights.turnsSuffix")}</span>
+                        <span>{t("insights.consensusSuffix")} {(cRate * 100).toFixed(0)}%</span>
+                        <span>{t("insights.citationSuffix")} {(fRate * 100).toFixed(0)}%</span>
                       </div>
                     </li>
                   );
@@ -247,17 +253,28 @@ export default function GlobalInsightsPage() {
             <li key={p.project_id} className="flex items-center justify-between gap-3 px-4 py-3">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: PROJECT_COLORS[i % PROJECT_COLORS.length] }} />
-                <Link href={`/projects/${p.project_id}`} className="truncate text-sm font-medium text-[#1A1A2E] hover:text-[#0050A0] hover:underline">
-                  {p.project_name}
-                </Link>
+                {/* Deleted projects (mig 0023 snapshot) — render as muted
+                    plain text instead of a link, since clicking through to
+                    a non-existent project would 404. */}
+                {p.project_deleted ? (
+                  <span className="truncate text-sm font-medium text-[#94A3B8] line-through" title="Project has been deleted; historical cost preserved.">
+                    {p.project_name}
+                  </span>
+                ) : (
+                  <Link href={`/projects/${p.project_id}?tab=insights`} className="truncate text-sm font-medium text-[#1A1A2E] hover:text-[#0050A0] hover:underline">
+                    {p.project_name}
+                  </Link>
+                )}
               </div>
               <div className="flex flex-shrink-0 items-center gap-4 text-xs text-[#475569]">
                 <span>${p.cost_usd.toFixed(2)}</span>
                 <span>{p.calls} {t("globalInsights.callsShort")}</span>
                 <span>{(p.tokens_in + p.tokens_out).toLocaleString()} {t("globalInsights.tokensShort")}</span>
-                <Link href={`/projects/${p.project_id}`} className="text-[#0050A0]">
-                  <ExternalLink size={12} />
-                </Link>
+                {!p.project_deleted && (
+                  <Link href={`/projects/${p.project_id}?tab=insights`} className="text-[#0050A0]">
+                    <ExternalLink size={12} />
+                  </Link>
+                )}
               </div>
             </li>
           ))}

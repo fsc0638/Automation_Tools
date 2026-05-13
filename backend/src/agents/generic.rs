@@ -156,6 +156,29 @@ impl GenericAgentClient {
         }
     }
 
+    /// Inspect a reqwest response and turn a non-2xx status into an
+    /// `anyhow::Error` that carries the upstream **body** alongside the
+    /// status code. The previous code used `error_for_status()` which
+    /// discards the body, so a user with a wrong model id, expired key,
+    /// or quota issue only saw "returned an error status" with no hint.
+    ///
+    /// The body is truncated to keep error toasts/logs readable; the
+    /// full content is still in the upstream provider's own logs.
+    async fn ensure_ok(response: reqwest::Response, label: &str) -> Result<reqwest::Response> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let body = response.text().await.unwrap_or_default();
+        let truncated: String = body.chars().take(800).collect();
+        Err(anyhow!(
+            "{label} HTTP {status}: {body}",
+            label = label,
+            status = status,
+            body = if truncated.is_empty() { "<empty body>".to_string() } else { truncated },
+        ))
+    }
+
     pub fn system_prompt(&self) -> String {
         let custom = self.profile.role_prompt.trim();
         format!(
@@ -229,14 +252,14 @@ impl GenericAgentClient {
             max_tokens: Some(REPLY_TOKEN_CEILING),
             stream_options: None,
         };
-        let response = self
+        let raw = self
             .with_openai_auth(self.client.post(self.openai_url()))
             .json(&body)
             .send()
             .await
-            .context("failed to send request to custom OpenAI-compatible agent")?
-            .error_for_status()
-            .context("custom OpenAI-compatible agent returned an error status")?
+            .context("failed to send request to custom OpenAI-compatible agent")?;
+        let response = Self::ensure_ok(raw, "OpenAI-compatible agent")
+            .await?
             .json::<OpenAiChatResponse>()
             .await
             .context("failed to parse custom OpenAI-compatible response")?;
@@ -287,7 +310,7 @@ impl GenericAgentClient {
             .as_deref()
             .unwrap_or("https://api.anthropic.com/v1/messages")
             .to_string();
-        let response = self
+        let raw = self
             .client
             .post(url)
             .header("x-api-key", &self.profile.api_key)
@@ -295,9 +318,9 @@ impl GenericAgentClient {
             .json(&body)
             .send()
             .await
-            .context("failed to send request to Anthropic agent")?
-            .error_for_status()
-            .context("Anthropic agent returned an error status")?
+            .context("failed to send request to Anthropic agent")?;
+        let response = Self::ensure_ok(raw, "Anthropic agent")
+            .await?
             .json::<AnthropicResponse>()
             .await
             .context("failed to parse Anthropic response")?;
@@ -356,15 +379,15 @@ impl GenericAgentClient {
             "{base}/models/{}:generateContent?key={}",
             self.profile.model, self.profile.api_key
         );
-        let response = self
+        let raw = self
             .client
             .post(url)
             .json(&body)
             .send()
             .await
-            .context("failed to send request to Gemini agent")?
-            .error_for_status()
-            .context("Gemini agent returned an error status")?
+            .context("failed to send request to Gemini agent")?;
+        let response = Self::ensure_ok(raw, "Gemini agent")
+            .await?
             .json::<GeminiResponse>()
             .await
             .context("failed to parse Gemini response")?;
@@ -419,13 +442,28 @@ impl GenericAgentClient {
         };
         Box::pin(async_stream::stream! {
             let response = match client.post(url).bearer_auth(key).json(&body).send().await {
-                Ok(response) => match response.error_for_status() {
-                    Ok(response) => response,
-                    Err(error) => {
-                        yield AgentStreamEvent::Content(format!("[{name} error: agent returned an error status: {error}]"));
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        response
+                    } else {
+                        // Capture the response body so the UI shows WHY the
+                        // upstream rejected the call (wrong model, expired
+                        // key, quota exhausted, etc.) instead of a generic
+                        // "returned an error status".
+                        let body = response.text().await.unwrap_or_default();
+                        let truncated: String = body.chars().take(800).collect();
+                        let detail = if truncated.is_empty() {
+                            "<empty body>".to_string()
+                        } else {
+                            truncated
+                        };
+                        yield AgentStreamEvent::Content(format!(
+                            "[{name} error: HTTP {status}: {detail}]"
+                        ));
                         return;
                     }
-                },
+                }
                 Err(error) => {
                     yield AgentStreamEvent::Content(format!("[{name} error: failed to send request: {error}]"));
                     return;
