@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 use crate::agents::{
     openclaw::ChatMessage,
@@ -13,6 +13,7 @@ const REPLY_TOKEN_CEILING: u32 = 1200;
 
 #[derive(Debug, Clone)]
 pub struct AgentProfileRuntime {
+    #[allow(dead_code)]
     pub id: String,
     pub name: String,
     pub provider: String,
@@ -151,7 +152,10 @@ pub struct GenericAgentClient {
 impl GenericAgentClient {
     pub fn new(profile: AgentProfileRuntime) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .expect("failed to build generic agent HTTP client"),
             profile,
         }
     }

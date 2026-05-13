@@ -73,14 +73,14 @@ const QUICK_ACTIONS: Array<{ key: QuickAction; labelKey: string; icon: typeof Ac
     labelKey: "quick.healthScan",
     icon: Activity,
     prompt:
-      "請以 Debate Mode 執行專案初診。OpenClaw 從架構、系統風險、資料流與長期維護角度分析；Hermes 從實作成本、可讀性、日常維護、測試與快速改善角度分析。請根據已索引的專案檔案提出：1. 專案摘要 2. 技術棧與入口點 3. 主要風險 4. 可立即改善項目 5. 中長期優化方向 6. 測試/文件缺口。所有具體判斷都要引用檔案路徑作為依據；如果證據不足，明確說明。最後產生優先順序清楚的結論。",
+      "請以 Debate Mode 執行專案初診。一個 agent 從架構、系統風險、資料流與長期維護角度分析；另一個 agent 從實作成本、可讀性、日常維護、測試與快速改善角度分析。請根據已索引的專案檔案提出：1. 專案摘要 2. 技術棧與入口點 3. 主要風險 4. 可立即改善項目 5. 中長期優化方向 6. 測試/文件缺口。所有具體判斷都要引用檔案路徑作為依據；如果證據不足，明確說明。最後產生優先順序清楚的結論。",
   },
   {
     key: "explore",
     labelKey: "quick.exploreIdeas",
     icon: Lightbulb,
     prompt:
-      "請進入問題探索模式。不要只回答單一問題，請讓 OpenClaw / Hermes 主動碰撞這個專案可能值得改善、重構或產品化的方向。輸出：潛在問題、可驗證假設、使用者可能真正想解決的需求、創新功能想法、風險與取捨。每個建議都要盡可能引用已索引檔案路徑，並標示信心等級與下一步驗證方式。",
+      "請進入問題探索模式。不要只回答單一問題，請讓 AI agents 互相碰撞這個專案可能值得改善、重構或產品化的方向。輸出：潛在問題、可驗證假設、使用者可能真正想解決的需求、創新功能想法、風險與取捨。每個建議都要盡可能引用已索引檔案路徑，並標示信心等級與下一步驗證方式。",
   },
   {
     key: "roadmap",
@@ -352,7 +352,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const query = conversationQuery.trim().toLowerCase();
     if (!query) return convs;
     return convs.filter((conv) => (
-      `${conv.title} ${MODE_LABELS[conv.mode]}`.toLowerCase().includes(query)
+      `${conv.title} ${modeLabel(conv.mode, agentProfiles, t)}`.toLowerCase().includes(query)
     ));
   }, [convs, conversationQuery]);
 
@@ -832,22 +832,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setShowNewConvModal(true);
   }
 
-  /**
-   * Actually create the conversation. `chosenMode` may be any `ChatMode`:
-   * - core ("openclaw" | "hermes" | "debate") goes straight to the DB
-   *   `mode` column (matches the enum backend accepts in mig 0001).
-   * - "agent:<id>" / "agents:<id>,<id>" are UI-only encodings; the DB
-   *   row is created with "openclaw" as a placeholder and the live agent
-   *   selection is carried by each WS turn's `mode` payload.
-   * See backlog #10 for the longer-term plan to make conv.mode reflect
-   * the live selection too.
-   */
   async function actuallyCreateConv(chosenMode: ChatMode) {
-    const createMode = isCoreAgentMode(chosenMode) ? chosenMode : "openclaw";
     const conv = await convsApi.create(
       id,
       `${modeLabel(chosenMode, agentProfiles, t)} Conversation ${convs.length + 1}`,
-      createMode,
+      chosenMode,
     );
     setConvs((cs) => [conv, ...cs]);
     setMessages([]);
@@ -1211,14 +1200,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-[#64748B]">
                         {(() => {
-                          // Custom Debate / Custom Agent conversations land in
-                          // DB as mode="openclaw" because of the mig 0002 CHECK
-                          // constraint; infer the real intent from the
-                          // auto-generated title until backlog #25 widens the
-                          // constraint and we can store the actual mode.
                           const inferred = inferConversationMode(conv, agentProfiles);
-                          const style = inferred?.className ?? MODE_STYLES[conv.mode];
-                          const label = inferred?.label ?? MODE_LABELS[conv.mode];
+                          const style = inferred?.className ?? modeStyle(conv.mode);
+                          const label = inferred?.label ?? modeLabel(conv.mode, agentProfiles, t);
                           return (
                             <span className={cn("rounded-full px-2 py-0.5", style)}>{label}</span>
                           );
@@ -1235,16 +1219,19 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                             ? t("convDesc.debate")
                             : conv.mode === "hermes"
                               ? t("convDesc.hermes")
-                              : t("convDesc.openclaw")}
+                              : conv.mode === "openclaw"
+                                ? t("convDesc.openclaw")
+                                : conv.mode.startsWith("agents:")
+                                  ? t("convDesc.customAgents")
+                                  : conv.mode.startsWith("agent:")
+                                    ? t("convDesc.customAgent")
+                                    : t("convDesc.openclaw")}
                       </div>
                     </button>
-                    {/* Show delete only when the viewer authored the conv OR
-                        owns the project. Admins-on-the-project-but-not-owner
-                        currently lose the UI affordance; backend still
-                        accepts their request, so they can fall back to the
-                        API. Fixing this fully needs `effective_role` on the
-                        Project response — tracked in deferred backlog. */}
-                    {(conv.user_id === currentUserId || project?.user_id === currentUserId) && (
+                    {(conv.user_id === currentUserId ||
+                      project?.user_id === currentUserId ||
+                      (project?.effective_role != null &&
+                        ["owner", "admin"].includes(project.effective_role))) && (
                       <button
                         type="button"
                         onClick={(e) => void deleteConv(conv, e)}

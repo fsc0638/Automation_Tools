@@ -503,6 +503,8 @@ const zhTW: Dict = {
   "convDesc.debate": "辯論時間線：適合取捨分析與綜合評估。",
   "convDesc.hermes": "深度推理通道：適合架構、規劃與審慎審查。",
   "convDesc.openclaw": "快速執行通道：適合聚焦實作與直接回答。",
+  "convDesc.customAgent": "自訂 Agent 對話。",
+  "convDesc.customAgents": "多 Agent 協作對話。",
 
   // Git status section
   "gitStatus.changedFiles": "變更檔案",
@@ -1134,6 +1136,8 @@ const zhCN: Dict = {
   "convDesc.debate": "辩论时间线：适合权衡分析与综合评估。",
   "convDesc.hermes": "深度推理通道：适合架构、规划与审慎审查。",
   "convDesc.openclaw": "快速执行通道：适合聚焦实现与直接回答。",
+  "convDesc.customAgent": "自定义 Agent 对话。",
+  "convDesc.customAgents": "多 Agent 协作对话。",
 
   "gitStatus.changedFiles": "变更文件",
   "gitStatus.stagedFiles": "已暂存文件",
@@ -1756,6 +1760,8 @@ const en: Dict = {
   "convDesc.debate": "Debate timeline available for trade-off analysis and synthesis.",
   "convDesc.hermes": "Deeper reasoning lane for architecture, planning, and careful review.",
   "convDesc.openclaw": "Fast execution lane for focused implementation and direct answers.",
+  "convDesc.customAgent": "Custom agent conversation.",
+  "convDesc.customAgents": "Multi-agent collaborative conversation.",
 
   "gitStatus.changedFiles": "Changed files",
   "gitStatus.stagedFiles": "Staged files",
@@ -2377,6 +2383,8 @@ const ja: Dict = {
   "convDesc.debate": "トレードオフ分析と統合のための Debate タイムライン。",
   "convDesc.hermes": "アーキテクチャ・計画・慎重なレビュー向けの深い推論レーン。",
   "convDesc.openclaw": "実装と直接回答に集中した高速実行レーン。",
+  "convDesc.customAgent": "カスタム Agent との対話。",
+  "convDesc.customAgents": "複数 Agent の協調対話。",
 
   "gitStatus.changedFiles": "変更されたファイル",
   "gitStatus.stagedFiles": "ステージ済みファイル",
@@ -2998,6 +3006,8 @@ const ko: Dict = {
   "convDesc.debate": "트레이드오프 분석과 종합을 위한 Debate 타임라인.",
   "convDesc.hermes": "아키텍처, 계획, 신중한 검토를 위한 심층 추론 레인.",
   "convDesc.openclaw": "구현과 직접 답변에 집중한 빠른 실행 레인.",
+  "convDesc.customAgent": "사용자 정의 Agent 대화.",
+  "convDesc.customAgents": "다중 Agent 협업 대화.",
 
   "gitStatus.changedFiles": "변경된 파일",
   "gitStatus.stagedFiles": "스테이징된 파일",
