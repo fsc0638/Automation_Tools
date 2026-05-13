@@ -21,7 +21,7 @@ use crate::{
     error::{AppError, AppResult},
 };
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, Clone)]
 pub struct SharedMemoryNote {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -34,6 +34,18 @@ pub struct SharedMemoryNote {
     pub pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+pub fn truncate_note_bodies(notes: Vec<SharedMemoryNote>) -> Vec<SharedMemoryNote> {
+    notes
+        .into_iter()
+        .map(|mut note| {
+            if note.body.chars().count() > 600 {
+                note.body = format!("{}…", note.body.chars().take(600).collect::<String>());
+            }
+            note
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,4 +194,39 @@ async fn delete_note(
         return Err(AppError::NotFound("Note not found".into()));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{truncate_note_bodies, SharedMemoryNote};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn note(body: &str) -> SharedMemoryNote {
+        SharedMemoryNote {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            title: "Decision".into(),
+            body: body.into(),
+            tags: vec![],
+            scope_projects: vec![],
+            pinned: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn truncate_note_bodies_limits_body_to_600_chars_with_ellipsis() {
+        let original = "a".repeat(601);
+        let notes = truncate_note_bodies(vec![note(&original)]);
+        assert_eq!(notes[0].body.chars().count(), 601);
+        assert!(notes[0].body.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_note_bodies_keeps_short_bodies_unchanged() {
+        let notes = truncate_note_bodies(vec![note("short body")]);
+        assert_eq!(notes[0].body, "short body");
+    }
 }

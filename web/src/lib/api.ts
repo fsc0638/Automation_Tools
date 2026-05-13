@@ -299,6 +299,16 @@ export const projectMemory = {
       method: "POST",
       body: JSON.stringify({ review_note }),
     }),
+  bulkApproveCandidates: (projectId: string, ids: string[]) =>
+    request<void>(`/projects/${projectId}/memory/candidates/bulk-approve`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+  bulkRejectCandidates: (projectId: string, ids: string[]) =>
+    request<void>(`/projects/${projectId}/memory/candidates/bulk-reject`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
 };
 
 // ─────────────────────────────────────────────────────────────────────
