@@ -15,7 +15,8 @@ use uuid::Uuid;
 
 use crate::{
     agents::{
-        openclaw::{ChatMessage, OpenClawClient},
+        hermes::HermesClient,
+        openclaw::ChatMessage,
         orchestrator::ProjectScope,
     },
     api::{auth::AuthUser, AppState},
@@ -128,7 +129,7 @@ pub async fn refresh_project_summary(
 
     let existing = get_project_summary(db, project.id).await?;
     let prompt = build_summary_prompt(project, existing.as_ref(), &recent_messages);
-    let summary = OpenClawClient::new(config).chat(prompt).await?;
+    let summary = HermesClient::new(config).chat(prompt).await?;
     let normalized = normalize_summary(&summary);
     if normalized.is_empty() {
         return Ok(existing);
@@ -275,7 +276,7 @@ pub async fn refresh_conversation_summary(
         return Ok(());
     }
     let prompt = build_conversation_summary_prompt(conversation_id, &recent);
-    let raw = OpenClawClient::new(config).chat(prompt).await?;
+    let raw = HermesClient::new(config).chat(prompt).await?;
     let cleaned = strip_json_fences(&raw);
 
     let (summary, highlights, keywords) = match serde_json::from_str::<LlmConvSummary>(&cleaned) {

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 use crate::{
     agents::telemetry::{
@@ -68,7 +68,10 @@ pub struct OpenClawClient {
 impl OpenClawClient {
     pub fn new(config: &Config) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .expect("failed to build OpenClaw HTTP client"),
             chat_completions_url: Self::chat_completions_url(&config.openclaw_api_url),
             gateway_token: config.openclaw_api_key.clone(),
             model: config.openclaw_model.clone(),

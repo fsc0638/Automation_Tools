@@ -46,6 +46,7 @@ export function LocaleSwitcher({ tone = "dark" }: { tone?: "dark" | "light" }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        suppressHydrationWarning
         className={cn(
           "flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition",
           triggerClass,

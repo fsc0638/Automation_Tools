@@ -78,7 +78,7 @@ async fn list_conversations(
                 "SELECT * FROM conversations WHERE project_id = $1 AND mode = $2 ORDER BY updated_at DESC",
             )
             .bind(project_id)
-            .bind(mode)
+            .bind(&mode)
             .fetch_all(&state.db)
             .await?
         }
@@ -104,7 +104,7 @@ async fn create_conversation(
     verify_project_access(&state, project_id, auth_user.id, "editor").await?;
 
     let mode = normalize_mode(req.mode.as_deref());
-    let title = req.title.unwrap_or_else(|| default_title_for_mode(mode));
+    let title = req.title.unwrap_or_else(|| default_title_for_mode(&mode));
     let conv: Conversation = sqlx::query_as(
         "INSERT INTO conversations (project_id, user_id, title, mode)
          VALUES ($1, $2, $3, $4)
@@ -113,7 +113,7 @@ async fn create_conversation(
     .bind(project_id)
     .bind(auth_user.id)
     .bind(&title)
-    .bind(mode)
+    .bind(&mode)
     .fetch_one(&state.db)
     .await?;
 
@@ -258,7 +258,7 @@ async fn send_message(
         auth_user.id,
         project_id,
         conv_id,
-        mode_label,
+        &mode_label,
         &data_policy,
         &project_scope,
         &history,
@@ -317,20 +317,26 @@ fn agent_mode_from_str(mode: Option<&str>) -> AgentMode {
     }
 }
 
-fn normalize_mode_optional(mode: Option<&str>) -> Option<&'static str> {
+fn normalize_mode_optional(mode: Option<&str>) -> Option<String> {
     match mode {
-        Some("hermes") => Some("hermes"),
-        Some("debate") => Some("debate"),
-        Some("openclaw") => Some("openclaw"),
+        Some("hermes") => Some("hermes".into()),
+        Some("debate") => Some("debate".into()),
+        Some("openclaw") => Some("openclaw".into()),
+        Some(m) if m.starts_with("agent:") || m.starts_with("agents:") => Some(m.into()),
         _ => None,
     }
 }
 
-fn normalize_mode(mode: Option<&str>) -> &'static str {
+/// Normalise the raw mode string from the request into the value stored in DB.
+/// Core modes are validated; custom agent/debate encodings are passed through as-is;
+/// anything unrecognised falls back to "openclaw".
+fn normalize_mode(mode: Option<&str>) -> String {
     match mode {
-        Some("hermes") => "hermes",
-        Some("debate") => "debate",
-        _ => "openclaw",
+        Some("hermes") => "hermes".into(),
+        Some("debate") => "debate".into(),
+        Some("openclaw") => "openclaw".into(),
+        Some(m) if m.starts_with("agent:") || m.starts_with("agents:") => m.into(),
+        _ => "openclaw".into(),
     }
 }
 
@@ -338,6 +344,8 @@ fn default_title_for_mode(mode: &str) -> String {
     match mode {
         "hermes" => "Hermes Conversation".into(),
         "debate" => "Debate Conversation".into(),
+        _ if mode.starts_with("agents:") => "Custom Debate Conversation".into(),
+        _ if mode.starts_with("agent:") => "Custom Agent Conversation".into(),
         _ => "OpenClaw Conversation".into(),
     }
 }
