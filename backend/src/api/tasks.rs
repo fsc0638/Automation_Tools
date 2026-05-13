@@ -686,18 +686,16 @@ async fn dispatch_task(
     if mode_trim.is_empty() {
         return Err(AppError::BadRequest("mode is required".into()));
     }
-    // Persisted conv.mode is the AgentMode enum; for custom-agent dispatches
-    // we still store one of the core modes so downstream queries don't break.
-    let conv_mode: &str = if mode_trim.starts_with("agents:") {
-        "debate"
-    } else if mode_trim.starts_with("agent:") || mode_trim == "openclaw" {
-        "openclaw"
-    } else if mode_trim == "hermes" {
-        "hermes"
-    } else if mode_trim == "debate" {
-        "debate"
-    } else {
-        return Err(AppError::BadRequest("unsupported mode".into()));
+    // mig 0024 dropped the CHECK constraint; pass the mode string through as-is.
+    let conv_mode: &str = match mode_trim {
+        "openclaw" | "hermes" | "debate" => mode_trim,
+        m if m.starts_with("agent:") || m.starts_with("agents:") => m,
+        _ => {
+            return Err(AppError::BadRequest(format!(
+                "unsupported mode: {}",
+                mode_trim
+            )));
+        }
     };
 
     // Load the task so we can build the prompt + verify it belongs here.

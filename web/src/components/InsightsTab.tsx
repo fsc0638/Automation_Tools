@@ -89,6 +89,28 @@ export function InsightsTab({ projectId }: { projectId: string }) {
           <div className="rounded-lg border border-[#DBEAFE] bg-[#F8FBFF] p-3 text-xs leading-5 text-[#475569]">
             <div className="font-semibold text-[#1A1A2E]">Evidence-based methodology</div>
             <div className="mt-1">{health.methodology ?? "Scores are calculated from indexed repository evidence."}</div>
+            <details className="mt-2 rounded-md border border-[#DBEAFE] bg-white">
+              <summary className="cursor-pointer select-none px-3 py-1.5 text-[11px] font-medium text-[#0050A0] hover:bg-[#EFF6FF]">
+                Scoring details — click to expand
+              </summary>
+              <div className="divide-y divide-[#E2E8F0] px-3 pb-2 pt-1">
+                {health.dimensions.map((d) => (
+                  <div key={d.key} className="py-2 text-[11px] leading-5">
+                    <span className="font-semibold text-[#1A1A2E]">{d.label}</span>
+                    <span className="ml-2 text-[#94A3B8]">— {d.measured_by}</span>
+                    {d.formula && (
+                      <div className="mt-0.5 font-mono text-[10px] text-[#475569]">
+                        {d.formula}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div className="pt-2 text-[#64748B]">
+                  Overall score = weighted mean of dimension scores.
+                  Confidence = indexed-file coverage; low coverage dims are down-weighted.
+                </div>
+              </div>
+            </details>
             {health.limitations && health.limitations.length > 0 && (
               <ul className="mt-2 list-disc space-y-1 pl-5 text-[#64748B]">
                 {health.limitations.map((item) => <li key={item}>{item}</li>)}
