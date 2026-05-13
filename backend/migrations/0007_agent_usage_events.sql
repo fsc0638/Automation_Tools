@@ -6,8 +6,8 @@ CREATE TABLE agent_usage_events (
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
-    agent TEXT NOT NULL,                         -- agent slug: 'openclaw' | 'hermes' | custom-agent id
-    mode TEXT NOT NULL,                          -- 'openclaw' | 'hermes' | 'debate' | 'agent:<id>' | 'agents:<id1>,<id2>,...'
+    agent TEXT NOT NULL,                         -- 'openclaw' | 'hermes'
+    mode TEXT NOT NULL,                          -- 'openclaw' | 'hermes' | 'debate'
     phase TEXT,                                  -- 'round' | 'final' | 'chat' | 'quick_check' | NULL
     round_number INT,
     ttft_ms INT,                                 -- ms from start to first streamed chunk

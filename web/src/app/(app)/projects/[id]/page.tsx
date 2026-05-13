@@ -9,6 +9,7 @@ import {
   ArrowDown,
   ArrowLeft,
   Bot,
+  CalendarPlus,
   ChevronDown,
   ChevronRight,
   ClipboardList,
@@ -1063,6 +1064,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </Button>
             <Button variant="secondary" size="sm" onClick={newConv}>
               <Plus size={14} /> {t("project.newConversation")}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => router.push(`/meetings/new?project_id=${project?.id ?? ""}`)}
+            >
+              <CalendarPlus size={14} /> {t("project.newMeeting")}
             </Button>
             <Button variant="secondary" size="sm" onClick={refreshProject} loading={refreshing}>
               <RefreshCw size={14} /> {t("project.refreshWorkspace")}

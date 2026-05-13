@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Bot, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Target, UserCog } from "lucide-react";
+import { BarChart3, Bot, CalendarDays, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Target, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { auth } from "@/lib/api";
@@ -16,6 +16,7 @@ export function Sidebar() {
 
   const nav = [
     { href: "/projects", label: t("sidebar.projects"), description: t("sidebar.projectsDesc"), icon: FolderOpen },
+    { href: "/meetings", label: t("sidebar.meetings"), description: t("sidebar.meetingsDesc"), icon: CalendarDays },
     { href: "/roadmap", label: t("sidebar.globalRoadmap"), description: t("sidebar.globalRoadmapDesc"), icon: MapIcon },
     { href: "/insights", label: t("sidebar.globalInsights"), description: t("sidebar.globalInsightsDesc"), icon: BarChart3 },
     { href: "/search", label: t("sidebar.globalSearch"), description: t("sidebar.globalSearchDesc"), icon: Search },

@@ -301,6 +301,253 @@ export const projectMemory = {
     }),
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// Meetings
+// ─────────────────────────────────────────────────────────────────────
+
+export type MeetingImportance = "normal" | "important";
+export type MeetingRecurrence = "none" | "daily" | "weekly" | "monthly";
+export type MeetingStatus =
+  | "draft"
+  | "scheduled"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
+export type MeetingFileCategory = "attachment" | "recording" | "transcript";
+export type MeetingImpactType = "new" | "update" | "progress";
+export type AttendeeStatus = "pending" | "confirmed" | "disputed";
+
+export interface Meeting {
+  id: string;
+  creator_id: string;
+  organization_id: string | null;
+  project_id: string | null;
+  title: string;
+  importance: MeetingImportance;
+  start_at: string;
+  end_at: string;
+  all_day: boolean;
+  recurrence: MeetingRecurrence;
+  timezone: string;
+  location: string | null;
+  notification_note: string | null;
+  status: MeetingStatus;
+  invitations_sent_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MeetingAttendee {
+  meeting_id: string;
+  user_id: string | null;
+  email: string;
+  display_name: string;
+  role_label: string | null;
+  confirmation_status: AttendeeStatus;
+  confirmed_at: string | null;
+  dispute_note: string | null;
+  last_action_at: string | null;
+  created_at: string;
+}
+
+export interface MeetingFile {
+  id: string;
+  meeting_id: string;
+  uploader_id: string;
+  filename: string;
+  storage_path: string;
+  file_size: number;
+  mime_type: string;
+  file_category: MeetingFileCategory;
+  upload_status: "pending" | "uploaded" | "processing" | "failed";
+  duration_seconds: number | null;
+  transcript_meta: string | null;
+  created_at: string;
+}
+
+export interface MeetingNotes {
+  id: string;
+  meeting_id: string;
+  version: number;
+  summary: string | null;
+  decisions: Array<{ text: string; resolved?: boolean }>;
+  risks: Array<{ text: string; severity?: "low" | "medium" | "high" }>;
+  transcript_excerpts: Array<{ speaker: string; time: string; content: string }>;
+  generated_by: string;
+  created_at: string;
+}
+
+export interface MeetingTaskImpact {
+  id: string;
+  meeting_id: string;
+  project_id: string | null;
+  task_id: string | null;
+  impact_type: MeetingImpactType;
+  description: string;
+  progress_from: number | null;
+  progress_to: number | null;
+  is_hidden: boolean;
+  created_at: string;
+}
+
+export interface MeetingDetail extends Meeting {
+  attendees: MeetingAttendee[];
+  files: MeetingFile[];
+  latest_notes: MeetingNotes | null;
+  task_impacts: MeetingTaskImpact[];
+  linked_project: { id: string; name: string } | null;
+}
+
+export interface MeetingCalendarDay {
+  date: string;
+  meeting_count: number;
+  has_urgent: boolean;
+  has_available_slot: boolean;
+}
+
+export interface MeetingTimeSlot {
+  start_at: string;
+  end_at: string;
+  available_count: number;
+  total_attendees: number;
+  busy_names: string[];
+}
+
+export interface MeetingNotesEdit {
+  id: string;
+  meeting_id: string;
+  version: number;
+  edited_by: string;
+  editor_name: string | null;
+  edit_summary: string;
+  snapshot: unknown;
+  created_at: string;
+}
+
+export interface CreateMeetingInput {
+  title: string;
+  importance?: MeetingImportance;
+  start_at: string;
+  end_at: string;
+  all_day?: boolean;
+  recurrence?: MeetingRecurrence;
+  timezone?: string;
+  location?: string | null;
+  notification_note?: string | null;
+  attendee_emails?: string[];
+  project_id?: string | null;
+  save_as_draft?: boolean;
+}
+
+export interface UpdateMeetingInput {
+  title?: string;
+  importance?: MeetingImportance;
+  start_at?: string;
+  end_at?: string;
+  all_day?: boolean;
+  recurrence?: MeetingRecurrence;
+  timezone?: string;
+  location?: string | null;
+  notification_note?: string | null;
+  status?: MeetingStatus;
+  attendee_emails?: string[];
+  project_id?: string | null;
+}
+
+export const meetings = {
+  list: (q: {
+    projectId?: string;
+    status?: MeetingStatus;
+    from?: string;
+    to?: string;
+  } = {}) => {
+    const p = new URLSearchParams();
+    if (q.projectId) p.set("project_id", q.projectId);
+    if (q.status) p.set("status", q.status);
+    if (q.from) p.set("from", q.from);
+    if (q.to) p.set("to", q.to);
+    const qs = p.toString();
+    return request<Meeting[]>(`/meetings${qs ? `?${qs}` : ""}`);
+  },
+  create: (data: CreateMeetingInput) =>
+    request<MeetingDetail>("/meetings", { method: "POST", body: JSON.stringify(data) }),
+  get: (id: string) => request<MeetingDetail>(`/meetings/${id}`),
+  update: (id: string, data: UpdateMeetingInput) =>
+    request<MeetingDetail>(`/meetings/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/meetings/${id}`, { method: "DELETE" }),
+  sendInvitations: (id: string) =>
+    request<MeetingDetail>(`/meetings/${id}/send-invitations`, { method: "POST" }),
+  calendar: (year: number, month: number) =>
+    request<MeetingCalendarDay[]>(`/meetings/calendar?year=${year}&month=${month}`),
+  availableSlots: (date: string, durationMins: number, emails: string[] = []) => {
+    const p = new URLSearchParams({ date, duration_mins: String(durationMins) });
+    if (emails.length > 0) p.set("emails", emails.join(","));
+    return request<MeetingTimeSlot[]>(`/meetings/available-slots?${p.toString()}`);
+  },
+  confirmAttendance: (id: string, email: string) =>
+    request<MeetingAttendee>(
+      `/meetings/${id}/attendees/${encodeURIComponent(email)}/confirm`,
+      { method: "PATCH" }
+    ),
+  disputeAttendance: (id: string, email: string, note?: string) =>
+    request<MeetingAttendee>(
+      `/meetings/${id}/attendees/${encodeURIComponent(email)}/dispute`,
+      { method: "PATCH", body: JSON.stringify({ note }) }
+    ),
+  uploadFile: async (
+    id: string,
+    file: File,
+    opts: { category?: MeetingFileCategory; durationSeconds?: number; transcriptMeta?: string } = {}
+  ) => {
+    const token = getToken();
+    const form = new FormData();
+    form.append("file", file);
+    form.append("category", opts.category ?? "attachment");
+    if (opts.durationSeconds != null) form.append("duration_seconds", String(opts.durationSeconds));
+    if (opts.transcriptMeta) form.append("transcript_meta", opts.transcriptMeta);
+    const res = await fetch(`${API_BASE}/meetings/${id}/files`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error ?? "Upload failed");
+    }
+    return (await res.json()) as MeetingFile;
+  },
+  deleteFile: (id: string, fileId: string) =>
+    request<void>(`/meetings/${id}/files/${fileId}`, { method: "DELETE" }),
+  generateNotes: (id: string) =>
+    request<MeetingNotes>(`/meetings/${id}/notes/generate`, { method: "POST" }),
+  updateNotes: (
+    id: string,
+    body: Partial<Pick<MeetingNotes, "summary" | "decisions" | "risks" | "transcript_excerpts">> & {
+      edit_summary?: string;
+    }
+  ) => request<MeetingNotes>(`/meetings/${id}/notes`, { method: "PATCH", body: JSON.stringify(body) }),
+  notesHistory: (id: string) =>
+    request<MeetingNotesEdit[]>(`/meetings/${id}/notes/history`),
+  addTaskImpact: (
+    id: string,
+    body: {
+      project_id?: string | null;
+      task_id?: string | null;
+      impact_type: MeetingImpactType;
+      description: string;
+      progress_from?: number;
+      progress_to?: number;
+      is_hidden?: boolean;
+    }
+  ) =>
+    request<MeetingTaskImpact>(`/meetings/${id}/task-impacts`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteTaskImpact: (id: string, impactId: string) =>
+    request<void>(`/meetings/${id}/task-impacts/${impactId}`, { method: "DELETE" }),
+};
+
 // Conversations
 export const conversations = {
   list: (projectId: string, mode?: AgentMode) =>
