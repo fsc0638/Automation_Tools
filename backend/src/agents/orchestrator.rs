@@ -358,10 +358,14 @@ fn messages_to_chat(
         } else {
             "assistant"
         };
+        // Attribution without a mimic-prone `[Role]:` label: use a minimal
+        // XML-style tag that models treat as structural metadata rather than
+        // text to copy.  `strip_role_prefix` in the output path handles any
+        // legacy rows that still carry the old `[Hermes]:` envelope.
         let content = match m.role.as_str() {
-            "openclaw" => format!("[OpenClaw]: {}", m.content),
-            "hermes" => format!("[Hermes]: {}", m.content),
-            "system" => format!("[System]: {}", m.content),
+            "openclaw" => format!("<agent:openclaw>{}</agent:openclaw>", m.content),
+            "hermes" => format!("<agent:hermes>{}</agent:hermes>", m.content),
+            "system" => m.content.clone(),
             _ => m.content.clone(),
         };
 

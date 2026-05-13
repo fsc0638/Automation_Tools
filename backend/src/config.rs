@@ -33,6 +33,50 @@ pub struct Config {
 }
 
 impl Config {
+    /// Normalise a provider/agent string into an environment-variable key fragment.
+    /// e.g. "gemini-1.5-pro" → "GEMINI_1_5_PRO"
+    fn price_env_key(s: &str) -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .collect()
+    }
+
+    fn env_price_pair(key: &str) -> Option<(f64, f64)> {
+        let i = std::env::var(format!("AGENT_PRICE_{key}_PER_1K_INPUT"))
+            .ok()?
+            .parse::<f64>()
+            .ok()?;
+        let o = std::env::var(format!("AGENT_PRICE_{key}_PER_1K_OUTPUT"))
+            .ok()?
+            .parse::<f64>()
+            .ok()?;
+        Some((i, o))
+    }
+
+    /// Return (price_per_1k_input, price_per_1k_output) for the given agent/provider.
+    ///
+    /// Lookup order:
+    /// 1. `AGENT_PRICE_<PROVIDER>_PER_1K_INPUT/OUTPUT` env var when provider is known
+    /// 2. Fixed first-party rates for "hermes" and "openclaw"
+    /// 3. `AGENT_PRICE_<AGENT>_PER_1K_INPUT/OUTPUT` env var keyed by agent slug
+    /// 4. Openclaw rates as final fallback
+    pub fn price_for(&self, agent: &str, provider: Option<&str>) -> (f64, f64) {
+        if let Some(p) = provider.filter(|p| !p.is_empty()) {
+            if let Some(pair) = Self::env_price_pair(&Self::price_env_key(p)) {
+                return pair;
+            }
+        }
+        match agent {
+            "hermes" => return (self.hermes_price_per_1k_in, self.hermes_price_per_1k_out),
+            "openclaw" => return (self.openclaw_price_per_1k_in, self.openclaw_price_per_1k_out),
+            _ => {}
+        }
+        if let Some(pair) = Self::env_price_pair(&Self::price_env_key(agent)) {
+            return pair;
+        }
+        (self.openclaw_price_per_1k_in, self.openclaw_price_per_1k_out)
+    }
+
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             database_url: std::env::var("DATABASE_URL")

@@ -72,7 +72,7 @@ async fn list_projects(
     Extension(auth_user): Extension<AuthUser>,
 ) -> AppResult<Json<Vec<Project>>> {
     let projects: Vec<Project> = sqlx::query_as(
-        "SELECT * FROM projects
+        "SELECT *, user_project_role(id, $1) AS effective_role FROM projects
          WHERE user_can_access_project(id, $1, 'viewer')
          ORDER BY updated_at DESC",
     )
@@ -422,7 +422,7 @@ async fn get_remote_branches(
 
 async fn find_project(state: &AppState, id: Uuid, user_id: Uuid) -> AppResult<Project> {
     let project: Option<Project> = sqlx::query_as(
-        "SELECT * FROM projects
+        "SELECT *, user_project_role(id, $2) AS effective_role FROM projects
          WHERE id = $1 AND user_can_access_project(id, $2, 'viewer')",
     )
     .bind(id)

@@ -305,7 +305,7 @@ export const projectMemory = {
 export const conversations = {
   list: (projectId: string, mode?: AgentMode) =>
     request<Conversation[]>(`/projects/${projectId}/conversations${mode ? `?mode=${mode}` : ""}`),
-  create: (projectId: string, title?: string, mode?: AgentMode) =>
+  create: (projectId: string, title?: string, mode?: ChatMode) =>
     request<Conversation>(`/projects/${projectId}/conversations`, {
       method: "POST",
       body: JSON.stringify({ title, mode }),
@@ -379,6 +379,8 @@ export interface Project {
   local_path?: string;
   default_branch?: string;
   git_identity_id?: string;
+  /** Effective ACL role for the current user. Populated by list/get endpoints. */
+  effective_role?: ProjectRole | null;
   created_at: string;
   updated_at: string;
 }
@@ -502,7 +504,7 @@ export interface Conversation {
   project_id: string;
   user_id: string;
   title: string;
-  mode: AgentMode;
+  mode: ChatMode;
   created_at: string;
   updated_at: string;
 }

@@ -167,16 +167,12 @@ fn clamp_days(raw: Option<i64>) -> i64 {
     raw.unwrap_or(30).clamp(1, 365)
 }
 
-/// Per-token pricing helper. Mirrors `metrics.rs::price_for_event` so the
-/// global Insights page agrees with the per-project Insights tab on cost
-/// math. Custom agent profiles fall back to the OpenClaw price table for
-/// now — `cost_per_1k` lookup by `provider`/`model` is tracked separately.
-fn cost_for(cfg: &Config, agent: &str, tokens_in: i64, tokens_out: i64) -> f64 {
-    let (in_p, out_p) = if agent == "hermes" {
-        (cfg.hermes_price_per_1k_in, cfg.hermes_price_per_1k_out)
-    } else {
-        (cfg.openclaw_price_per_1k_in, cfg.openclaw_price_per_1k_out)
-    };
+/// Per-token pricing helper. Delegates to `Config::price_for` so the global
+/// Insights page agrees with the per-project Insights tab on cost math and
+/// custom agents are priced by `AGENT_PRICE_<PROVIDER>_PER_1K_INPUT/OUTPUT`
+/// env vars rather than defaulting to the OpenClaw rate.
+fn cost_for(cfg: &Config, agent: &str, provider: Option<&str>, tokens_in: i64, tokens_out: i64) -> f64 {
+    let (in_p, out_p) = cfg.price_for(agent, provider);
     (tokens_in as f64 / 1000.0) * in_p + (tokens_out as f64 / 1000.0) * out_p
 }
 
@@ -214,6 +210,7 @@ async fn user_usage(
             COALESCE(p.name, e.project_name_snapshot, '(deleted project)') AS project_name,
             (p.id IS NULL)                                                AS project_deleted,
             e.agent                                                       AS agent,
+            e.provider                                                    AS provider,
             COALESCE(SUM(e.tokens_in),  0)::int8                          AS tokens_in,
             COALESCE(SUM(e.tokens_out), 0)::int8                          AS tokens_out,
             COUNT(*)::int8                                                AS calls
@@ -224,9 +221,10 @@ async fn user_usage(
          GROUP BY COALESCE(p.id, '00000000-0000-0000-0000-000000000000'::uuid),
                   COALESCE(p.name, e.project_name_snapshot, '(deleted project)'),
                   (p.id IS NULL),
-                  e.agent"
+                  e.agent,
+                  e.provider"
     );
-    let rows: Vec<(Uuid, String, bool, String, i64, i64, i64)> = sqlx::query_as(&raw_sql)
+    let rows: Vec<(Uuid, String, bool, String, Option<String>, i64, i64, i64)> = sqlx::query_as(&raw_sql)
         .bind(auth_user.id)
         .fetch_all(&state.db)
         .await?;
@@ -236,8 +234,8 @@ async fn user_usage(
     let mut project_map: HashMap<Uuid, ProjectUsage> = HashMap::new();
     let mut agent_map: HashMap<String, AgentUsage> = HashMap::new();
 
-    for (project_id, project_name, project_deleted, agent, tokens_in, tokens_out, calls) in rows {
-        let cost = cost_for(cfg, &agent, tokens_in, tokens_out);
+    for (project_id, project_name, project_deleted, agent, provider, tokens_in, tokens_out, calls) in rows {
+        let cost = cost_for(cfg, &agent, provider.as_deref(), tokens_in, tokens_out);
         let p = project_map.entry(project_id).or_insert(ProjectUsage {
             project_id,
             project_name,
@@ -316,16 +314,17 @@ async fn user_usage(
         "SELECT
             DATE_TRUNC('day', e.created_at)::date AS day,
             e.agent                               AS agent,
+            e.provider                            AS provider,
             COALESCE(SUM(e.tokens_in),  0)::int8  AS tokens_in,
             COALESCE(SUM(e.tokens_out), 0)::int8  AS tokens_out,
             COUNT(*)::int8                        AS calls
          FROM agent_usage_events e
          WHERE e.user_id = $1
            AND e.created_at >= NOW() - INTERVAL '{days} days'
-         GROUP BY 1, 2
+         GROUP BY 1, 2, 3
          ORDER BY 1"
     );
-    let daily_rows: Vec<(NaiveDate, String, i64, i64, i64)> =
+    let daily_rows: Vec<(NaiveDate, String, Option<String>, i64, i64, i64)> =
         sqlx::query_as(&daily_rows_sql)
             .bind(auth_user.id)
             .fetch_all(&state.db)
@@ -333,8 +332,8 @@ async fn user_usage(
 
     let mut daily_map: std::collections::BTreeMap<NaiveDate, (i64, f64)> =
         std::collections::BTreeMap::new();
-    for (day, agent, tokens_in, tokens_out, calls) in daily_rows {
-        let cost = cost_for(cfg, &agent, tokens_in, tokens_out);
+    for (day, agent, provider, tokens_in, tokens_out, calls) in daily_rows {
+        let cost = cost_for(cfg, &agent, provider.as_deref(), tokens_in, tokens_out);
         let entry = daily_map.entry(day).or_insert((0, 0.0));
         entry.0 += calls;
         entry.1 += cost;

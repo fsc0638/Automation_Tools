@@ -301,6 +301,7 @@ fn verify_password(password: &str, hash: &str) -> AppResult<bool> {
 #[derive(Clone, Debug)]
 pub struct AuthUser {
     pub id: Uuid,
+    #[allow(dead_code)]
     pub email: String,
 }
 

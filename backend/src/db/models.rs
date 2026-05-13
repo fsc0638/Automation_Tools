@@ -26,6 +26,11 @@ pub struct Project {
     pub local_path: Option<String>, // cloned path for git repos
     pub default_branch: Option<String>,
     pub git_identity_id: Option<Uuid>,
+    /// Effective ACL role for the requesting user. Populated by list/get
+    /// endpoints that join user_project_role(); NULL on INSERT…RETURNING paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub effective_role: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -94,7 +99,7 @@ pub struct Conversation {
     pub project_id: Uuid,
     pub user_id: Uuid,
     pub title: String,
-    pub mode: String, // "openclaw" | "hermes" | "debate"
+    pub mode: String, // "openclaw" | "hermes" | "debate" | "agent:<profile-id>" | "agents:<id1>,<id2>,..."
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -140,6 +145,7 @@ pub struct ConversationSummary {
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+#[allow(dead_code)]
 pub struct RefreshToken {
     pub id: Uuid,
     pub user_id: Uuid,

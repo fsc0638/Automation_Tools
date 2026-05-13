@@ -310,6 +310,7 @@ pub fn read_file_content(root: &str, file_path: &str) -> Result<String> {
     std::fs::read_to_string(&safe_path).map_err(|e| anyhow!("Read error: {}", e))
 }
 
+#[allow(dead_code)]
 pub fn write_file_content(root: &str, file_path: &str, content: &str) -> Result<()> {
     let safe_path = sanitize_path(root, file_path)?;
     if let Some(parent) = safe_path.parent() {

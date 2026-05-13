@@ -278,12 +278,8 @@ async fn metrics_cost(
     .fetch_all(db)
     .await?;
 
-    let price_for_event = |agent: &str, _provider: Option<&str>, _model: Option<&str>| -> (f64, f64) {
-        if agent == "hermes" {
-            (cfg.hermes_price_per_1k_in, cfg.hermes_price_per_1k_out)
-        } else {
-            (cfg.openclaw_price_per_1k_in, cfg.openclaw_price_per_1k_out)
-        }
+    let price_for_event = |agent: &str, provider: Option<&str>, _model: Option<&str>| -> (f64, f64) {
+        cfg.price_for(agent, provider)
     };
 
     let mut total_cost = 0.0_f64;

@@ -17,6 +17,16 @@ const MODE_COLORS: Record<string, string> = {
   debate: "#F59E0B",
 };
 
+// Palette for custom agents not in AGENT_COLORS. Cycles when there are more agents than slots.
+const CUSTOM_PALETTE = [
+  "#059669", "#D97706", "#DC2626", "#2563EB", "#DB2777",
+  "#0891B2", "#16A34A", "#EA580C", "#7C3AED", "#0284C7",
+];
+
+function agentColor(agent: string, dynamicIndex: number): string {
+  return AGENT_COLORS[agent] ?? CUSTOM_PALETTE[dynamicIndex % CUSTOM_PALETTE.length];
+}
+
 export function CostTab({ projectId }: { projectId: string }) {
   const [data, setData] = useState<MetricsCost | null>(null);
   const [loading, setLoading] = useState(true);
@@ -44,13 +54,30 @@ export function CostTab({ projectId }: { projectId: string }) {
   if (error) return <div className="p-8 text-center text-[#C8102E]">{error}</div>;
   if (!data) return null;
 
-  // Reshape daily data into wide form for stacked area: { day, openclaw, hermes }
-  const dailyMap = new Map<string, { day: string; openclaw: number; hermes: number }>();
+  // Collect agents in a stable order: known first-party agents first, then custom sorted alphabetically.
+  const knownOrder = ["openclaw", "hermes"];
+  const allAgents = [
+    ...knownOrder.filter(a => data.daily.some(r => r.agent === a)),
+    ...Array.from(new Set(data.daily.map(r => r.agent)))
+      .filter(a => !knownOrder.includes(a))
+      .sort(),
+  ];
+
+  // Assign a dynamic palette index to each agent that's not in AGENT_COLORS.
+  let customIdx = 0;
+  const agentColorMap = new Map<string, string>();
+  for (const a of allAgents) {
+    agentColorMap.set(a, agentColor(a, AGENT_COLORS[a] ? 0 : customIdx));
+    if (!AGENT_COLORS[a]) customIdx++;
+  }
+
+  // Reshape daily data into wide form for stacked area: { day, [agent]: cost }
+  type DailyWideRow = { day: string; [agent: string]: number | string };
+  const dailyMap = new Map<string, DailyWideRow>();
   for (const row of data.daily) {
-    const existing = dailyMap.get(row.day) ?? { day: row.day, openclaw: 0, hermes: 0 };
-    if (row.agent === "openclaw") existing.openclaw += row.cost_usd;
-    if (row.agent === "hermes") existing.hermes += row.cost_usd;
-    dailyMap.set(row.day, existing);
+    if (!dailyMap.has(row.day)) dailyMap.set(row.day, { day: row.day });
+    const entry = dailyMap.get(row.day)!;
+    entry[row.agent] = ((entry[row.agent] as number | undefined) ?? 0) + row.cost_usd;
   }
   const dailySorted = Array.from(dailyMap.values()).sort((a, b) => a.day.localeCompare(b.day));
 
@@ -87,8 +114,21 @@ export function CostTab({ projectId }: { projectId: string }) {
               <XAxis dataKey="day" tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `$${v.toFixed(2)}`} />
               <Tooltip formatter={(v) => `$${Number(v).toFixed(4)}`} />
-              <Area type="monotone" dataKey="openclaw" stackId="1" stroke="#0050A0" fill="#0050A0" fillOpacity={0.5} />
-              <Area type="monotone" dataKey="hermes" stackId="1" stroke="#7C3AED" fill="#7C3AED" fillOpacity={0.5} />
+              {allAgents.map(agent => {
+                const color = agentColorMap.get(agent) ?? "#94A3B8";
+                return (
+                  <Area
+                    key={agent}
+                    type="monotone"
+                    dataKey={agent}
+                    stackId="1"
+                    stroke={color}
+                    fill={color}
+                    fillOpacity={0.5}
+                    name={agent}
+                  />
+                );
+              })}
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -106,7 +146,7 @@ export function CostTab({ projectId }: { projectId: string }) {
                 <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `$${v.toFixed(2)}`} />
                 <Tooltip formatter={(v) => `$${Number(v).toFixed(4)}`} />
                 <Bar dataKey="cost_usd" radius={[4, 4, 0, 0]}>
-                  {data.by_agent.map((r) => <Cell key={r.agent} fill={AGENT_COLORS[r.agent] ?? "#94A3B8"} />)}
+                  {data.by_agent.map((r) => <Cell key={r.agent} fill={agentColorMap.get(r.agent) ?? "#94A3B8"} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
