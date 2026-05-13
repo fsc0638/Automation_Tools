@@ -28,6 +28,7 @@ use crate::{
             refresh_project_summary,
         },
         project_index::relevant_file_context,
+        shared_memory::{truncate_note_bodies, SharedMemoryNote},
         AppState,
     },
     db::models::{AgentProfile, Project},
@@ -138,6 +139,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             .await
             .ok()
             .flatten();
+        let shared_notes: Vec<SharedMemoryNote> = sqlx::query_as(
+            "SELECT * FROM shared_memory_notes
+             WHERE user_id = $1
+               AND (cardinality(scope_projects) = 0 OR $2 = ANY(scope_projects))
+             ORDER BY pinned DESC, updated_at DESC
+             LIMIT 20",
+        )
+        .bind(user_id)
+        .bind(query.project_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        let shared_notes = truncate_note_bodies(shared_notes);
         // Fetch the conversation title for the cost-events snapshot (mig 0023).
         // We grab it per-message rather than once at session start so a
         // rename mid-session is reflected in subsequent rows. Failure
@@ -248,6 +262,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             &secured_context.project_scope,
             &secured_context.history,
             secured_context.project_summary.clone(),
+            shared_notes,
             &secured_context.user_message,
             agent_mode,
         );

@@ -62,11 +62,24 @@ pub struct ReviewCandidateRequest {
     pub review_note: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct BulkCandidateRequest {
+    ids: Vec<Uuid>,
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/projects/:project_id/memory/candidates",
             get(list_memory_candidates),
+        )
+        .route(
+            "/projects/:project_id/memory/candidates/bulk-approve",
+            post(bulk_approve),
+        )
+        .route(
+            "/projects/:project_id/memory/candidates/bulk-reject",
+            post(bulk_reject),
         )
         .route(
             "/projects/:project_id/memory/candidates/:candidate_id/approve",
@@ -377,7 +390,7 @@ async fn approve_memory_candidate(
     Path((project_id, candidate_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<ReviewCandidateRequest>,
 ) -> AppResult<Json<ProjectMemoryCandidate>> {
-    verify_project_access(&state.db, project_id, auth_user.id).await?;
+    verify_project_access_min_role(&state, project_id, auth_user.id, "editor").await?;
 
     let candidate: ProjectMemoryCandidate = sqlx::query_as(
         "SELECT * FROM project_memory_candidates
@@ -426,7 +439,7 @@ async fn reject_memory_candidate(
     Path((project_id, candidate_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<ReviewCandidateRequest>,
 ) -> AppResult<StatusCode> {
-    verify_project_access(&state.db, project_id, auth_user.id).await?;
+    verify_project_access_min_role(&state, project_id, auth_user.id, "editor").await?;
     let result = sqlx::query(
         "UPDATE project_memory_candidates
          SET status = 'rejected', review_note = $3, reviewed_by = $4, reviewed_at = NOW()
@@ -444,6 +457,81 @@ async fn reject_memory_candidate(
             "Pending memory candidate not found".into(),
         ));
     }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn bulk_approve(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+    Json(req): Json<BulkCandidateRequest>,
+) -> AppResult<StatusCode> {
+    verify_project_access_min_role(&state, project_id, auth_user.id, "editor").await?;
+    if req.ids.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let rows: Vec<ProjectMemoryCandidate> = sqlx::query_as(
+        "SELECT * FROM project_memory_candidates
+         WHERE id = ANY($1) AND project_id = $2 AND status = 'pending'",
+    )
+    .bind(&req.ids)
+    .bind(project_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    for candidate in &rows {
+        sqlx::query(
+            "INSERT INTO project_memory_summaries (project_id, summary, source_message_count, updated_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (project_id)
+             DO UPDATE SET summary = EXCLUDED.summary,
+                           source_message_count = EXCLUDED.source_message_count,
+                           updated_at = NOW()",
+        )
+        .bind(project_id)
+        .bind(&candidate.proposed_content)
+        .bind(candidate.source_message_count)
+        .execute(&state.db)
+        .await?;
+    }
+
+    sqlx::query(
+        "UPDATE project_memory_candidates
+         SET status = 'approved', reviewed_by = $1, reviewed_at = NOW(), applied_at = NOW()
+         WHERE id = ANY($2) AND project_id = $3 AND status = 'pending'",
+    )
+    .bind(auth_user.id)
+    .bind(&req.ids)
+    .bind(project_id)
+    .execute(&state.db)
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn bulk_reject(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+    Json(req): Json<BulkCandidateRequest>,
+) -> AppResult<StatusCode> {
+    verify_project_access_min_role(&state, project_id, auth_user.id, "editor").await?;
+    if req.ids.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    sqlx::query(
+        "UPDATE project_memory_candidates
+         SET status = 'rejected', reviewed_by = $1, reviewed_at = NOW()
+         WHERE id = ANY($2) AND project_id = $3 AND status = 'pending'",
+    )
+    .bind(auth_user.id)
+    .bind(&req.ids)
+    .bind(project_id)
+    .execute(&state.db)
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -556,9 +644,43 @@ async fn verify_project_access(db: &PgPool, project_id: Uuid, user_id: Uuid) -> 
     .fetch_optional(db)
     .await?;
 
-    exists
-        .map(|_| ())
-        .ok_or_else(|| AppError::NotFound("Project not found".into()))
+    if exists.is_some() {
+        Ok(())
+    } else {
+        Err(AppError::NotFound("Project not found".into()))
+    }
+}
+
+async fn verify_project_access_min_role(
+    state: &AppState,
+    project_id: Uuid,
+    user_id: Uuid,
+    min_role: &str,
+) -> AppResult<()> {
+    let can_view: bool = sqlx::query_scalar("SELECT user_can_access_project($1, $2, 'viewer')")
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    if !can_view {
+        return Err(AppError::NotFound("Project not found".into()));
+    }
+
+    let allowed: bool = sqlx::query_scalar("SELECT user_can_access_project($1, $2, $3)")
+        .bind(project_id)
+        .bind(user_id)
+        .bind(min_role)
+        .fetch_one(&state.db)
+        .await?;
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(format!(
+            "{} role required for this action",
+            min_role
+        )))
+    }
 }
 
 fn normalize_candidate_status(value: Option<&str>) -> AppResult<Option<&'static str>> {
