@@ -628,21 +628,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   // the cache row at the end of each turn). Failures are silent — the
   // summary chip simply doesn't appear.
   useEffect(() => {
-    if (!activeConv) {
-      setConvSummary(null);
-      return;
-    }
     let cancelled = false;
-    (async () => {
-      try {
-        const s = await convsApi.summary(id, activeConv.id);
-        if (!cancelled) setConvSummary(s);
-      } catch {
-        if (!cancelled) setConvSummary(null);
-      }
-    })();
+    const conv = activeConv;
+    queueMicrotask(() => {
+      void (async () => {
+        if (!conv) {
+          if (!cancelled) setConvSummary(null);
+          return;
+        }
+        try {
+          const s = await convsApi.summary(id, conv.id);
+          if (!cancelled) setConvSummary(s);
+        } catch {
+          if (!cancelled) setConvSummary(null);
+        }
+      })();
+    });
     return () => { cancelled = true; };
-  }, [id, activeConv?.id, streaming]);
+  }, [id, activeConv, streaming]);
 
   useEffect(() => {
     if (!activeConv) {
