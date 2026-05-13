@@ -1,6 +1,6 @@
 "use client";
 import { memo, use, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import { SyntaxHighlighter } from "@/components/SyntaxHighlighter";
 import {
@@ -135,6 +135,52 @@ function modeStyle(value: ChatMode) {
   return "bg-emerald-50 text-emerald-700 border border-emerald-200";
 }
 
+/**
+ * Infer the conversation's display mode/label from its title.
+ *
+ * Reason: `conversations.mode` in the DB is restricted by a CHECK
+ * constraint (mig 0002) to "openclaw" | "hermes" | "debate", so a
+ * custom-agent or custom-debate conversation always lands as
+ * "openclaw". The auto-generated title carries the real intent:
+ *   - "Custom Debate Conversation N" → custom debate
+ *   - "<AgentName> Conversation N"   → that single custom agent
+ *   - "OpenClaw Conversation N"      → just OpenClaw (matches conv.mode)
+ *   - "Hermes / Debate Mode …"       → matches conv.mode
+ * Until backlog #25 widens the CHECK constraint and we can store
+ * the real mode string, we recover the intent by matching the
+ * title prefix against the enabled agent profile list.
+ *
+ * Returns null when the title carries no usable hint and the caller
+ * should fall back to the raw `conv.mode` styling.
+ */
+function inferConversationMode(
+  conv: { title: string; mode: ChatMode },
+  profiles: AgentProfile[] = [],
+):
+  | { label: string; className: string }
+  | null {
+  const title = conv.title.trim();
+  if (title.startsWith("Custom Debate")) {
+    return {
+      label: "Custom Debate",
+      className: "bg-teal-50 text-teal-700 border border-teal-200",
+    };
+  }
+  // Match any enabled custom agent profile by name prefix. Sort by
+  // length descending so a longer name ("Gemini-lite") wins over a
+  // shorter one ("Gemini") that would otherwise match first.
+  const sorted = [...profiles].sort((a, b) => b.name.length - a.name.length);
+  for (const profile of sorted) {
+    if (title.startsWith(`${profile.name} `) || title === profile.name) {
+      return {
+        label: profile.name,
+        className: "bg-emerald-50 text-emerald-700 border border-emerald-200",
+      };
+    }
+  }
+  return null;
+}
+
 type StreamStatus = {
   agent: string;
   message: string;
@@ -200,6 +246,11 @@ function formatRelativeTime(value: string) {
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  // Deep-link target tab. The global Roadmap (/roadmap) links each card
+  // to /projects/{id}?tab=roadmap so the user lands on that project's
+  // Roadmap board, not the chat composer. Insights / Cost can be reached
+  // the same way later if other surfaces want to deep-link them.
+  const searchParams = useSearchParams();
   const pushToast = useToastStore((state) => state.pushToast);
   const t = useT();
   const setShowAppSidebar = useWorkspaceChromeStore((state) => state.setShowAppSidebar);
@@ -217,6 +268,17 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
   const [showCustomDebatePicker, setShowCustomDebatePicker] = useState(false);
+  // "New conversation" type chooser. Opens when the user clicks any of the
+  // four `+ New Conversation` buttons in the chat shell. The previous flow
+  // just created a conversation with the currently-selected composer mode,
+  // which hid the agent picker from anyone who didn't already understand
+  // the mode toggle row.
+  const [showNewConvModal, setShowNewConvModal] = useState(false);
+  // When the user picks "Custom Debate" inside the new-conversation modal
+  // we chain through to the existing CustomDebatePicker. This flag tells the
+  // picker that on confirm it should CREATE the conversation (not just
+  // update the active composer's mode).
+  const [pickerCreatesConv, setPickerCreatesConv] = useState(false);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -231,7 +293,16 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [refreshStatus, setRefreshStatus] = useState("");
   const [conversationQuery, setConversationQuery] = useState("");
   const [contextTab, setContextTab] = useState<ContextTab>("files");
-  const [projectTab, setProjectTab] = useState<ProjectTab>("workspace");
+  const [projectTab, setProjectTab] = useState<ProjectTab>(() => {
+    // Read the desired tab from the URL once on mount. After this, manual
+    // tab clicks update local state only — we don't rewrite the URL on
+    // every tab switch to avoid spurious browser-history entries.
+    const requested = searchParams.get("tab");
+    if (requested === "roadmap" || requested === "insights" || requested === "cost") {
+      return requested;
+    }
+    return "workspace";
+  });
   const [fileQuery, setFileQuery] = useState("");
   const [selectedFilePath, setSelectedFilePath] = useState("");
   const [selectedFileContent, setSelectedFileContent] = useState("");
@@ -357,22 +428,22 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     const hasFinal = statusText.includes("final") || statusText.includes("synthesis");
     return [
       {
-        title: "OpenClaw proposes",
-        detail: "Fast first pass and implementation angle.",
+        title: t("debate.stepOpenClaw"),
+        detail: t("debate.detailOpenClaw"),
         state: hasOpenClaw ? (hasHermes || hasFinal ? "done" : "active") : mode === "debate" && streaming ? "active" : "idle",
       },
       {
-        title: "Hermes challenges",
-        detail: "Counterpoints, risks, and stronger reasoning.",
+        title: t("debate.stepHermes"),
+        detail: t("debate.detailHermes"),
         state: hasHermes ? (hasFinal ? "done" : "active") : mode === "debate" && (hasOpenClaw || streaming) ? "queued" : "idle",
       },
       {
-        title: "Final synthesis",
-        detail: "Unified recommendation with trade-offs resolved.",
+        title: t("debate.stepFinal"),
+        detail: t("debate.detailFinal"),
         state: hasFinal ? "active" : mode === "debate" && (hasOpenClaw || hasHermes || streaming) ? "queued" : "idle",
       },
     ] as const;
-  }, [mode, streamStatusEntries, streaming]);
+  }, [mode, streamStatusEntries, streaming, t]);
 
   function syncTextareaHeight() {
     const target = textareaRef.current;
@@ -745,15 +816,48 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }
 
+  /**
+   * Open the new-conversation type chooser. Before committing the create
+   * we refresh `agentProfiles` so freshly-added agents (Gemini, Claude…)
+   * show up immediately without forcing a full page reload.
+   */
   async function newConv() {
-    const selectedMode = mode;
-    const createMode = isCoreAgentMode(selectedMode) ? selectedMode : "openclaw";
-    const conv = await convsApi.create(id, `${modeLabel(selectedMode, agentProfiles, t)} Conversation ${convs.length + 1}`, createMode);
+    try {
+      const profiles = await agentProfilesApi.list();
+      setAgentProfiles(profiles.filter((profile) => profile.enabled));
+    } catch {
+      // Best-effort refresh; if it fails we still open the modal with the
+      // previously-loaded set so the user can pick a core agent.
+    }
+    setShowNewConvModal(true);
+  }
+
+  /**
+   * Actually create the conversation. `chosenMode` may be any `ChatMode`:
+   * - core ("openclaw" | "hermes" | "debate") goes straight to the DB
+   *   `mode` column (matches the enum backend accepts in mig 0001).
+   * - "agent:<id>" / "agents:<id>,<id>" are UI-only encodings; the DB
+   *   row is created with "openclaw" as a placeholder and the live agent
+   *   selection is carried by each WS turn's `mode` payload.
+   * See backlog #10 for the longer-term plan to make conv.mode reflect
+   * the live selection too.
+   */
+  async function actuallyCreateConv(chosenMode: ChatMode) {
+    const createMode = isCoreAgentMode(chosenMode) ? chosenMode : "openclaw";
+    const conv = await convsApi.create(
+      id,
+      `${modeLabel(chosenMode, agentProfiles, t)} Conversation ${convs.length + 1}`,
+      createMode,
+    );
     setConvs((cs) => [conv, ...cs]);
     setMessages([]);
     setActiveConv(conv);
-    setMode(selectedMode);
-    pushToast({ tone: "success", title: "Conversation created", description: `${modeLabel(selectedMode, agentProfiles, t)} is ready for the next turn.` });
+    setMode(chosenMode);
+    pushToast({
+      tone: "success",
+      title: "Conversation created",
+      description: `${modeLabel(chosenMode, agentProfiles, t)} is ready for the next turn.`,
+    });
   }
 
   async function refreshProject() {
@@ -1100,12 +1204,26 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       <div className="flex items-center gap-2">
                         <MessageSquarePlus size={14} className={activeConv?.id === conv.id ? "text-[#0050A0]" : "text-[#94A3B8]"} />
                         <span className="truncate text-[15px] font-medium tracking-[-0.01em] text-[#1A1A2E]">{conv.title}</span>
-                        {activeConv?.id === conv.id && <span className="rounded-full bg-white/90 px-2 py-0.5 text-[11px] font-semibold text-[#0050A0]">{t("convList.active")}</span>}
+                        {/* Active / streaming pills removed — the row already
+                            highlights the selected conversation via background
+                            colour, and the streaming state has its own
+                            indicator in the chat header. */}
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-[#64748B]">
-                        <span className={cn("rounded-full px-2 py-0.5", MODE_STYLES[conv.mode])}>{MODE_LABELS[conv.mode]}</span>
+                        {(() => {
+                          // Custom Debate / Custom Agent conversations land in
+                          // DB as mode="openclaw" because of the mig 0002 CHECK
+                          // constraint; infer the real intent from the
+                          // auto-generated title until backlog #25 widens the
+                          // constraint and we can store the actual mode.
+                          const inferred = inferConversationMode(conv, agentProfiles);
+                          const style = inferred?.className ?? MODE_STYLES[conv.mode];
+                          const label = inferred?.label ?? MODE_LABELS[conv.mode];
+                          return (
+                            <span className={cn("rounded-full px-2 py-0.5", style)}>{label}</span>
+                          );
+                        })()}
                         <span>{formatRelativeTime(conv.updated_at)}</span>
-                        {streaming && activeConv?.id === conv.id && <span className="rounded-full border border-[#BFDBFE] bg-white px-2 py-0.5 text-[#1D4ED8]">Live</span>}
                       </div>
                       <div className="mt-2 line-clamp-2 text-[13px] leading-6 text-[#64748B]">
                         {activeConv?.id === conv.id
@@ -1273,7 +1391,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       </button>
                     );
                   })}
-                  {agentProfiles.length >= 2 && (
+                  {/* Always available now that the picker accepts the two
+                      built-in agents as participants. */}
+                  {true && (
                     <button
                       key="custom-debate"
                       onClick={() => setShowCustomDebatePicker(true)}
@@ -1804,10 +1924,38 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         <CustomDebatePicker
           profiles={agentProfiles}
           initialMode={mode}
-          onClose={() => setShowCustomDebatePicker(false)}
-          onConfirm={(picked) => {
-            setMode(`agents:${picked.join(",")}` as ChatMode);
+          onClose={() => {
             setShowCustomDebatePicker(false);
+            setPickerCreatesConv(false);
+          }}
+          onConfirm={(picked) => {
+            const debateMode = `agents:${picked.join(",")}` as ChatMode;
+            setShowCustomDebatePicker(false);
+            if (pickerCreatesConv) {
+              setPickerCreatesConv(false);
+              void actuallyCreateConv(debateMode);
+            } else {
+              setMode(debateMode);
+            }
+          }}
+        />
+      )}
+
+      {showNewConvModal && (
+        <NewConversationModal
+          profiles={agentProfiles}
+          onClose={() => setShowNewConvModal(false)}
+          onPickSingle={(picked) => {
+            setShowNewConvModal(false);
+            void actuallyCreateConv(picked);
+          }}
+          onPickCustomDebate={() => {
+            // Hand off to the existing 2–4 agent picker; the picker's
+            // confirm callback will fall through to actuallyCreateConv
+            // because pickerCreatesConv is set here.
+            setShowNewConvModal(false);
+            setPickerCreatesConv(true);
+            setShowCustomDebatePicker(true);
           }}
         />
       )}
@@ -1816,10 +1964,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 }
 
 /**
- * C6: lets the user pick exactly which 2–4 enabled agents participate
- * in a Custom Debate. Without this, the previous shortcut grabbed the
- * first 2-4 enabled profiles automatically, which is fine when you
- * have exactly the right set up but gives no control otherwise.
+ * Debate participant picker. Originally custom-only ("C6"), but as of this
+ * commit also accepts the built-in OpenClaw + Hermes as participants so a
+ * user without any of their own agent profiles can still drive a focused
+ * 2-agent debate, or mix-and-match (e.g. OpenClaw + Hermes + Gemini).
+ *
+ * Encoding: tokens are either the literal `"openclaw"` / `"hermes"` or a
+ * UUID of an enabled agent profile. The backend's
+ * `ws.rs::agent_mode_from_str` performs the same parsing — kept in sync.
  */
 function CustomDebatePicker({
   profiles,
@@ -1837,6 +1989,19 @@ function CustomDebatePicker({
     ? initialMode.slice("agents:".length).split(",")
     : [];
   const [picked, setPicked] = useState<string[]>(presetIds);
+
+  // Built-in pseudo-profiles. Their `id` is the reserved literal accepted
+  // by the backend parser; provider/model are shown for parity with custom
+  // rows so the UI looks consistent. provider="built-in" is used as a
+  // marker for the BUILT-IN badge — translated below.
+  const builtinRows = [
+    { id: "openclaw", name: "OpenClaw", provider: "built-in", model: "gpt-5.5 (OpenClaw gateway)" },
+    { id: "hermes",   name: "Hermes",   provider: "built-in", model: "hermes-agent (Hermes gateway)" },
+  ];
+  const allRows: { id: string; name: string; provider: string; model: string }[] = [
+    ...builtinRows,
+    ...profiles.map((p) => ({ id: p.id, name: p.name, provider: p.provider, model: p.model })),
+  ];
 
   function toggle(id: string) {
     setPicked((prev) => {
@@ -1859,19 +2024,20 @@ function CustomDebatePicker({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={onClose}>
-      <div className="w-full max-w-lg rounded-lg bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="border-b border-[#E2E8F0] px-5 py-3">
-          <h3 className="text-sm font-semibold text-[#1A1A2E]">{t("chat.customDebateTitle")}</h3>
-          <p className="mt-1 text-xs text-[#64748B]">{t("chat.customDebateDesc")}</p>
+      <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-[#E2E8F0] px-5 py-4">
+          <h3 className="type-card-title">{t("chat.customDebateTitle")}</h3>
+          <p className="type-body-muted mt-1">{t("chat.customDebateDesc")}</p>
         </div>
-        <div className="max-h-[420px] overflow-y-auto px-5 py-3 space-y-1">
-          {profiles.map((p) => {
+        <div className="max-h-[420px] overflow-y-auto px-5 py-3 space-y-1.5">
+          {allRows.map((p) => {
             const order = picked.indexOf(p.id);
             const selected = order >= 0;
+            const isBuiltin = p.provider === "built-in";
             return (
               <label
                 key={p.id}
-                className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 ${
+                className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 transition ${
                   selected ? "border-[#0050A0] bg-[#EFF6FF]" : "border-[#E2E8F0] hover:border-[#94A3B8]"
                 }`}
               >
@@ -1879,22 +2045,29 @@ function CustomDebatePicker({
                   type="checkbox"
                   checked={selected}
                   onChange={() => toggle(p.id)}
-                  className="h-3 w-3"
+                  className="h-3.5 w-3.5"
                 />
                 {selected && (
-                  <span className="rounded-full bg-[#0050A0] px-1.5 text-[10px] font-semibold text-white">
+                  <span className="rounded-full bg-[#0050A0] px-1.5 text-[11px] font-semibold text-white">
                     #{order + 1}
                   </span>
                 )}
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-[#1A1A2E] truncate">{p.name}</div>
-                  <div className="text-[11px] text-[#64748B]">{p.provider} · {p.model}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[14px] font-medium tracking-[-0.01em] text-[#1A1A2E]">{p.name}</span>
+                    {isBuiltin && (
+                      <span className="rounded-full bg-[#F1F5F9] px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-[#64748B]">
+                        {t("agents.badgeBuiltIn")}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[12px] leading-5 text-[#64748B]">{p.provider} · {p.model}</div>
                 </div>
                 {selected && order > 0 && (
                   <button
                     type="button"
                     onClick={(e) => { e.preventDefault(); moveUp(p.id); }}
-                    className="text-[11px] text-[#0050A0] hover:underline"
+                    className="text-[12px] text-[#0050A0] hover:underline"
                     title={t("chat.customDebateMoveUp")}
                   >
                     ↑
@@ -1926,6 +2099,170 @@ function CustomDebatePicker({
   );
 }
 
+/**
+ * "+ New Conversation" type chooser. Sequencing rule:
+ * - Single-agent cards (OpenClaw / Hermes / each enabled custom agent)
+ *   commit immediately on click via onPickSingle, no second step.
+ * - "Debate Mode" card commits immediately as the legacy OpenClaw + Hermes
+ *   debate (backend's hardcoded two-agent orchestration).
+ * - "Custom Debate" card hands off to the existing CustomDebatePicker for
+ *   the 2–4 agent multi-select; the picker's confirm path is what creates
+ *   the conversation in that branch.
+ *
+ * The list of custom agents comes from `agentProfiles`, which the parent
+ * re-fetches just before opening this modal so newly-added agents appear
+ * without a page reload.
+ */
+function NewConversationModal({
+  profiles,
+  onClose,
+  onPickSingle,
+  onPickCustomDebate,
+}: {
+  profiles: AgentProfile[];
+  onClose: () => void;
+  onPickSingle: (mode: ChatMode) => void;
+  onPickCustomDebate: () => void;
+}) {
+  const t = useT();
+  // Custom Debate is always available now that the picker accepts OpenClaw
+  // and Hermes as participants — even a user with zero custom profiles can
+  // run an OpenClaw + Hermes debate through this code path.
+  const canCustomDebate = true;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl rounded-[24px] bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-[#E2E8F0] px-6 py-5">
+          <h3 className="type-card-title">{t("chat.newConvModalTitle")}</h3>
+          <p className="type-body-muted mt-1">{t("chat.newConvModalDesc")}</p>
+        </div>
+
+        <div className="max-h-[60vh] space-y-5 overflow-y-auto px-6 py-5">
+          {/* Single-agent section: 2 built-ins + each enabled custom profile */}
+          <section>
+            <div className="type-overline mb-2.5">{t("chat.singleAgentSection")}</div>
+            <div className="grid gap-2.5 sm:grid-cols-2">
+              <AgentChooserCard
+                label={t("chat.modeOpenClaw")}
+                detail={t("agents.descOpenClaw")}
+                tone="blue"
+                icon={<Cpu size={16} />}
+                onClick={() => onPickSingle("openclaw")}
+              />
+              <AgentChooserCard
+                label={t("chat.modeHermes")}
+                detail={t("agents.descHermes")}
+                tone="violet"
+                icon={<Bot size={16} />}
+                onClick={() => onPickSingle("hermes")}
+              />
+              {profiles.map((profile) => (
+                <AgentChooserCard
+                  key={profile.id}
+                  label={profile.name}
+                  detail={`${profile.provider} · ${profile.model}`}
+                  tone="emerald"
+                  icon={<Sparkles size={16} />}
+                  onClick={() => onPickSingle(`agent:${profile.id}` as ChatMode)}
+                />
+              ))}
+            </div>
+            {profiles.length === 0 && (
+              <p className="type-meta mt-2">{t("chat.customAgentTip")}</p>
+            )}
+          </section>
+
+          {/* Multi-agent: built-in two-agent debate + custom 2–4 debate */}
+          <section>
+            <div className="type-overline mb-2.5">{t("chat.multiAgentSection")}</div>
+            <div className="grid gap-2.5 sm:grid-cols-2">
+              <AgentChooserCard
+                label={t("chat.modeDebate")}
+                detail={t("chat.debateModeShortDesc")}
+                tone="amber"
+                icon={<Zap size={16} />}
+                onClick={() => onPickSingle("debate")}
+              />
+              <AgentChooserCard
+                label={t("chat.modeCustomDebate")}
+                detail={t("chat.customDebateShortDesc")}
+                tone="teal"
+                icon={<Zap size={16} />}
+                onClick={onPickCustomDebate}
+              />
+            </div>
+          </section>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-[#E2E8F0] px-6 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-[#64748B] transition hover:bg-[#F1F5F9] hover:text-[#1A1A2E]"
+          >
+            {t("common.cancel")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentChooserCard({
+  label,
+  detail,
+  tone,
+  icon,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  detail: string;
+  tone: "blue" | "violet" | "amber" | "teal" | "emerald";
+  icon: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  // Tone-specific accents reused from the main mode toggle row so the
+  // chooser visually matches what the user will see in the composer
+  // after the conversation is created.
+  const toneCx: Record<typeof tone, string> = {
+    blue:    "border-[#BFDBFE] bg-[#EFF6FF] text-[#0050A0]",
+    violet:  "border-[#DDD6FE] bg-[#F5F3FF] text-[#7C3AED]",
+    amber:   "border-[#FDE68A] bg-[#FFFBEB] text-[#B45309]",
+    teal:    "border-teal-200 bg-teal-50 text-teal-700",
+    emerald: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "flex items-start gap-3 rounded-2xl border p-3.5 text-left transition shadow-[0_1px_2px_rgba(15,23,42,0.03)]",
+        disabled
+          ? "cursor-not-allowed border-[#E2E8F0] bg-[#F8FAFC] opacity-60"
+          : "border-[#E2E8F0] bg-white hover:-translate-y-px hover:border-[#94A3B8] hover:shadow-[0_8px_18px_rgba(15,23,42,0.06)]",
+      )}
+    >
+      <div className={cn("mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border", toneCx[tone])}>
+        {icon}
+      </div>
+      <div className="min-w-0">
+        <div className="text-[14px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">{label}</div>
+        <div className="mt-1 text-[12px] leading-5 text-[#64748B]">{detail}</div>
+      </div>
+    </button>
+  );
+}
+
 function DebateStepCard({
   index,
   title,
@@ -1937,6 +2274,7 @@ function DebateStepCard({
   detail: string;
   state: "idle" | "queued" | "active" | "done";
 }) {
+  const t = useT();
   const toneClass = state === "done"
     ? "border-[#FDE68A] bg-white"
     : state === "active"
@@ -1954,12 +2292,12 @@ function DebateStepCard({
         : "bg-white text-[#A16207]";
 
   const statusLabel = state === "done"
-    ? "Done"
+    ? t("debate.statusDone")
     : state === "active"
-      ? "Running"
+      ? t("debate.statusRunning")
       : state === "queued"
-        ? "Queued"
-        : "Waiting";
+        ? t("debate.statusQueued")
+        : t("debate.statusWaiting");
 
   return (
     <div className={cn("rounded-2xl border p-4 shadow-sm", toneClass)}>

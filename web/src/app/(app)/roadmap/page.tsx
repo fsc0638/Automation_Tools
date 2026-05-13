@@ -159,7 +159,11 @@ export default function GlobalRoadmapPage() {
 function GlobalTaskCard({ task }: { task: UserTask }) {
   return (
     <Link
-      href={`/projects/${task.project_id}`}
+      // Deep-link into the project's Roadmap tab (not the chat workspace).
+      // The destination page reads `?tab=roadmap` on mount; if/when the
+      // task drawer supports a direct task-id anchor, this can become
+      // `?tab=roadmap&task={task.id}`.
+      href={`/projects/${task.project_id}?tab=roadmap`}
       className="block rounded-md border border-[#E2E8F0] bg-white p-3 hover:border-[#0050A0]"
     >
       <div className="text-sm font-medium text-[#1A1A2E] leading-snug">{task.title}</div>

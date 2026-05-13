@@ -84,7 +84,39 @@ pub enum AgentMode {
     OpenClawOnly,
     Debate,
     Custom(AgentProfileRuntime),
-    CustomDebate(Vec<AgentProfileRuntime>),
+    /// Custom-shaped debate that may mix built-in OpenClaw / Hermes with any
+    /// number of user-defined agent profiles. The frontend's debate picker
+    /// can include up to 4 participants in any combination, so this used to
+    /// require ≥2 custom profiles; now even a single user can run a
+    /// "self-test" between only OpenClaw and Hermes through this code path
+    /// if they want the picker UX without owning custom agents.
+    CustomDebate(Vec<DebateParticipant>),
+}
+
+/// One slot in a CustomDebate roster. Lets the orchestrator dispatch each
+/// turn to the right client (OpenClawClient / HermesClient / GenericAgent)
+/// while keeping the rest of the debate logic agnostic.
+#[derive(Debug, Clone)]
+pub enum DebateParticipant {
+    /// Built-in OpenClaw — uses OPENCLAW_API_URL / OPENCLAW_MODEL from env.
+    OpenClaw,
+    /// Built-in Hermes — uses HERMES_API_URL / HERMES_MODEL from env.
+    Hermes,
+    /// A user-defined agent profile dispatched through GenericAgentClient.
+    Custom(AgentProfileRuntime),
+}
+
+impl DebateParticipant {
+    /// Human-visible label rendered in the chat bubble. Matches what the
+    /// CustomDebatePicker shows in its row so the round attribution stays
+    /// consistent end-to-end.
+    pub fn display_name(&self) -> String {
+        match self {
+            DebateParticipant::OpenClaw => "OpenClaw".to_string(),
+            DebateParticipant::Hermes => "Hermes".to_string(),
+            DebateParticipant::Custom(profile) => profile.name.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1149,9 +1181,9 @@ pub async fn run_agent_turn(
             let reply = GenericAgentClient::new(profile).chat(chat).await?;
             results.push(("openclaw".into(), reply.content, Some(display_name)));
         }
-        AgentMode::CustomDebate(profiles) => {
+        AgentMode::CustomDebate(participants) => {
             let mut turns: Vec<(String, String)> = Vec::new();
-            for profile in profiles.iter().take(4).cloned() {
+            for participant in participants.iter().take(4).cloned() {
                 let mut ctx = chat.clone();
                 for (name, reply) in &turns {
                     ctx.push(ChatMessage {
@@ -1159,17 +1191,31 @@ pub async fn run_agent_turn(
                         content: format!("[{name}]: {reply}"),
                     });
                 }
+                let display_name = participant.display_name();
                 ctx.push(ChatMessage {
                     role: "user".into(),
                     content: format!(
                         "{}: 這是多 Agent Debate。請針對目前使用者問題提出獨立觀點，必要時挑戰前面 Agent，引用檔案證據，不要硬製造分歧。",
-                        profile.name
+                        display_name
                     ),
                 });
-                let display_name = profile.name.clone();
-                let reply = GenericAgentClient::new(profile).chat(ctx).await?;
-                turns.push((display_name.clone(), reply.content.clone()));
-                results.push(("openclaw".into(), reply.content, Some(display_name)));
+                // Built-in participants dispatch through the same OpenClawClient /
+                // HermesClient that the original Debate path uses, so their
+                // outputs match what users already expect. Custom profiles fall
+                // through to GenericAgentClient.
+                let content = match participant {
+                    DebateParticipant::OpenClaw => openclaw.chat(ctx).await?,
+                    DebateParticipant::Hermes => hermes.chat(ctx).await?,
+                    DebateParticipant::Custom(profile) => {
+                        GenericAgentClient::new(profile).chat(ctx).await?.content
+                    }
+                };
+                turns.push((display_name.clone(), content.clone()));
+                // We bucket every participant under the "openclaw" role so the
+                // messages table CHECK constraint stays happy — the actual
+                // display attribution lives in agent_name. (See mig 0009
+                // for the role enum.)
+                results.push(("openclaw".into(), content, Some(display_name)));
             }
         }
         AgentMode::Debate => {
@@ -1345,11 +1391,28 @@ pub fn run_agent_stream(
                 }
                 yield done_event(agent_name, None, None, response_metadata);
             }
-            AgentMode::CustomDebate(profiles) => {
+            AgentMode::CustomDebate(participants) => {
+                // Streaming dispatcher per participant. Built-in OpenClaw /
+                // Hermes use their dedicated clients (matching the legacy
+                // Debate behaviour); user-defined profiles fall through to
+                // GenericAgentClient. Same Stream<Item = AgentStreamEvent>
+                // signature on all three so the rest of the loop is generic.
+                let participants = participants.into_iter().take(4).collect::<Vec<_>>();
+                let stream_for = |p: DebateParticipant, ctx: Vec<ChatMessage>|
+                    -> Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>>
+                {
+                    match p {
+                        DebateParticipant::OpenClaw => openclaw.chat_stream(ctx),
+                        DebateParticipant::Hermes => hermes.chat_stream(ctx),
+                        DebateParticipant::Custom(profile) => {
+                            GenericAgentClient::new(profile).chat_stream(ctx)
+                        }
+                    }
+                };
+
                 let mut turns: Vec<(String, String)> = Vec::new();
-                let profiles = profiles.into_iter().take(4).collect::<Vec<_>>();
-                for (idx, profile) in profiles.iter().cloned().enumerate() {
-                    let agent_name = profile.name.clone();
+                for (idx, participant) in participants.iter().cloned().enumerate() {
+                    let agent_name = participant.display_name();
                     let mut ctx = chat.clone();
                     for (name, reply) in &turns {
                         ctx.push(ChatMessage {
@@ -1374,8 +1437,7 @@ pub fn run_agent_stream(
                         input_tokens,
                     };
                     let mut buffer = String::new();
-                    let custom = GenericAgentClient::new(profile);
-                    let mut stream = batch_chunks(custom.chat_stream(ctx));
+                    let mut stream = batch_chunks(stream_for(participant, ctx));
                     let mut response_metadata = None;
                     loop {
                         match tokio::time::timeout(chunk_timeout, stream.next()).await {
@@ -1403,8 +1465,9 @@ pub fn run_agent_stream(
                     turns.push((agent_name, buffer));
                 }
 
-                if let Some(profile) = profiles.first().cloned() {
-                    let agent_name = profile.name.clone();
+                // Synthesis: first participant integrates the rest.
+                if let Some(participant) = participants.first().cloned() {
+                    let agent_name = participant.display_name();
                     let mut ctx = chat.clone();
                     for (name, reply) in &turns {
                         ctx.push(ChatMessage {
@@ -1414,18 +1477,17 @@ pub fn run_agent_stream(
                     }
                     ctx.push(ChatMessage {
                         role: "user".into(),
-                        content: "請綜合所有自訂 Agent 的觀點，產出最終結論：共識、分歧、建議方案、風險、下一步。不要假裝已修改程式。".into(),
+                        content: "請綜合所有 Agent 的觀點，產出最終結論：共識、分歧、建議方案、風險、下一步。不要假裝已修改程式。".into(),
                     });
                     let input_tokens = Some(estimate_chat_tokens(&ctx));
                     yield ServerEvent::Status {
                         agent: agent_name.clone(),
-                        message: format!("{} 正在彙整多 Agent 最終結論...", profile.name),
+                        message: format!("{} 正在彙整多 Agent 最終結論...", agent_name),
                         round: None,
                         phase: Some("final".into()),
                         input_tokens,
                     };
-                    let custom = GenericAgentClient::new(profile);
-                    let mut stream = batch_chunks(custom.chat_stream(ctx));
+                    let mut stream = batch_chunks(stream_for(participant, ctx));
                     let mut response_metadata = None;
                     loop {
                         match tokio::time::timeout(chunk_timeout, stream.next()).await {
