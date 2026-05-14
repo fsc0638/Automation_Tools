@@ -239,7 +239,7 @@ export function MeetingTimelineModal({
               尚無任何會議室紀錄。先建立會議或從 KWay portal 匯入資料。
             </div>
           ) : (
-            <div className="min-w-[800px]">
+            <div className="relative min-w-[800px]">
               {/* Hour scale */}
               <div className="grid" style={{ gridTemplateColumns: "160px 1fr" }}>
                 <div />
@@ -293,14 +293,9 @@ export function MeetingTimelineModal({
                           />
                         );
                       })}
-                      {/* "Now" vertical marker — only on today, redrawn
-                          every minute by the parent's nowTick state. */}
-                      {showNow && (
-                        <div
-                          className="pointer-events-none absolute top-0 h-full w-0.5 bg-[#C8102E]"
-                          style={{ left: nowLeft }}
-                        />
-                      )}
+                      {/* (The "now" marker is rendered once as a full-
+                          height overlay on the outer wrapper below, so it
+                          spans the entire grid without per-row breaks.) */}
 
                       {row.meetings.map((m) => {
                         const pos = barPosition(m);
@@ -330,6 +325,39 @@ export function MeetingTimelineModal({
                   </div>
                 ))}
               </div>
+
+              {/* Single full-height "now" marker overlay. Positioned at
+                  160px (label column width) + fraction × remaining width,
+                  so it lines up with the hour ticks inside the timeline
+                  column. Spans from below the hour-scale (28px = h-7)
+                  through to the bottom of the last row, with no per-row
+                  break. 60% opacity + z-20 so it sits over the booking
+                  bars without hiding their text completely. */}
+              {showNow && (
+                <>
+                  {/* Line center sits at `calc(...)`, matching the dot
+                      below, so the cap dot stays exactly under the line
+                      regardless of nowFraction. */}
+                  <div
+                    className="pointer-events-none absolute bottom-0 w-0.5 -translate-x-1/2 bg-[#C8102E] z-20"
+                    style={{
+                      top: 28,
+                      left: `calc(160px + ${nowFraction} * (100% - 160px))`,
+                      opacity: 0.4,
+                    }}
+                  />
+                  {/* Small dot finishing the bottom of the now-line. Same
+                      center coordinate as the line + translateY(50%) so
+                      the dot's middle sits on the line's bottom edge. */}
+                  <div
+                    className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 translate-y-1/2 rounded-full bg-[#C8102E] z-20"
+                    style={{
+                      bottom: 0,
+                      left: `calc(160px + ${nowFraction} * (100% - 160px))`,
+                    }}
+                  />
+                </>
+              )}
             </div>
           )}
         </div>

@@ -217,24 +217,15 @@ def _validate(value: str) -> None:
 async def _navigate_to_date(session: PortalSession, iso_date: str) -> None:
     """Switch the booking page to a specific date.
 
-    Prefer filling the page's setdate input (which triggers gonextday() on
-    change); fall back to mutating the URL date param.
+    Uses URL navigation as the primary path because it's deterministic:
+    `page.goto(...)` blocks until the new document is loaded, so when this
+    returns the DOM is guaranteed to reflect the target date. The earlier
+    form-fill approach (setdate input + gonextday()) raced — extraction
+    sometimes ran against the previous day's DOM while the form submit
+    was still in flight, dropping the bookings that landed only after.
     """
     portal_date = iso_date.replace("-", "/")  # "2026/05/13"
     page = session.page
-    try:
-        await page.locator("#setdate").first.fill(
-            portal_date, timeout=session.cfg.timeout_ms
-        )
-        await page.evaluate(
-            "() => { if (typeof gonextday === 'function') gonextday(); }"
-        )
-        await session.safe_wait_networkidle()
-        return
-    except Exception as exc:
-        session.warnings.append(
-            f"setdate fill failed for {iso_date}: {type(exc).__name__}: {exc}; falling back to URL"
-        )
 
     parsed = urlparse(page.url)
     params = dict(parse_qsl(parsed.query))
@@ -245,6 +236,32 @@ async def _navigate_to_date(session: PortalSession, iso_date: str) -> None:
         new_url, wait_until="domcontentloaded", timeout=session.cfg.timeout_ms
     )
     await session.safe_wait_networkidle()
+
+    # Defensive: verify the page actually reflects the requested date so
+    # the extraction step below can't read stale data after, e.g., the
+    # portal silently redirecting us back to "today".
+    try:
+        current = await page.locator("#setdate").first.input_value(
+            timeout=session.cfg.timeout_ms
+        )
+        if current and current.strip() != portal_date:
+            session.warnings.append(
+                f"after goto for {iso_date}, setdate is {current!r}; "
+                "form-fill fallback"
+            )
+            await page.locator("#setdate").first.fill(portal_date)
+            await page.evaluate(
+                "() => { if (typeof gonextday === 'function') gonextday(); }"
+            )
+            await page.wait_for_load_state(
+                "domcontentloaded", timeout=session.cfg.timeout_ms
+            )
+            await session.safe_wait_networkidle()
+    except Exception:
+        # The setdate input may not exist on a stub/error page; in that
+        # case the health check immediately after will raise and the day
+        # is recorded as an error, so we just keep going.
+        pass
 
 
 def _build_preview_url(date_iso: str, code: str, time_start: str, time_end: str) -> str:
