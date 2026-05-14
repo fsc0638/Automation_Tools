@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kway-portal"
+version = "0.1.0"
+description = "KWay corporate portal automation client (Playwright)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Kway In-house Dev" }]
+dependencies = [
+    "playwright>=1.45.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+# Allow `kway-portal …` after `pip install -e .` (otherwise use `python -m kway_portal`).
+kway-portal = "kway_portal.cli:main_sync"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"kway_portal" = ["py.typed"]

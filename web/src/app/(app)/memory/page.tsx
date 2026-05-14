@@ -32,7 +32,12 @@ export default function MemoryPage() {
   const [candidates, setCandidates] = useState<ProjectMemoryCandidate[]>([]);
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [reviewBusyId, setReviewBusyId] = useState("");
+  const [candidateStatus, setCandidateStatus] = useState<"pending" | "approved" | "rejected">("pending");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
+  const visiblePendingIds = candidates.filter((candidate) => candidate.status === "pending").map((candidate) => candidate.id);
+  const selectedCount = visiblePendingIds.filter((id) => selectedIds.has(id)).length;
+  const allVisibleSelected = visiblePendingIds.length > 0 && visiblePendingIds.every((id) => selectedIds.has(id));
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -61,15 +66,17 @@ export default function MemoryPage() {
   const refreshCandidates = useCallback(async () => {
     if (!selectedProjectId) {
       setCandidates([]);
+      setSelectedIds(new Set());
       return;
     }
     setCandidateLoading(true);
     try {
-      setCandidates(await projectMemory.candidates(selectedProjectId, "pending"));
+      setCandidates(await projectMemory.candidates(selectedProjectId, candidateStatus));
+      setSelectedIds(new Set());
     } finally {
       setCandidateLoading(false);
     }
-  }, [selectedProjectId]);
+  }, [candidateStatus, selectedProjectId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void refreshCandidates(); }, 150);
@@ -114,6 +121,24 @@ export default function MemoryPage() {
     setTagInput("");
   }
 
+  function toggleCandidateSelection(candidateId: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(candidateId)) next.delete(candidateId);
+      else next.add(candidateId);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((current) => {
+      if (allVisibleSelected) return new Set();
+      const next = new Set(current);
+      visiblePendingIds.forEach((id) => next.add(id));
+      return next;
+    });
+  }
+
   async function approveCandidate(candidate: ProjectMemoryCandidate) {
     if (!selectedProjectId) return;
     setReviewBusyId(candidate.id);
@@ -128,9 +153,33 @@ export default function MemoryPage() {
   async function rejectCandidate(candidate: ProjectMemoryCandidate) {
     if (!selectedProjectId) return;
     if (!confirm(t("memory.rejectConfirm"))) return;
+    const reviewNote = window.prompt("請輸入拒絕原因（可留空）", "") ?? "";
     setReviewBusyId(candidate.id);
     try {
-      await projectMemory.rejectCandidate(selectedProjectId, candidate.id, "Rejected from memory review page");
+      await projectMemory.rejectCandidate(selectedProjectId, candidate.id, reviewNote.trim() || undefined);
+      await refreshCandidates();
+    } finally {
+      setReviewBusyId("");
+    }
+  }
+
+  async function approveSelected() {
+    if (!selectedProjectId || selectedCount === 0) return;
+    setReviewBusyId("bulk-approve");
+    try {
+      await projectMemory.bulkApproveCandidates(selectedProjectId, visiblePendingIds.filter((id) => selectedIds.has(id)));
+      await refreshCandidates();
+    } finally {
+      setReviewBusyId("");
+    }
+  }
+
+  async function rejectSelected() {
+    if (!selectedProjectId || selectedCount === 0) return;
+    if (!confirm(`確定要拒絕已勾選的 ${selectedCount} 筆記憶候選？`)) return;
+    setReviewBusyId("bulk-reject");
+    try {
+      await projectMemory.bulkRejectCandidates(selectedProjectId, visiblePendingIds.filter((id) => selectedIds.has(id)));
       await refreshCandidates();
     } finally {
       setReviewBusyId("");
@@ -160,7 +209,9 @@ export default function MemoryPage() {
             <div className="type-card-title flex items-center gap-2">
               {t("memory.reviewTitle")}
               <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold tracking-[0.04em] text-amber-700">
-                {t("memory.pendingCount").replace("{n}", String(pendingCount))}
+                {candidateStatus === "pending"
+                  ? t("memory.pendingCount").replace("{n}", String(pendingCount))
+                  : `目前顯示 ${candidateStatus === "approved" ? "已核准" : "已拒絕"}`}
               </span>
             </div>
             <p className="type-body-muted mt-1">{t("memory.reviewDesc")}</p>
@@ -173,37 +224,104 @@ export default function MemoryPage() {
             {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
         </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {([
+            ["pending", "待審核"],
+            ["approved", "已核准"],
+            ["rejected", "已拒絕"],
+          ] as const).map(([status, label]) => (
+            <button
+              key={status}
+              onClick={() => setCandidateStatus(status)}
+              className={`rounded-full px-3 py-1.5 text-[12px] font-medium transition ${
+                candidateStatus === status
+                  ? "bg-[#0F172A] text-white"
+                  : "border border-[#D6DFEA] bg-white text-[#475569] hover:border-[#94A3B8]"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {candidateStatus === "pending" && candidates.length > 0 && (
+          <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
+            <button
+              onClick={toggleSelectAll}
+              className="rounded-lg border border-[#D6DFEA] bg-white px-2.5 py-1.5 text-[12px] font-medium text-[#334155] transition hover:border-[#94A3B8]"
+            >
+              {allVisibleSelected ? "取消全選" : "全選"}
+            </button>
+            <button
+              disabled={selectedCount === 0 || reviewBusyId === "bulk-approve"}
+              onClick={() => void approveSelected()}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-emerald-700 disabled:opacity-60"
+            >
+              <CheckCircle2 size={12} /> Approve selected ({selectedCount})
+            </button>
+            <button
+              disabled={selectedCount === 0 || reviewBusyId === "bulk-reject"}
+              onClick={() => void rejectSelected()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-[12px] font-medium text-red-700 transition hover:bg-red-50 disabled:opacity-60"
+            >
+              <XCircle size={12} /> Reject selected
+            </button>
+          </div>
+        )}
+
         {candidateLoading ? (
           <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">{t("memory.loadingCandidates")}</div>
         ) : candidates.length === 0 ? (
-          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">{t("memory.noPendingCandidates")}</div>
+          <div className="type-meta mt-4 rounded-xl border border-dashed border-[#E2E8F0] p-6 text-center">
+            {candidateStatus === "pending" ? t("memory.noPendingCandidates") : `此專案目前沒有${candidateStatus === "approved" ? "已核准" : "已拒絕"}的記憶候選。`}
+          </div>
         ) : (
           <div className="mt-4 space-y-3">
             {candidates.map((candidate) => (
               <article key={candidate.id} className="rounded-2xl border border-amber-200 bg-amber-50/35 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <div className="type-overline text-amber-700">{t("memory.candidateLabel")}</div>
-                    <div className="mt-1 text-[11px] text-[#94A3B8]">
-                      {candidate.source_message_count} {t("memory.sourceMessagesSuffix")} · {new Date(candidate.created_at).toLocaleString()}
+                  <div className="flex min-w-0 flex-1 gap-3">
+                    {candidate.status === "pending" && (
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(candidate.id)}
+                        onChange={() => toggleCandidateSelection(candidate.id)}
+                        className="mt-1 h-4 w-4 rounded border-[#CBD5E1] text-[#0050A0]"
+                      />
+                    )}
+                    <div>
+                      <div className="type-overline text-amber-700">{t("memory.candidateLabel")}</div>
+                      <div className="mt-1 text-[11px] text-[#94A3B8]">
+                        {candidate.source_message_count} {t("memory.sourceMessagesSuffix")} · {new Date(candidate.created_at).toLocaleString()}
+                      </div>
+                      {candidate.reviewed_by && (
+                        <div className="mt-1.5 text-[11px] text-[#94A3B8]">
+                          Reviewed by {candidate.reviewed_by.slice(0, 8)}…
+                          {candidate.reviewed_at ? ` · ${new Date(candidate.reviewed_at).toLocaleString()}` : ""}
+                          {candidate.review_note ? ` · "${candidate.review_note}"` : ""}
+                        </div>
+                      )}
                     </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button
-                      disabled={reviewBusyId === candidate.id}
-                      onClick={() => void approveCandidate(candidate)}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-white shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition hover:bg-emerald-700 disabled:opacity-60"
-                    >
-                      <CheckCircle2 size={13} /> {t("memory.approve")}
-                    </button>
-                    <button
-                      disabled={reviewBusyId === candidate.id}
-                      onClick={() => void rejectCandidate(candidate)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-red-700 transition hover:bg-red-50 disabled:opacity-60"
-                    >
-                      <XCircle size={13} /> {t("memory.reject")}
-                    </button>
-                  </div>
+                  {candidate.status === "pending" && (
+                    <div className="flex gap-2">
+                      <button
+                        disabled={reviewBusyId === candidate.id}
+                        onClick={() => void approveCandidate(candidate)}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-white shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition hover:bg-emerald-700 disabled:opacity-60"
+                      >
+                        <CheckCircle2 size={13} /> {t("memory.approve")}
+                      </button>
+                      <button
+                        disabled={reviewBusyId === candidate.id}
+                        onClick={() => void rejectCandidate(candidate)}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-red-700 transition hover:bg-red-50 disabled:opacity-60"
+                      >
+                        <XCircle size={13} /> {t("memory.reject")}
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-white p-3 text-[13px] leading-6 text-[#334155]">
                   {candidate.proposed_content}

@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::crypto::TokenCipher;
 use axum::{extract::State, http::StatusCode, middleware, response::Json, routing::get, Router};
+use kway_dev_backend::portal_sync::SyncLock;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -12,8 +13,10 @@ pub mod conversations;
 pub mod epics;
 pub mod feedback;
 pub mod git_identities;
+pub mod meetings;
 pub mod metrics;
 pub mod organizations;
+pub mod portal_directory;
 pub mod project_index;
 pub mod projects;
 pub mod shared_memory;
@@ -27,6 +30,10 @@ pub struct AppState {
     pub db: PgPool,
     pub config: Arc<Config>,
     pub cipher: Arc<TokenCipher>,
+    /// Shared mutex so the background scheduler and the /meetings/sync
+    /// endpoint never run a portal scrape concurrently — Playwright owns
+    /// the output/ directory and concurrent runs would corrupt it.
+    pub portal_sync_lock: SyncLock,
 }
 
 /// Liveness probe. Returns 200 if the process is up; no I/O, no DB.
@@ -73,6 +80,8 @@ pub fn router(state: AppState) -> Router {
         .merge(sprints::routes())
         .merge(epics::routes())
         .merge(shared_memory::routes())
+        .merge(meetings::routes())
+        .merge(portal_directory::routes())
         .merge(user_views::routes())
         .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(

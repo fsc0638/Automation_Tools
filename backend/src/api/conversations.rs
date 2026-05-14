@@ -16,6 +16,7 @@ use crate::{
             get_project_summary, load_project_history, refresh_conversation_summary,
             refresh_project_summary,
         },
+        shared_memory::truncate_note_bodies,
         AppState,
     },
     db::models::{Conversation, Message, Project},
@@ -235,6 +236,20 @@ async fn send_message(
     // user message exactly once for the agent call.
     let history = load_project_history(&state.db, project_id).await?;
     let project_summary = get_project_summary(&state.db, project_id).await?;
+    let shared_notes = truncate_note_bodies(
+        sqlx::query_as(
+            "SELECT * FROM shared_memory_notes
+             WHERE user_id = $1
+               AND (cardinality(scope_projects) = 0 OR $2 = ANY(scope_projects))
+             ORDER BY pinned DESC, updated_at DESC
+             LIMIT 20",
+        )
+        .bind(auth_user.id)
+        .bind(project_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default(),
+    );
 
     // Save user message so every turn is persisted. user_id is required
     // now (mig 0021) so we can attribute the turn in shared conversations.
@@ -273,6 +288,7 @@ async fn send_message(
         &secured_context.project_scope,
         &secured_context.history,
         secured_context.project_summary.as_deref(),
+        &shared_notes,
         &secured_context.user_message,
         mode,
     )

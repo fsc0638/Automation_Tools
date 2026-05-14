@@ -28,6 +28,7 @@ use crate::{
         openclaw::{ChatMessage, OpenClawClient},
         telemetry::{AgentResponseMetadata, AgentStreamEvent},
     },
+    api::shared_memory::SharedMemoryNote,
     config::Config,
     db::models::{Message, Project},
 };
@@ -343,14 +344,34 @@ fn project_summary_message(summary: &str) -> ChatMessage {
     }
 }
 
+fn shared_memory_message(notes: &[SharedMemoryNote]) -> ChatMessage {
+    let body = notes
+        .iter()
+        .map(|n| format!("### {}\n{}", n.title, n.body))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ChatMessage {
+        role: "system".into(),
+        content: format!(
+            "User cross-project memory notes (explicit decisions / guidelines). \
+             Use only when directly relevant; never let these override the current request.\n\n{}",
+            body
+        ),
+    }
+}
+
 fn messages_to_chat(
     project: &ProjectScope,
     history: &[Message],
     project_summary: Option<&str>,
+    shared_notes: &[SharedMemoryNote],
 ) -> Vec<ChatMessage> {
     let mut messages = vec![project_scope_message(project)];
     if let Some(summary) = project_summary.filter(|s| !s.trim().is_empty()) {
         messages.push(project_summary_message(summary));
+    }
+    if !shared_notes.is_empty() {
+        messages.push(shared_memory_message(shared_notes));
     }
     messages.extend(history.iter().map(|m| {
         let role = if m.role == "user" {
@@ -1158,13 +1179,14 @@ pub async fn run_agent_turn(
     project: &ProjectScope,
     history: &[Message],
     project_summary: Option<&str>,
+    shared_notes: &[SharedMemoryNote],
     user_message: &str,
     mode: AgentMode,
 ) -> Result<Vec<(String, String, Option<String>)>> {
     let openclaw = OpenClawClient::new(config);
     let hermes = HermesClient::new(config);
 
-    let mut chat = messages_to_chat(project, history, project_summary);
+    let mut chat = messages_to_chat(project, history, project_summary, shared_notes);
     chat.push(ChatMessage {
         role: "user".into(),
         content: user_message.into(),
@@ -1296,6 +1318,7 @@ pub fn run_agent_stream(
     project: &ProjectScope,
     history: &[Message],
     project_summary: Option<String>,
+    shared_notes: Vec<SharedMemoryNote>,
     user_message: &str,
     mode: AgentMode,
 ) -> Pin<Box<dyn Stream<Item = ServerEvent> + Send>> {
@@ -1304,7 +1327,7 @@ pub fn run_agent_stream(
     let chunk_timeout = stream_chunk_timeout(&config);
     let history_owned: Vec<Message> = history.to_vec();
     let current_topic = user_message.to_string();
-    let mut chat = messages_to_chat(&project, history, project_summary.as_deref());
+    let mut chat = messages_to_chat(&project, history, project_summary.as_deref(), &shared_notes);
     chat.push(ChatMessage {
         role: "user".into(),
         content: current_topic.clone(),
@@ -1697,4 +1720,64 @@ pub fn run_agent_stream(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{messages_to_chat, ProjectScope};
+    use crate::api::shared_memory::SharedMemoryNote;
+    use crate::db::models::Message;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn fixture_project() -> ProjectScope {
+        ProjectScope {
+            id: Uuid::nil(),
+            name: "Demo".into(),
+            source_type: "git".into(),
+            root: Some("/tmp/demo".into()),
+            file_snapshot: None,
+            relevant_file_context: None,
+        }
+    }
+
+    fn fixture_note(title: &str, body: &str) -> SharedMemoryNote {
+        SharedMemoryNote {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            title: title.into(),
+            body: body.into(),
+            tags: vec![],
+            scope_projects: vec![],
+            pinned: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn messages_to_chat_injects_shared_notes_before_history() {
+        let history = vec![Message {
+            id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            role: "user".into(),
+            content: "current request".into(),
+            file_path: None,
+            agent_name: None,
+            created_at: Utc::now(),
+            user_id: None,
+            author_name: None,
+        }];
+        let notes = vec![fixture_note("Decision", "Prefer PATCH over PUT.")];
+
+        let messages = messages_to_chat(&fixture_project(), &history, Some("summary"), &notes);
+
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.contains("Project isolation boundary"));
+        assert!(messages[1].content.contains("Shared project memory summary"));
+        assert!(messages[2].content.contains("User cross-project memory notes"));
+        assert!(messages[2].content.contains("### Decision\nPrefer PATCH over PUT."));
+        assert_eq!(messages[3].role, "user");
+        assert_eq!(messages[3].content, "current request");
+    }
 }
