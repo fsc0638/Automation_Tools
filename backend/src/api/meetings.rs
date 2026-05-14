@@ -44,6 +44,8 @@ pub struct Meeting {
     pub notification_note: Option<String>,
     pub status: String,
     pub invitations_sent_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
