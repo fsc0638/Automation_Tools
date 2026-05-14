@@ -152,6 +152,19 @@ export default function MeetingViewPage({
           </div>
         </header>
 
+        {detail.portal_book_error && (
+          <div className="border-b border-[#FCA5A5] bg-[#FEE2E2] px-6 py-2 text-[13px] text-[#991B1B]">
+            <span className="font-medium">凱衛入口網站預約失敗：</span>
+            {detail.portal_book_error}
+            <span className="ml-2 text-[#7F1D1D]">（會議保留為草稿，請改地點或時間後再按「送出邀請」）</span>
+          </div>
+        )}
+        {detail.portal_booked_at && !detail.portal_book_error && (
+          <div className="border-b border-[#A7F3D0] bg-[#ECFDF5] px-6 py-2 text-[12px] text-[#065F46]">
+            ● 已同步至凱衛入口網站（{new Date(detail.portal_booked_at).toLocaleString("zh-TW", { hour12: false })}）
+          </div>
+        )}
+
         {error && (
           <div className="flex items-center justify-between border-b border-[#FCA5A5] bg-[#FEE2E2] px-6 py-2 text-[13px] text-[#991B1B]">
             <span>{error}</span>

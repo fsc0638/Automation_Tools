@@ -22,6 +22,7 @@ use crate::{
     api::{auth::AuthUser, AppState},
     error::{AppError, AppResult},
 };
+use kway_dev_backend::portal_book::{self, BookOp, BookRequest};
 use kway_dev_backend::portal_sync::{self, SyncOptions};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -56,6 +57,17 @@ pub struct Meeting {
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub creator_name: Option<String>,
+    /// Timestamp of the successful portal-side `預約會議室` submission.
+    /// `None` until the meeting is pushed; cleared if the operator
+    /// cancels and re-creates. UI uses this to show a green "已同步至凱衛"
+    /// pill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portal_booked_at: Option<DateTime<Utc>>,
+    /// Last portal-side failure message, if any. Cleared on success. UI
+    /// shows this as a red banner so the operator knows why the meeting
+    /// is still a draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portal_book_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow, Clone)]
@@ -472,8 +484,117 @@ async fn create_meeting(
         }
     }
 
+    // Push the booking to the KWay portal so the room actually shows up
+    // reserved in crm.kway.com.tw. We do this synchronously: the operator
+    // pressing 送出邀請 expects to know within a few seconds whether the
+    // room was taken. Portal failures roll the meeting back to 'draft'
+    // with the error stashed in `portal_book_error` — the UI surfaces it
+    // so the operator can pick a different room and re-submit.
+    //
+    // Skip when the meeting was saved as a draft, has no room (online-
+    // only), or is already in the past (no point booking history).
+    if !req.save_as_draft && meeting.start_at > Utc::now() {
+        if let Err(e) = try_portal_book(&state, &meeting).await {
+            tracing::warn!("portal book failed for meeting {}: {e:?}", meeting.id);
+        }
+    }
+
     let detail = load_detail(&state, meeting.id, auth_user.id).await?;
     Ok((StatusCode::CREATED, Json(detail)))
+}
+
+/// Attempt to push a freshly-scheduled meeting to the KWay portal's
+/// reservation form. Holds the same `portal_sync_lock` as the scraper so
+/// the two automation paths never share a Playwright context. Stamps
+/// `portal_booked_at` on success or rolls the meeting back to 'draft'
+/// with the error string on failure — the caller never has to think
+/// about which DB columns to touch.
+async fn try_portal_book(state: &AppState, meeting: &Meeting) -> anyhow::Result<()> {
+    let location = meeting.location.as_deref().unwrap_or("").trim();
+    if location.is_empty() {
+        return Ok(());
+    }
+    let Some((room_code, room_name)) = portal_book::split_location(Some(location)) else {
+        return Ok(());
+    };
+
+    // Map our recurrence enum to one of the portal's two forms. Daily /
+    // monthly aren't a fit for the portal's weekly-cadence model — we
+    // book the first occurrence and leave the rest to a future feature.
+    let op = match meeting.recurrence.as_str() {
+        "weekly" => BookOp::BookMulti,
+        _ => BookOp::Book,
+    };
+
+    let date = portal_book::local_date_str(meeting.start_at);
+    let req = BookRequest {
+        op,
+        room_code: room_code.clone(),
+        room_name: room_name.clone(),
+        date: if op == BookOp::Book { Some(date.clone()) } else { None },
+        date_start: if op == BookOp::BookMulti { Some(date.clone()) } else { None },
+        // Single-occurrence stand-in: end the recurring window on the same
+        // day until we add a recurrence-end column. The portal still
+        // creates one booking.
+        date_end: if op == BookOp::BookMulti { Some(date.clone()) } else { None },
+        period_weeks: 1,
+        time_start: portal_book::local_time_str(meeting.start_at),
+        time_end: portal_book::local_time_str(meeting.end_at),
+        subject: meeting.title.clone(),
+    };
+
+    let backend_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let opts = SyncOptions::from_env(&backend_cwd);
+    let _guard = state.portal_sync_lock.0.lock().await;
+    let result = portal_book::run(&opts, &req).await;
+    drop(_guard);
+
+    match result {
+        Ok(r) if r.success => {
+            sqlx::query(
+                "UPDATE meetings SET
+                    portal_booked_at = NOW(),
+                    portal_book_error = NULL,
+                    updated_at = NOW()
+                 WHERE id = $1",
+            )
+            .bind(meeting.id)
+            .execute(&state.db)
+            .await?;
+            tracing::info!("portal_book: meeting {} reserved on portal", meeting.id);
+            Ok(())
+        }
+        Ok(r) => {
+            let err = r.error.unwrap_or_else(|| "portal returned no error tokens but success=false".into());
+            sqlx::query(
+                "UPDATE meetings SET
+                    status = 'draft',
+                    portal_book_error = $2,
+                    updated_at = NOW()
+                 WHERE id = $1",
+            )
+            .bind(meeting.id)
+            .bind(&err)
+            .execute(&state.db)
+            .await?;
+            anyhow::bail!(err);
+        }
+        Err(e) => {
+            let err = format!("subprocess error: {e}");
+            sqlx::query(
+                "UPDATE meetings SET
+                    status = 'draft',
+                    portal_book_error = $2,
+                    updated_at = NOW()
+                 WHERE id = $1",
+            )
+            .bind(meeting.id)
+            .bind(&err)
+            .execute(&state.db)
+            .await?;
+            Err(e)
+        }
+    }
 }
 
 async fn get_meeting(
@@ -621,6 +742,23 @@ async fn delete_meeting(
             "Only the meeting creator or a project admin/owner can delete this meeting".into(),
         ));
     }
+    // If the meeting was pushed to the KWay portal we have to undo that
+    // there first — the DB cascade won't reach across the network. Failure
+    // is logged but not fatal: the operator's intent is to remove the
+    // local record, and a stranded portal booking can be cleaned up by
+    // running the scraper's cancellation tab manually. We bias toward
+    // "don't refuse the delete because automation flaked."
+    let booked: Option<(Option<DateTime<Utc>>,)> =
+        sqlx::query_as("SELECT portal_booked_at FROM meetings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some((Some(_),)) = booked {
+        if let Err(e) = try_portal_cancel(&state, id).await {
+            tracing::warn!("portal cancel failed for meeting {id}: {e:?}");
+        }
+    }
+
     // Sweep on-disk files first so the DB-level cascade doesn't orphan
     // them. Each remove is best-effort: a missing file shouldn't block the
     // meeting deletion, which is what the user actually wants.
@@ -639,6 +777,44 @@ async fn delete_meeting(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn try_portal_cancel(state: &AppState, meeting_id: Uuid) -> anyhow::Result<()> {
+    let row: Option<(String, String, DateTime<Utc>, DateTime<Utc>, String)> = sqlx::query_as(
+        "SELECT title, COALESCE(location, ''), start_at, end_at, recurrence
+         FROM meetings WHERE id = $1",
+    )
+    .bind(meeting_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((_title, location, start_at, end_at, recurrence)) = row else {
+        return Ok(());
+    };
+    let Some((room_code, room_name)) = portal_book::split_location(Some(&location)) else {
+        return Ok(());
+    };
+    let date = portal_book::local_date_str(start_at);
+    let req = BookRequest {
+        op: BookOp::Cancel,
+        room_code,
+        room_name,
+        date: None,
+        date_start: Some(date.clone()),
+        date_end: Some(date),
+        period_weeks: if recurrence == "weekly" { 1 } else { 1 },
+        time_start: portal_book::local_time_str(start_at),
+        time_end: portal_book::local_time_str(end_at),
+        subject: String::new(),
+    };
+    let backend_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let opts = SyncOptions::from_env(&backend_cwd);
+    let _guard = state.portal_sync_lock.0.lock().await;
+    let r = portal_book::run(&opts, &req).await?;
+    drop(_guard);
+    if !r.success {
+        anyhow::bail!(r.error.unwrap_or_else(|| "cancel returned success=false".into()));
+    }
+    Ok(())
+}
+
 async fn send_invitations(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -655,8 +831,24 @@ async fn send_invitations(
     .bind(id)
     .execute(&state.db)
     .await?;
-    // Actual email dispatch is deferred to a future mail-service feature;
-    // we just flip the status here so the UI reflects the state change.
+    // Try to push to portal once we flip out of draft. Same rules as
+    // create_meeting: skip past meetings and online-only meetings. A
+    // portal failure rolls the row back to draft so the operator can
+    // retry — they won't lose the invitations_sent_at timestamp though,
+    // which is fine because the email side is still TODO anyway.
+    let meeting: Option<Meeting> = sqlx::query_as("SELECT *, NULL::text AS creator_name FROM meetings WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+    if let Some(m) = meeting {
+        if m.start_at > Utc::now() {
+            if let Err(e) = try_portal_book(&state, &m).await {
+                tracing::warn!("portal book on send_invitations failed for {id}: {e:?}");
+            }
+        }
+    }
+    // Actual email dispatch is still deferred to a future mail-service
+    // feature; we just flip the status + reserve the room here.
     let detail = load_detail(&state, id, auth_user.id).await?;
     Ok(Json(detail))
 }

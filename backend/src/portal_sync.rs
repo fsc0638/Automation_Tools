@@ -79,11 +79,18 @@ pub struct SyncReport {
 /// Process-wide gate. Manual + auto sync share this lock so two runs never
 /// overlap and trample each other's output directory state.
 #[derive(Clone, Default)]
-pub struct SyncLock(Arc<Mutex<()>>);
+pub struct SyncLock(pub Arc<Mutex<()>>);
 
 impl SyncLock {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Acquire the lock for the duration of a Playwright write. Shared by
+    /// scraper + meeting-book so the two never race on the same browser
+    /// profile. Returns a guard whose Drop releases the mutex.
+    pub async fn acquire(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.0.clone().lock_owned().await
     }
 }
 

@@ -347,6 +347,13 @@ export interface Meeting {
    *  list endpoint via a JOIN against `users`; absent on detail responses
    *  so callers must tolerate `undefined`. */
   creator_name?: string;
+  /** When the meeting was successfully pushed to crm.kway.com.tw's
+   *  reservation form. Undefined while still local-only or after a
+   *  portal cancel. */
+  portal_booked_at?: string;
+  /** Last portal-side failure (cleared on success). Surfaced as a red
+   *  banner on the detail page so the operator can retry. */
+  portal_book_error?: string;
   created_at: string;
   updated_at: string;
 }
