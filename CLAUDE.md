@@ -4,6 +4,7 @@
 - `backend/`: Rust Axum backend, PostgreSQL via sqlx, reqwest-based agent clients.
 - `web/`: Next.js frontend. Read `web/AGENTS.md` before changing frontend code because this Next.js version has breaking changes and local docs in `node_modules/next/dist/docs/` should be consulted.
 - `ios/`: iOS client workspace.
+- `kway_portal/`: Python + Playwright client for `portal.kway.com.tw`. All portal-side automation (meeting-room scraping, leave, expenses, …) lives here as feature modules under `src/kway_portal/features/`. Runs standalone; future backend importers will consume the JSON it writes to `kway_portal/output/<feature>/`.
 - `docker-compose.yml`: local Postgres, backend, and web services.
 
 ## Agent connection model
