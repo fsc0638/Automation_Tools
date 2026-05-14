@@ -569,6 +569,46 @@ export const meetings = {
     }),
   deleteTaskImpact: (id: string, impactId: string) =>
     request<void>(`/meetings/${id}/task-impacts/${impactId}`, { method: "DELETE" }),
+  roomsAvailable: (startAt: string, endAt: string) => {
+    const p = new URLSearchParams({ start_at: startAt, end_at: endAt });
+    return request<RoomAvailability[]>(`/meetings/rooms/available?${p.toString()}`);
+  },
+};
+
+// Portal directory (employees + departments)
+export interface RoomAvailability {
+  name: string;
+  available: boolean;
+  conflict_title?: string;
+  conflict_start_at?: string;
+  conflict_end_at?: string;
+}
+
+export interface PortalDepartment {
+  code: string;
+  name: string;
+}
+
+export interface PortalEmployee {
+  employee_no: string;
+  name: string;
+  email: string | null;
+  title: string | null;
+  dept_code: string | null;
+  dept_name: string | null;
+  extensions: string[];
+}
+
+export const portalDirectory = {
+  departments: () => request<PortalDepartment[]>("/portal/departments"),
+  searchEmployees: (params: { q?: string; deptCode?: string; limit?: number } = {}) => {
+    const p = new URLSearchParams();
+    if (params.q) p.set("q", params.q);
+    if (params.deptCode) p.set("dept_code", params.deptCode);
+    if (params.limit != null) p.set("limit", String(params.limit));
+    const qs = p.toString();
+    return request<PortalEmployee[]>(`/portal/employees/search${qs ? `?${qs}` : ""}`);
+  },
 };
 
 // Conversations

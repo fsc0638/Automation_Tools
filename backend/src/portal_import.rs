@@ -54,6 +54,18 @@ pub struct Booking {
     pub time_start: String,
     pub time_end: String,
     pub user: String,
+    /// Detail fields the scraper pulled from the per-booking preview page
+    /// (subject, attendees, etc.). Absent when the detail fetch failed for
+    /// that booking — we fall back to a synthesized title in that case.
+    #[serde(default)]
+    pub details: Option<BookingDetails>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct BookingDetails {
+    /// 說明 / purpose of the booking. Used as the meeting title when set.
+    #[serde(default)]
+    pub subject: String,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -163,7 +175,22 @@ pub async fn import_scrape(
                     continue;
                 }
 
-                let title = format!("{} · {}", room.name, booking.user);
+                // Prefer the booking's subject (說明) as the meeting title
+                // — that's what shows in the detail page's "會議名稱" field
+                // and is what people actually want to read. Fall back to a
+                // composed "room · user" so the title is never empty for
+                // legacy data or detail-fetch failures.
+                let subject = booking
+                    .details
+                    .as_ref()
+                    .map(|d| d.subject.trim())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("");
+                let title = if subject.is_empty() {
+                    format!("{} · {}", room.name, booking.user)
+                } else {
+                    subject.to_string()
+                };
                 let location = &room.name;
 
                 if dry_run {

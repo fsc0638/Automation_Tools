@@ -95,9 +95,28 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
         .unwrap_or(true)
     {
-        tokio::spawn(portal_sync_scheduler_loop(db.clone(), portal_sync_lock));
+        tokio::spawn(portal_sync_scheduler_loop(
+            db.clone(),
+            portal_sync_lock.clone(),
+        ));
     } else {
         tracing::info!("portal_sync scheduler disabled via PORTAL_SYNC_ENABLED=0");
+    }
+
+    // Weekly employee-directory scraper. Fires Monday 08:00 local time;
+    // shares the same SyncLock as the meeting-rooms scheduler so both
+    // can't drive the Playwright session at once. Result + errors are
+    // appended to kway_portal/output/employee-directory/sync.log.
+    if std::env::var("PORTAL_DIRECTORY_SYNC_ENABLED")
+        .ok()
+        .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true)
+    {
+        tokio::spawn(portal_directory_weekly_loop(db.clone(), portal_sync_lock));
+    } else {
+        tracing::info!(
+            "portal_directory scheduler disabled via PORTAL_DIRECTORY_SYNC_ENABLED=0"
+        );
     }
 
     let cors = match std::env::var("CORS_ALLOWED_ORIGINS")
@@ -272,5 +291,70 @@ fn parse_work_hours(spec: &str) -> Option<(u32, u32)> {
         Some((start, end))
     } else {
         None
+    }
+}
+
+/// Weekly employee-directory sync. Sleeps until next Monday 08:00 local,
+/// fires the scrape + import, repeats. Errors logged to tracing + the
+/// feature's sync.log (handled inside portal_sync::run_directory).
+async fn portal_directory_weekly_loop(db: PgPool, lock: SyncLock) {
+    let backend_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    tracing::info!("portal_directory scheduler: Monday 08:00 local time");
+
+    loop {
+        let now = Local::now();
+        let next = next_monday_at_08(now);
+        let wait = (next - now)
+            .to_std()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(60));
+        tracing::info!(
+            "portal_directory: next run at {} ({}s from now)",
+            next.format("%Y-%m-%d %H:%M:%S"),
+            wait.as_secs()
+        );
+        tokio::time::sleep(wait).await;
+
+        let opts = SyncOptions::from_env(&backend_cwd);
+        match portal_sync::run_directory(&db, &lock, &opts).await {
+            Ok(r) => tracing::info!(
+                week = r.week_starting,
+                departments = r.departments_upserted,
+                employees = r.employees_upserted,
+                linked_users = r.employees_linked_to_user,
+                elapsed_ms = r.elapsed_ms,
+                "portal_directory auto run ok"
+            ),
+            Err(e) => tracing::warn!("portal_directory auto run failed: {e:#}"),
+        }
+    }
+}
+
+/// The next Monday-at-08:00 strictly after `now`. If `now` is Monday and
+/// it's not yet 08:00, returns today 08:00. Otherwise jumps to next week.
+fn next_monday_at_08(now: chrono::DateTime<Local>) -> chrono::DateTime<Local> {
+    use chrono::{Datelike, Weekday};
+    // Distance in days to the next Monday (0 if today IS Monday).
+    let dow_offset = match now.weekday() {
+        Weekday::Mon => 0,
+        Weekday::Tue => 6,
+        Weekday::Wed => 5,
+        Weekday::Thu => 4,
+        Weekday::Fri => 3,
+        Weekday::Sat => 2,
+        Weekday::Sun => 1,
+    };
+    let candidate = now
+        .with_hour(8)
+        .and_then(|d| d.with_minute(0))
+        .and_then(|d| d.with_second(0))
+        .and_then(|d| d.with_nanosecond(0))
+        .unwrap_or(now)
+        + chrono::Duration::days(dow_offset);
+    // If it's already Monday past 08:00 (or current time >= candidate),
+    // bump a full week ahead.
+    if candidate <= now {
+        candidate + chrono::Duration::days(7)
+    } else {
+        candidate
     }
 }

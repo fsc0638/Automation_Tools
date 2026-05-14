@@ -36,7 +36,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..session import PortalSession
-from ..output import save_snapshot, timestamp
+from ..output import save_snapshot
 from .base import PortalFeature
 
 
@@ -123,7 +123,9 @@ class MeetingRoomsFeature(PortalFeature):
             direct_url=booking_url,
         )
 
-        ts = timestamp()
+        # Snapshot file names are keyed by target date only — every refresh
+        # for the same target date overwrites the previous HTML + PNG so
+        # the snapshots directory doesn't grow with each click.
         days: list[dict[str, Any]] = []
         total = 0
         for iso in _iter_dates(args.start, args.end):
@@ -176,7 +178,7 @@ class MeetingRoomsFeature(PortalFeature):
                 await _attach_booking_details(session, rooms, iso)
 
                 html_p, png_p = await save_snapshot(
-                    page, snapshot_dir, f"meeting_rooms_{iso}_{ts}"
+                    page, snapshot_dir, f"meeting_rooms_{iso}"
                 )
                 day_total = sum(len(r["bookings"]) for r in rooms)
                 total += day_total

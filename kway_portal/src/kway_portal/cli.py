@@ -14,11 +14,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .config import default_output_dir, default_snapshot_dir, load_config
 from .features import REGISTRY
-from .output import feature_dir, timestamp, write_json
+from .output import feature_dir, purge_legacy_timestamped, write_json
 from .scheduling import seconds_until_hhmm
 from .session import PortalSession
 
@@ -98,6 +99,13 @@ async def _run_feature_once(args: argparse.Namespace) -> Path:
 
     out_path = Path(args.output) if getattr(args, "output", "") else out_dir / _default_filename(args)
     write_json(out_path, result)
+    # Clean up any leftover files from the old per-run-timestamp naming
+    # scheme so the output / snapshot directories don't grow forever. The
+    # current file (date-keyed) doesn't match the legacy pattern, so it
+    # survives. Done after the write so a crash mid-write doesn't leave
+    # the directory empty.
+    purge_legacy_timestamped(out_dir)
+    purge_legacy_timestamped(snap_dir)
     print(f"[ok] wrote {out_path}")
     if session.warnings:
         print("[warn] " + " | ".join(session.warnings), file=sys.stderr)
@@ -105,13 +113,15 @@ async def _run_feature_once(args: argparse.Namespace) -> Path:
 
 
 def _default_filename(args: argparse.Namespace) -> str:
-    """Per-feature default file name. Falls back to <feature>_<timestamp>.json."""
-    ts = timestamp()
-    start = getattr(args, "start", "")
-    end = getattr(args, "end", "")
-    if start and end:
-        return f"{args.feature}_{start}_{end}_{ts}.json"
-    return f"{args.feature}_{ts}.json"
+    """Per-feature default file name keyed by the scrape-run day.
+
+    Every scrape on a given day overwrites the same file, so the output
+    directory holds at most one JSON per (feature, calendar-day) and
+    doesn't grow with every refresh click. Adds/updates/deletes / shape
+    changes all land in the same date file by design.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    return f"{args.feature}_{today}.json"
 
 
 async def main(argv: list[str] | None = None) -> int:

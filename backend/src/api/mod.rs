@@ -16,6 +16,7 @@ pub mod git_identities;
 pub mod meetings;
 pub mod metrics;
 pub mod organizations;
+pub mod portal_directory;
 pub mod project_index;
 pub mod projects;
 pub mod shared_memory;
@@ -80,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .merge(epics::routes())
         .merge(shared_memory::routes())
         .merge(meetings::routes())
+        .merge(portal_directory::routes())
         .merge(user_views::routes())
         .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(

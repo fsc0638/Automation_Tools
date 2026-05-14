@@ -208,6 +208,27 @@ pub struct AvailableSlotsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RoomsAvailableQuery {
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoomAvailability {
+    pub name: String,
+    pub available: bool,
+    /// Set when available=false — describes the booking that blocks it,
+    /// so the UI can say "1號會議室(8人)・10:00-14:00 黃若瑀" rather than
+    /// just disabling the option silently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_start_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_end_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DisputeRequest {
     pub note: Option<String>,
 }
@@ -263,6 +284,7 @@ pub fn routes() -> Router<AppState> {
         .route("/meetings/sync", post(sync_from_portal))
         .route("/meetings/calendar", get(calendar_view))
         .route("/meetings/available-slots", get(find_available_slots))
+        .route("/meetings/rooms/available", get(rooms_available))
         .route(
             "/meetings/:id",
             get(get_meeting).patch(update_meeting).delete(delete_meeting),
@@ -1164,6 +1186,78 @@ async fn sync_from_portal(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     Ok(Json(report))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Rooms available (for the create-meeting room picker)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// GET /meetings/rooms/available?start_at=…&end_at=…
+///
+/// Returns every known meeting-room name with an `available` flag for the
+/// requested window. "Known rooms" comes from distinct `location` values
+/// in the meetings table (portal-imported rows plus anything the user has
+/// booked in-app). Conflicts are computed against live statuses only —
+/// cancelled meetings don't block.
+async fn rooms_available(
+    State(state): State<AppState>,
+    Extension(_auth_user): Extension<AuthUser>,
+    Query(q): Query<RoomsAvailableQuery>,
+) -> AppResult<Json<Vec<RoomAvailability>>> {
+    if q.end_at <= q.start_at {
+        return Err(AppError::BadRequest("end_at must be after start_at".into()));
+    }
+
+    // Pull known room names (top-N by recency so the list is the rooms
+    // people actually use, not every historical stub). LIMIT keeps the
+    // result small enough to render in a dropdown.
+    let rooms: Vec<(String,)> = sqlx::query_as(
+        "SELECT location
+         FROM meetings
+         WHERE location IS NOT NULL AND location <> ''
+         GROUP BY location
+         ORDER BY MAX(start_at) DESC
+         LIMIT 50",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut out: Vec<RoomAvailability> = Vec::with_capacity(rooms.len());
+    for (location,) in rooms {
+        let conflict: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT title, start_at, end_at FROM meetings
+             WHERE location = $1
+               AND status IN ('scheduled', 'in_progress')
+               AND start_at < $3
+               AND end_at > $2
+             ORDER BY start_at ASC
+             LIMIT 1",
+        )
+        .bind(&location)
+        .bind(q.start_at)
+        .bind(q.end_at)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let (available, ct, cs, ce) = match conflict {
+            Some((t, s, e)) => (false, Some(t), Some(s), Some(e)),
+            None => (true, None, None, None),
+        };
+        out.push(RoomAvailability {
+            name: location,
+            available,
+            conflict_title: ct,
+            conflict_start_at: cs,
+            conflict_end_at: ce,
+        });
+    }
+    // Available ones first, then alphabetical within each group.
+    out.sort_by(|a, b| match (a.available, b.available) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+    Ok(Json(out))
 }
 
 // ─────────────────────────────────────────────────────────────────────────

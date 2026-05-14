@@ -8,5 +8,6 @@
 //! main.rs's tree — they don't need to be shared and lifting them up here
 //! would be a wide refactor for no win.
 
+pub mod portal_directory_import;
 pub mod portal_import;
 pub mod portal_sync;
