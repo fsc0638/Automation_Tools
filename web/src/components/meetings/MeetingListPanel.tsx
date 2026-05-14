@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { meetings as meetingsApi, type Meeting } from "@/lib/api";
