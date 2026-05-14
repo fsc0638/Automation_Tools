@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::crypto::TokenCipher;
 use axum::{extract::State, http::StatusCode, middleware, response::Json, routing::get, Router};
+use kway_dev_backend::portal_sync::SyncLock;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -28,6 +29,10 @@ pub struct AppState {
     pub db: PgPool,
     pub config: Arc<Config>,
     pub cipher: Arc<TokenCipher>,
+    /// Shared mutex so the background scheduler and the /meetings/sync
+    /// endpoint never run a portal scrape concurrently — Playwright owns
+    /// the output/ directory and concurrent runs would corrupt it.
+    pub portal_sync_lock: SyncLock,
 }
 
 /// Liveness probe. Returns 200 if the process is up; no I/O, no DB.

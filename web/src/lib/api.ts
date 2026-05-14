@@ -464,7 +464,20 @@ export interface UpdateMeetingInput {
   project_id?: string | null;
 }
 
+export interface MeetingSyncReport {
+  range_start: string;
+  range_end: string;
+  stdout_tail: string;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  cancelled: number;
+  skipped: number;
+  elapsed_ms: number;
+}
+
 export const meetings = {
+  sync: () => request<MeetingSyncReport>("/meetings/sync", { method: "POST" }),
   list: (q: {
     projectId?: string;
     status?: MeetingStatus;

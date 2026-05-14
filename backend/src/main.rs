@@ -5,6 +5,8 @@ use axum::{
     routing::get,
     Router,
 };
+use chrono::{Local, Timelike};
+use kway_dev_backend::portal_sync::{self, SyncLock, SyncOptions};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,6 +26,7 @@ mod security;
 
 use api::{router, AppState};
 use crypto::TokenCipher;
+use sqlx::PgPool;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -74,11 +77,28 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let portal_sync_lock = SyncLock::new();
+
     let state = AppState {
-        db,
+        db: db.clone(),
         config: config.clone(),
         cipher,
+        portal_sync_lock: portal_sync_lock.clone(),
     };
+
+    // Background portal-sync scheduler. Wakes every 30 mins aligned to
+    // :00 / :30 and, if the local hour is in the working window, fires
+    // a scrape + import. Shares the same lock the /meetings/sync endpoint
+    // uses, so a manual click can't overlap an in-flight auto sync.
+    if std::env::var("PORTAL_SYNC_ENABLED")
+        .ok()
+        .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true)
+    {
+        tokio::spawn(portal_sync_scheduler_loop(db.clone(), portal_sync_lock));
+    } else {
+        tracing::info!("portal_sync scheduler disabled via PORTAL_SYNC_ENABLED=0");
+    }
 
     let cors = match std::env::var("CORS_ALLOWED_ORIGINS")
         .ok()
@@ -179,4 +199,78 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Periodic portal sync. Sleeps until the next :00 or :30 tick, then runs
+/// a sync iff the local hour is in the working window (env
+/// PORTAL_SYNC_HOURS, default "08-21"; lower bound inclusive, upper bound
+/// exclusive). Errors are logged and the loop keeps running.
+async fn portal_sync_scheduler_loop(db: PgPool, lock: SyncLock) {
+    let (start_hour, end_hour) = parse_work_hours(
+        std::env::var("PORTAL_SYNC_HOURS").as_deref().unwrap_or("08-21"),
+    )
+    .unwrap_or((8, 21));
+    let backend_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    tracing::info!(
+        "portal_sync scheduler: every 30 min during {start_hour:02}:00–{end_hour:02}:00"
+    );
+
+    loop {
+        let now = Local::now();
+        let next = next_half_hour(now);
+        let wait = (next - now)
+            .to_std()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(60));
+        tokio::time::sleep(wait).await;
+
+        let hour = Local::now().hour();
+        if hour < start_hour || hour >= end_hour {
+            continue;
+        }
+
+        let opts = SyncOptions::from_env(&backend_cwd);
+        match portal_sync::run(&db, &lock, &opts).await {
+            Ok(report) => {
+                tracing::info!(
+                    inserted = report.inserted,
+                    updated = report.updated,
+                    unchanged = report.unchanged,
+                    cancelled = report.cancelled,
+                    elapsed_ms = report.elapsed_ms,
+                    "portal_sync auto run ok"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("portal_sync auto run failed: {e:#}");
+            }
+        }
+    }
+}
+
+fn next_half_hour(now: chrono::DateTime<Local>) -> chrono::DateTime<Local> {
+    let target_minute = if now.minute() < 30 { 30 } else { 60 };
+    let mut next = now
+        .with_minute(0)
+        .and_then(|d| d.with_second(0))
+        .and_then(|d| d.with_nanosecond(0))
+        .unwrap_or(now);
+    next += chrono::Duration::minutes(target_minute as i64);
+    // chrono allows minute=60 by overflowing into the next hour, but
+    // with_minute(60) refuses, so we set 0 + add 60 minutes (done above).
+    // Guard against pathological clock skew giving us a past instant.
+    if next <= now {
+        next = next + chrono::Duration::minutes(30);
+    }
+    next
+}
+
+fn parse_work_hours(spec: &str) -> Option<(u32, u32)> {
+    let (a, b) = spec.split_once('-')?;
+    let start: u32 = a.trim().parse().ok()?;
+    let end: u32 = b.trim().parse().ok()?;
+    if start < 24 && end <= 24 && start < end {
+        Some((start, end))
+    } else {
+        None
+    }
 }

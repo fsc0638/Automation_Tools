@@ -6,7 +6,13 @@ import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { formatTimeRange, isoDate, statusBadgeClass } from "./meeting-utils";
 
-export function MeetingListPanel({ date }: { date: Date }) {
+export function MeetingListPanel({
+  date,
+  refreshKey = 0,
+}: {
+  date: Date;
+  refreshKey?: number;
+}) {
   const t = useT();
   const [items, setItems] = useState<Meeting[]>([]);
   const [loading, setLoading] = useState(true);
@@ -24,7 +30,9 @@ export function MeetingListPanel({ date }: { date: Date }) {
           from: start.toISOString(),
           to: end.toISOString(),
         });
-        if (!cancelled) setItems(list);
+        // Hide cancelled bookings — keep them in DB for audit, drop from
+        // the visible list so the right rail doesn't fill with strikethroughs.
+        if (!cancelled) setItems(list.filter((m) => m.status !== "cancelled"));
       } catch {
         if (!cancelled) setItems([]);
       } finally {
@@ -34,7 +42,7 @@ export function MeetingListPanel({ date }: { date: Date }) {
     return () => {
       cancelled = true;
     };
-  }, [date]);
+  }, [date, refreshKey]);
 
   const isoSelected = useMemo(() => isoDate(date), [date]);
   const today = isoDate(new Date());

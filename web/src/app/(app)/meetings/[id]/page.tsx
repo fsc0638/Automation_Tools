@@ -1,6 +1,7 @@
 "use client";
 import { use, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 import { MeetingSidebar } from "@/components/meetings/MeetingSidebar";
 import { RecordingPanel } from "@/components/meetings/RecordingPanel";
 import { FileWorkspace } from "@/components/meetings/FileWorkspace";
@@ -89,11 +90,21 @@ export default function MeetingViewPage({
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="flex items-start justify-between border-b border-[#E2E8F0] bg-white px-6 py-4">
-          <div>
-            <h1 className="text-[20px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
-              {t("meetings.viewTitle")}
-            </h1>
-            <p className="mt-1 text-[12px] text-[#94A3B8]">{t("meetings.viewDesc")}</p>
+          <div className="flex items-start gap-3">
+            <button
+              type="button"
+              onClick={() => router.back()}
+              aria-label="返回上一頁"
+              className="mt-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#475569] hover:bg-[#F8FAFC] hover:text-[#1A1A2E]"
+            >
+              <ArrowLeft size={16} />
+            </button>
+            <div>
+              <h1 className="text-[20px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
+                {t("meetings.viewTitle")}
+              </h1>
+              <p className="mt-1 text-[12px] text-[#94A3B8]">{t("meetings.viewDesc")}</p>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <button

@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { RefreshCw, Search } from "lucide-react";
 import { meetings as meetingsApi, type Meeting, type MeetingStatus } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -17,19 +17,54 @@ const TAB_STATUS: Record<TabKey, MeetingStatus | undefined> = {
 
 export function MeetingSidebar({
   activeMeetingId,
+  refreshKey = 0,
+  onAfterRefresh,
 }: {
   activeMeetingId?: string;
+  /** Parent-driven bump triggers a sidebar re-fetch (e.g. after the
+   *  workbench refreshes its calendar). */
+  refreshKey?: number;
+  /** Called after a successful manual sync click so the parent can
+   *  re-fetch its own data. */
+  onAfterRefresh?: () => void;
 }) {
   const t = useT();
   const [tab, setTab] = useState<TabKey>("recent");
   const [items, setItems] = useState<Meeting[]>([]);
   const [search, setSearch] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+  const [syncError, setSyncError] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const list = await meetingsApi.list({ status: TAB_STATUS[tab] });
+        // "近期會議" is intentionally narrow — today + tomorrow only — so
+        // the sidebar shows what the user actually needs to act on now.
+        // Drafts / history use status filtering and no date window.
+        const query: Parameters<typeof meetingsApi.list>[0] = {
+          status: TAB_STATUS[tab],
+        };
+        if (tab === "recent") {
+          const start = new Date();
+          start.setHours(0, 0, 0, 0);
+          const end = new Date(start);
+          end.setDate(start.getDate() + 2); // exclusive upper bound = day after tomorrow 00:00
+          query.from = start.toISOString();
+          query.to = end.toISOString();
+        }
+        let list = await meetingsApi.list(query);
+        // Backend lists DESC (latest first), which is what we want for
+        // drafts / history. For the "recent" window we'd rather see today
+        // before tomorrow, so flip to ASC here. slice(0, 5) below would
+        // otherwise eat the whole today + half of tomorrow.
+        if (tab === "recent") {
+          list = [...list].sort(
+            (a, b) =>
+              new Date(a.start_at).getTime() - new Date(b.start_at).getTime()
+          );
+        }
         if (!cancelled) setItems(list);
       } catch {
         if (!cancelled) setItems([]);
@@ -38,7 +73,22 @@ export function MeetingSidebar({
     return () => {
       cancelled = true;
     };
-  }, [tab]);
+  }, [tab, refreshKey]);
+
+  async function handleManualSync() {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncError("");
+    try {
+      await meetingsApi.sync();
+      setLastSyncedAt(new Date());
+      onAfterRefresh?.();
+    } catch (e) {
+      setSyncError(e instanceof Error ? e.message : "同步失敗");
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -49,17 +99,51 @@ export function MeetingSidebar({
     );
   }, [items, search]);
 
-  const upcoming = filtered.slice(0, 5);
+  // For the today+tomorrow window we show everything (the list is already
+  // bounded by the date filter). For drafts/history we cap to keep the
+  // sidebar from turning into a long scroll.
+  const upcoming = tab === "recent" ? filtered : filtered.slice(0, 5);
 
   return (
     <aside className="flex h-full w-[280px] flex-shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#E2E8F0] bg-white p-5">
       <div>
-        <div className="text-[18px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
-          {t("meetings.title")}
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[18px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
+            {t("meetings.title")}
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleManualSync()}
+            disabled={syncing}
+            aria-label="重新整理會議資料"
+            title={
+              syncing
+                ? "同步中…"
+                : lastSyncedAt
+                  ? `上次同步：${lastSyncedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                  : "重新整理會議資料"
+            }
+            className={cn(
+              "inline-flex h-7 w-7 items-center justify-center rounded-full border border-[#E2E8F0] bg-white text-[#475569] transition",
+              syncing ? "opacity-60" : "hover:bg-[#F8FAFC] hover:text-[#0050A0]"
+            )}
+          >
+            <RefreshCw size={13} className={cn(syncing && "animate-spin")} />
+          </button>
         </div>
         <div className="mt-1 text-[12px] text-[#94A3B8]">
           {t("meetings.subtitle")}
         </div>
+        {syncError && (
+          <div className="mt-2 rounded-md bg-[#FEE2E2] px-2 py-1 text-[11px] text-[#991B1B]">
+            {syncError}
+          </div>
+        )}
+        {!syncError && lastSyncedAt && (
+          <div className="mt-1 text-[11px] text-[#94A3B8]">
+            上次同步：{lastSyncedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </div>
+        )}
       </div>
 
       <Link

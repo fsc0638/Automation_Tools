@@ -22,6 +22,7 @@ use crate::{
     api::{auth::AuthUser, AppState},
     error::{AppError, AppResult},
 };
+use kway_dev_backend::portal_sync::{self, SyncOptions};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Models
@@ -259,6 +260,7 @@ pub struct TimeSlot {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/meetings", get(list_meetings).post(create_meeting))
+        .route("/meetings/sync", post(sync_from_portal))
         .route("/meetings/calendar", get(calendar_view))
         .route("/meetings/available-slots", get(find_available_slots))
         .route(
@@ -1145,6 +1147,26 @@ async fn delete_task_impact(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Portal sync (manual refresh)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// POST /meetings/sync — run one full kway_portal scrape + import pass.
+/// Used by the workbench refresh button. Holds the shared portal_sync_lock
+/// for the duration, so concurrent clicks (or overlap with the background
+/// scheduler) queue rather than overlap.
+async fn sync_from_portal(
+    State(state): State<AppState>,
+    Extension(_auth_user): Extension<AuthUser>,
+) -> AppResult<Json<portal_sync::SyncReport>> {
+    let backend_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let opts = SyncOptions::from_env(&backend_cwd);
+    let report = portal_sync::run(&state.db, &state.portal_sync_lock, &opts)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    Ok(Json(report))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Calendar / available-slots
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -1167,12 +1189,17 @@ async fn calendar_view(
     }
     .ok_or_else(|| AppError::BadRequest("invalid year/month".into()))?;
 
+    // Cancelled bookings are audit-trail rows (portal re-keys / cancellations)
+    // — we keep them in the DB but they shouldn't bump the day's count or
+    // dot on the calendar. The /meetings list endpoint still returns them
+    // if a caller asks, but this aggregate is for "live" workload only.
     let rows: Vec<(NaiveDate, i64, bool)> = sqlx::query_as(
         "SELECT (m.start_at AT TIME ZONE 'UTC')::date AS day,
                 COUNT(*) AS n,
                 BOOL_OR(m.importance = 'important') AS urgent
          FROM meetings m
          WHERE m.start_at >= $1 AND m.start_at < $2
+           AND m.status <> 'cancelled'
            AND (m.creator_id = $3
                 OR EXISTS (SELECT 1 FROM meeting_attendees a
                            WHERE a.meeting_id = m.id AND a.user_id = $3))

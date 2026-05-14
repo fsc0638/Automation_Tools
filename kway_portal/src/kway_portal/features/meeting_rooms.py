@@ -140,7 +140,41 @@ class MeetingRoomsFeature(PortalFeature):
                         f"Result container not found on {iso}: {result_container}"
                     )
 
+                # Sanity check: a healthy conferenceListByRoom page renders a
+                # <form name="f1"> plus per-room header links pointing at
+                # conferenceListByWeek.jsp. When the portal session expires
+                # mid-loop, navigation lands on a stub page like
+                # "Insert title here" with none of those markers, and the
+                # scrape would silently return 0 bookings — which the
+                # importer used to interpret as "everyone cancelled".
+                # Raise here so the outer try/except records a per-day error
+                # and the importer skips this date.
+                health = await page.evaluate(
+                    """
+                    () => ({
+                      hasForm: !!document.querySelector('form[name="f1"]'),
+                      roomHeaderLinks: document.querySelectorAll(
+                        'a[href*="conferenceListByWeek.jsp"]'
+                      ).length,
+                    })
+                    """
+                )
+                if not health.get("hasForm") or health.get("roomHeaderLinks", 0) == 0:
+                    raise RuntimeError(
+                        f"page does not look like the booking view "
+                        f"(hasForm={health.get('hasForm')}, "
+                        f"roomHeaderLinks={health.get('roomHeaderLinks')}); "
+                        "likely a lost session — try --headed --keep-signed-in"
+                    )
+
                 rooms = await _extract_room_bookings(page)
+
+                # For each booking, open the preview page (conference_mgr.jsp
+                # ?op=preview) to pull per-booking detail fields (subject,
+                # department, attendees). Uses a side page so the list-view
+                # URL the date loop relies on stays put.
+                await _attach_booking_details(session, rooms, iso)
+
                 html_p, png_p = await save_snapshot(
                     page, snapshot_dir, f"meeting_rooms_{iso}_{ts}"
                 )
@@ -211,6 +245,179 @@ async def _navigate_to_date(session: PortalSession, iso_date: str) -> None:
         new_url, wait_until="domcontentloaded", timeout=session.cfg.timeout_ms
     )
     await session.safe_wait_networkidle()
+
+
+def _build_preview_url(date_iso: str, code: str, time_start: str, time_end: str) -> str:
+    """Reconstruct the conference_mgr.jsp preview URL for one booking.
+
+    The list page hands us the same URL inline, but we already discard it
+    when we extract bookings — easier to rebuild than thread the raw href
+    through the JSON shape.
+    """
+    portal_date = date_iso.replace("-", "/")
+    ts = time_start.replace(":", "")
+    te = time_end.replace(":", "")
+    return (
+        "https://crm.kway.com.tw/cgi/conference/conference_mgr.jsp"
+        f"?key=C&op=preview&cod_conference={code}"
+        f"&time_start={ts}&time_end={te}&dat_conference={portal_date}"
+    )
+
+
+async def _attach_booking_details(
+    session: PortalSession,
+    rooms: list[dict[str, Any]],
+    iso_date: str,
+) -> None:
+    """Open each booking's preview page in a side tab and attach .details.
+
+    Errors per booking are isolated: we log a warning and leave that
+    booking's `details` field absent so the rest of the day still imports
+    cleanly. A separate Page object keeps the date-loop's main page where
+    it was.
+    """
+    bookings: list[tuple[dict[str, Any], str]] = []
+    for room in rooms:
+        for b in room.get("bookings", []):
+            url = _build_preview_url(iso_date, room["code"], b["time_start"], b["time_end"])
+            bookings.append((b, url))
+    if not bookings:
+        return
+
+    detail_page = await session.context.new_page()
+    try:
+        for b, url in bookings:
+            try:
+                await detail_page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=session.cfg.timeout_ms,
+                )
+                b["details"] = await _extract_booking_detail(detail_page)
+            except Exception as exc:
+                session.warnings.append(
+                    f"detail fetch failed for {iso_date} {b.get('time_start')} "
+                    f"@ {b.get('user')}: {type(exc).__name__}: {exc}"
+                )
+                b["details"] = None
+    finally:
+        try:
+            await detail_page.close()
+        except Exception:
+            pass
+
+
+async def _extract_booking_detail(page) -> dict[str, Any]:
+    """Pull booking detail fields from a conference_mgr.jsp ?op=preview page.
+
+    The portal renders a JSP form with label/value rows inside a <table>.
+    We walk the rows by label, grab the right-hand cell's text or
+    input/select value, then separately extract the dual-listbox attendees
+    (right-side <select multiple> = already-added attendees).
+
+    The 部門 field is unlabeled per the portal UI — we collect the value of
+    every standalone <select> on the form so the caller can sort it out;
+    typically there is exactly one such select and it IS the department.
+    """
+    return await page.evaluate(
+        r"""
+        () => {
+          const labeled = {};
+          for (const tr of document.querySelectorAll('tr')) {
+            const cells = tr.querySelectorAll('td');
+            if (cells.length < 2) continue;
+            const label = (cells[0].innerText || '').replace(/[:：\s]+$/, '').trim();
+            if (!label) continue;
+            const valueCell = cells[1];
+            // Rows that house the dual-listbox (與會人員) are handled
+            // separately below — skip them here to avoid the wrong
+            // innerText snapshot.
+            if (valueCell.querySelector('select[multiple]')) continue;
+            const inputs = valueCell.querySelectorAll('input[type="text"], textarea');
+            const selects = valueCell.querySelectorAll('select');
+            let v = '';
+            if (inputs.length === 1 && selects.length === 0) {
+              v = inputs[0].value || '';
+            } else if (selects.length === 1 && inputs.length === 0) {
+              const opt = selects[0].options[selects[0].selectedIndex];
+              v = ((opt && (opt.text || opt.value)) || '').trim();
+            } else {
+              // Composite cell (e.g. 起迄時間 = 4 selects + literal text)
+              // or pure text — innerText reflects the selected option
+              // labels alongside the static "時/分/~" glyphs as the user
+              // sees them.
+              v = (valueCell.innerText || '').replace(/\s+/g, ' ').trim();
+            }
+            labeled[label] = v;
+          }
+
+          // All single-selects on the form, with their name/id and the
+          // chosen option text. The 部門 dropdown the user mentioned has
+          // no visible label, but it ought to have a useful name attribute
+          // we can identify it by. Capturing every select keeps the
+          // diagnostic data we need when the layout shifts.
+          const allSelects = [];
+          for (const sel of document.querySelectorAll('select:not([multiple])')) {
+            const opt = sel.options[sel.selectedIndex];
+            const selectedText = ((opt && (opt.text || opt.value)) || '').trim();
+            allSelects.push({
+              name: sel.getAttribute('name') || '',
+              id: sel.getAttribute('id') || '',
+              selected: selectedText,
+              option_count: sel.options.length,
+            });
+          }
+          // Pick the most likely 部門 select. Priority:
+          //   1. name contains "dept" or "部門"
+          //   2. first select with a non-empty selected value that isn't
+          //      one of the obviously-non-dept labels (the recording need
+          //      field name is usually rec/video-related)
+          let department = '';
+          for (const s of allSelects) {
+            const blob = (s.name + ' ' + s.id).toLowerCase();
+            if (blob.includes('dept') || blob.includes('depart') || s.name.includes('部門')) {
+              department = s.selected;
+              break;
+            }
+          }
+          // Bare unlabeled selects (rendered without a leading <td> label)
+          // — kept for backwards-compat with the importer's expectation.
+          const unlabeledSelects = [];
+          for (const sel of document.querySelectorAll('select:not([multiple])')) {
+            const tr = sel.closest('tr');
+            const labelCell = tr && tr.querySelector('td');
+            const labelText = (labelCell && labelCell.innerText || '').trim();
+            if (labelText) continue;
+            const opt = sel.options[sel.selectedIndex];
+            const text = ((opt && (opt.text || opt.value)) || '').trim();
+            if (text) unlabeledSelects.push(text);
+          }
+
+          // Attendees: right-side multi-select holds the already-added
+          // people. When the layout has only one <select multiple>, that
+          // IS the destination list. Two-listbox UIs put 'available' on
+          // the left and 'selected' on the right; we take the last one.
+          const attendees = [];
+          const multis = document.querySelectorAll('select[multiple]');
+          if (multis.length >= 1) {
+            const right = multis[multis.length - 1];
+            for (const opt of right.options) {
+              const text = (opt.text || opt.value || '').trim();
+              if (text) attendees.push(text);
+            }
+          }
+
+          return {
+            subject: labeled['說明'] || '',
+            department: department || unlabeledSelects[0] || '',
+            attendees,
+            raw_fields: labeled,
+            unlabeled_selects: unlabeledSelects,
+            all_selects: allSelects,
+          };
+        }
+        """
+    )
 
 
 async def _extract_room_bookings(page) -> list[dict[str, Any]]:

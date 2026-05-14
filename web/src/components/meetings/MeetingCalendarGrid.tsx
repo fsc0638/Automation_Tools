@@ -10,9 +10,15 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export function MeetingCalendarGrid({
   selectedDate,
   onSelectDate,
+  onOpenTimeline,
+  refreshKey = 0,
 }: {
   selectedDate: Date;
   onSelectDate: (d: Date) => void;
+  /** Double-click a day to open its horizontal-timeline view. */
+  onOpenTimeline?: (d: Date) => void;
+  /** Bumped by the workbench to force a re-fetch after manual sync. */
+  refreshKey?: number;
 }) {
   const t = useT();
   const [year, setYear] = useState(selectedDate.getFullYear());
@@ -51,7 +57,7 @@ export function MeetingCalendarGrid({
     return () => {
       cancelled = true;
     };
-  }, [year, month]);
+  }, [year, month, refreshKey]);
 
   const grid = useMemo(() => buildMonthGrid(year, month), [year, month]);
   const dayInfo = useMemo(() => {
@@ -126,6 +132,8 @@ export function MeetingCalendarGrid({
               key={iso}
               type="button"
               onClick={() => onSelectDate(g.date)}
+              onDoubleClick={() => onOpenTimeline?.(g.date)}
+              title="點擊選取・雙擊查看當日時間軸"
               className={cn(
                 "flex h-[88px] flex-col items-stretch rounded-lg border p-1.5 text-left transition",
                 isSelected
