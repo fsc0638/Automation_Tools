@@ -49,6 +49,13 @@ pub struct Meeting {
     pub external_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Joined from `users.display_name` on the list endpoint so the sidebar
+    /// can show "建立會議人" without an extra round-trip. Other handlers
+    /// that SELECT `m.*` leave this `None` — `#[sqlx(default)]` keeps
+    /// FromRow happy in those cases.
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow, Clone)]
@@ -329,7 +336,15 @@ async fn list_meetings(
     // EXISTS instead of JOIN so the SELECT doesn't multiply rows when
     // the user is an attendee.
     let meetings: Vec<Meeting> = sqlx::query_as(
-        "SELECT m.* FROM meetings m
+        // For portal-imported rows the actual booker (e.g. \"張淑芬\") lives
+        // in `external_creator_name`; `creator_id` is a fallback system
+        // user. Prefer the external name so the sidebar shows who booked
+        // the room. App-created meetings have no external name, so we
+        // fall through to the joined `users.display_name`.
+        "SELECT m.*,
+                COALESCE(m.external_creator_name, u.display_name) AS creator_name
+         FROM meetings m
+         LEFT JOIN users u ON u.id = m.creator_id
          WHERE (
              m.creator_id = $1
              OR EXISTS (
@@ -426,6 +441,15 @@ async fn create_meeting(
         if email.is_empty() {
             continue;
         }
+        // Resolve display name with a 3-step fallback so attendees imported
+        // from the KWay portal show their real Chinese name even before
+        // they've ever signed into this app:
+        //   1. exact match in `users` (registered local user)
+        //   2. case-insensitive match in `portal_employees.email`
+        //   3. raw email as last resort
+        // `user_id` is only set in case 1 — portal employees don't have a
+        // users row yet, and the attendee will be linked the first time
+        // they log in (handled elsewhere by the user-onboarding flow).
         let user_row: Option<(Uuid, String)> =
             sqlx::query_as("SELECT id, display_name FROM users WHERE email = $1")
                 .bind(&email)
@@ -436,7 +460,14 @@ async fn create_meeting(
                 upsert_attendee(&state, meeting.id, Some(uid), &email, &name, false).await?;
             }
             None => {
-                upsert_attendee(&state, meeting.id, None, &email, &email, false).await?;
+                let portal_name: Option<String> = sqlx::query_scalar(
+                    "SELECT name FROM portal_employees WHERE LOWER(email) = $1 LIMIT 1",
+                )
+                .bind(&email)
+                .fetch_optional(&state.db)
+                .await?;
+                let display = portal_name.unwrap_or_else(|| email.clone());
+                upsert_attendee(&state, meeting.id, None, &email, &display, false).await?;
             }
         }
     }
@@ -561,7 +592,46 @@ async fn delete_meeting(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    require_meeting_access(&state, id, auth_user.id, AccessLevel::Edit).await?;
+    // Deletion authority is wider than edit: the creator can always delete,
+    // and for project-linked meetings any project-level owner/admin can
+    // also delete (so a team lead can clean up after an absent organiser).
+    // Standalone meetings remain locked to their creator.
+    let row: Option<(Uuid, Option<Uuid>)> =
+        sqlx::query_as("SELECT creator_id, project_id FROM meetings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+    let (creator_id, project_id) =
+        row.ok_or_else(|| AppError::NotFound("Meeting not found".into()))?;
+    let allowed = if creator_id == auth_user.id {
+        true
+    } else if let Some(pid) = project_id {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT user_can_access_project($1, $2, 'admin')",
+        )
+        .bind(pid)
+        .bind(auth_user.id)
+        .fetch_one(&state.db)
+        .await?
+    } else {
+        false
+    };
+    if !allowed {
+        return Err(AppError::Forbidden(
+            "Only the meeting creator or a project admin/owner can delete this meeting".into(),
+        ));
+    }
+    // Sweep on-disk files first so the DB-level cascade doesn't orphan
+    // them. Each remove is best-effort: a missing file shouldn't block the
+    // meeting deletion, which is what the user actually wants.
+    let file_paths: Vec<(String,)> =
+        sqlx::query_as("SELECT storage_path FROM meeting_files WHERE meeting_id = $1")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await?;
+    for (path,) in file_paths {
+        let _ = fs::remove_file(&path);
+    }
     sqlx::query("DELETE FROM meetings WHERE id = $1")
         .bind(id)
         .execute(&state.db)

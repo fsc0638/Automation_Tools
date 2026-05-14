@@ -343,6 +343,10 @@ export interface Meeting {
   notification_note: string | null;
   status: MeetingStatus;
   invitations_sent_at: string | null;
+  /** Display name of the user who created this meeting. Populated by the
+   *  list endpoint via a JOIN against `users`; absent on detail responses
+   *  so callers must tolerate `undefined`. */
+  creator_name?: string;
   created_at: string;
   updated_at: string;
 }

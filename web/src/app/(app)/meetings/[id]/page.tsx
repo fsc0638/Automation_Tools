@@ -1,7 +1,7 @@
 "use client";
 import { use, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Trash2 } from "lucide-react";
 import { MeetingSidebar } from "@/components/meetings/MeetingSidebar";
 import { RecordingPanel } from "@/components/meetings/RecordingPanel";
 import { FileWorkspace } from "@/components/meetings/FileWorkspace";
@@ -73,6 +73,24 @@ export default function MeetingViewPage({
     }
   }
 
+  async function handleDelete() {
+    // Native confirm keeps the flow honest — meeting delete cascades to
+    // attendees / files / notes on the DB side and removes on-disk files
+    // on the backend, so there's no recovery once it goes through.
+    if (!window.confirm(`確定要刪除「${detail!.title}」？\n\n此動作會一併刪除與會人、檔案、會議記錄，且無法復原。`)) {
+      return;
+    }
+    try {
+      await meetingsApi.delete(id);
+      router.push("/meetings");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "刪除失敗";
+      // Backend returns 403 when caller isn't creator/project admin; surface
+      // that plainly rather than as a generic failure.
+      setError(/forbidden|403/i.test(msg) ? "您沒有刪除此會議的權限（僅會議建立者或所屬專案的 Owner / Admin 可刪除）" : msg);
+    }
+  }
+
   async function handleGenerate() {
     // Placeholder for P5 — wired to /notes/generate when the AI route exists.
     // For now just open the notes tab so the user can see existing notes.
@@ -109,6 +127,15 @@ export default function MeetingViewPage({
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={() => void handleDelete()}
+              title="刪除會議"
+              aria-label="刪除會議"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#FCA5A5] bg-white text-[#C8102E] transition hover:bg-[#FEE2E2]"
+            >
+              <Trash2 size={16} />
+            </button>
+            <button
+              type="button"
               onClick={() => router.push(`/meetings/new?clone=${id}`)}
               className="rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2 text-[13px] font-medium text-[#1A1A2E] hover:bg-[#F8FAFC]"
             >
@@ -123,6 +150,19 @@ export default function MeetingViewPage({
             </button>
           </div>
         </header>
+
+        {error && (
+          <div className="flex items-center justify-between border-b border-[#FCA5A5] bg-[#FEE2E2] px-6 py-2 text-[13px] text-[#991B1B]">
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => setError("")}
+              className="text-[11px] text-[#991B1B] underline"
+            >
+              關閉
+            </button>
+          </div>
+        )}
 
         {/* Tab strip */}
         <div className="flex gap-2 border-b border-[#E2E8F0] bg-white px-6">

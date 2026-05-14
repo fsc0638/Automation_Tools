@@ -203,6 +203,7 @@ pub async fn import_scrape(
                     pool,
                     &external_id,
                     creator_id,
+                    &booking.user,
                     &title,
                     start_utc,
                     end_utc,
@@ -297,33 +298,39 @@ async fn upsert_meeting(
     pool: &PgPool,
     external_id: &str,
     creator_id: Uuid,
+    external_creator_name: &str,
     title: &str,
     start_at: DateTime<Utc>,
     end_at: DateTime<Utc>,
     location: &str,
     timezone: &str,
 ) -> Result<UpsertOutcome> {
-    let existing: Option<(Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, String)> =
+    let existing: Option<(Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, String, Option<String>)> =
         sqlx::query_as(
-            "SELECT id, title, start_at, end_at, location, status
+            "SELECT id, title, start_at, end_at, location, status, external_creator_name
              FROM meetings WHERE external_id = $1",
         )
         .bind(external_id)
         .fetch_optional(pool)
         .await?;
 
-    if let Some((id, db_title, db_start, db_end, db_location, db_status)) = existing {
+    let trimmed_name = external_creator_name.trim();
+    let creator_name_param: Option<&str> = if trimmed_name.is_empty() { None } else { Some(trimmed_name) };
+
+    if let Some((id, db_title, db_start, db_end, db_location, db_status, db_creator_name)) = existing {
         let same_title = db_title == title;
         let same_window = db_start == start_at && db_end == end_at;
         let same_location = db_location.as_deref() == Some(location);
         let same_status = db_status == "scheduled";
-        if same_title && same_window && same_location && same_status {
+        let same_creator_name = db_creator_name.as_deref() == creator_name_param;
+        if same_title && same_window && same_location && same_status && same_creator_name {
             return Ok(UpsertOutcome::Unchanged);
         }
         sqlx::query(
             "UPDATE meetings SET
                 title = $1, start_at = $2, end_at = $3, location = $4,
-                status = 'scheduled', updated_at = NOW()
+                status = 'scheduled', external_creator_name = $6,
+                updated_at = NOW()
              WHERE id = $5",
         )
         .bind(title)
@@ -331,6 +338,7 @@ async fn upsert_meeting(
         .bind(end_at)
         .bind(location)
         .bind(id)
+        .bind(creator_name_param)
         .execute(pool)
         .await?;
         return Ok(UpsertOutcome::Updated);
@@ -339,8 +347,9 @@ async fn upsert_meeting(
     sqlx::query(
         "INSERT INTO meetings
             (creator_id, title, start_at, end_at, all_day, recurrence,
-             timezone, location, status, external_id, notification_note)
-         VALUES ($1, $2, $3, $4, false, 'none', $5, $6, 'scheduled', $7,
+             timezone, location, status, external_id, external_creator_name,
+             notification_note)
+         VALUES ($1, $2, $3, $4, false, 'none', $5, $6, 'scheduled', $7, $8,
                  'Imported from KWay portal')",
     )
     .bind(creator_id)
@@ -350,6 +359,7 @@ async fn upsert_meeting(
     .bind(timezone)
     .bind(location)
     .bind(external_id)
+    .bind(creator_name_param)
     .execute(pool)
     .await?;
     Ok(UpsertOutcome::Inserted)

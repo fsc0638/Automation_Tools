@@ -47,23 +47,29 @@ export function MeetingSidebar({
           status: TAB_STATUS[tab],
         };
         if (tab === "recent") {
+          // Start from today 00:00 so meetings that started this morning
+          // and are still in progress remain available; the per-meeting
+          // `end_at > now` filter below is what actually hides finished
+          // ones. End at day-after-tomorrow 00:00 to keep the list short.
           const start = new Date();
           start.setHours(0, 0, 0, 0);
           const end = new Date(start);
-          end.setDate(start.getDate() + 2); // exclusive upper bound = day after tomorrow 00:00
+          end.setDate(start.getDate() + 2);
           query.from = start.toISOString();
           query.to = end.toISOString();
         }
         let list = await meetingsApi.list(query);
-        // Backend lists DESC (latest first), which is what we want for
-        // drafts / history. For the "recent" window we'd rather see today
-        // before tomorrow, so flip to ASC here. slice(0, 5) below would
-        // otherwise eat the whole today + half of tomorrow.
         if (tab === "recent") {
-          list = [...list].sort(
-            (a, b) =>
-              new Date(a.start_at).getTime() - new Date(b.start_at).getTime()
-          );
+          // Hide meetings whose end_at has already passed — they're "done
+          // for today" and don't need to dominate the upcoming list. Sort
+          // ascending so today comes before tomorrow.
+          const now = Date.now();
+          list = [...list]
+            .filter((m) => new Date(m.end_at).getTime() > now)
+            .sort(
+              (a, b) =>
+                new Date(a.start_at).getTime() - new Date(b.start_at).getTime()
+            );
         }
         if (!cancelled) setItems(list);
       } catch {
@@ -216,11 +222,20 @@ export function MeetingSidebar({
                 <div className="mt-1 text-[11px] text-[#94A3B8]">
                   {formatDateOnly(m.start_at)} · {formatTimeRange(m.start_at, m.end_at)}
                 </div>
-                {m.location && (
-                  <div className="mt-1.5">
-                    <span className="inline-block rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] text-[#475569]">
-                      {m.location.split(" / ")[0]}
-                    </span>
+                {(m.location || m.creator_name) && (
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    {m.location ? (
+                      <span className="inline-block truncate rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] text-[#475569]">
+                        {m.location.split(" / ")[0]}
+                      </span>
+                    ) : (
+                      <span />
+                    )}
+                    {m.creator_name && (
+                      <span className="shrink-0 text-[11px] text-[#94A3B8]">
+                        {m.creator_name}
+                      </span>
+                    )}
                   </div>
                 )}
               </Link>

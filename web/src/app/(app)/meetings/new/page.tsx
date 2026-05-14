@@ -273,15 +273,31 @@ export default function NewMeetingPage() {
         return;
       }
       // Tokens may be raw emails (free-typed) or display names previously
-      // picked from the autocomplete — resolve names back to email via the
-      // pickedEmails map. Tokens we can't resolve are dropped silently for
-      // now; the backend rejects empty emails anyway.
-      const attendee_emails = attendees
+      // picked from the autocomplete. Names get resolved back to email via
+      // pickedEmails; tokens that look neither like emails nor like picked
+      // names get surfaced to the user — silently dropping them led to
+      // "為什麼少了一個人" support tickets.
+      const tokens = attendees
         .split(/[,、;]/)
         .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-        .map((tok) => (tok.includes("@") ? tok : pickedEmails[tok] ?? ""))
         .filter((s) => s.length > 0);
+      const unresolved: string[] = [];
+      const attendee_emails: string[] = [];
+      for (const tok of tokens) {
+        if (tok.includes("@")) {
+          attendee_emails.push(tok);
+        } else if (pickedEmails[tok]) {
+          attendee_emails.push(pickedEmails[tok]);
+        } else {
+          unresolved.push(tok);
+        }
+      }
+      if (unresolved.length > 0) {
+        setError(
+          `以下與會人無法對應到 email，請從建議清單中重新選擇或改填完整 email：${unresolved.join("、")}`
+        );
+        return;
+      }
 
       setBusy(true);
       try {
