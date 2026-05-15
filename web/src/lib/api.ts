@@ -417,7 +417,11 @@ export interface MeetingFile {
 export interface MeetingActionItem {
   title: string;
   description?: string;
+  /** Resolved user id when AI-generated assignee matched a real user. */
   assignee_user_id?: string;
+  /** Raw assignee name from the LLM (kept verbatim — UI shows this
+   *  when assignee_user_id couldn't be resolved). */
+  assignee_name?: string;
   source?: string;
 }
 

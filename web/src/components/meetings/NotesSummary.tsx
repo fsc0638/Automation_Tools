@@ -109,9 +109,16 @@ export function NotesSummary({
                         {item.description}
                       </div>
                     )}
-                    {(item.assignee_user_id || item.source) && (
-                      <div className="mt-1 flex gap-2 text-[11px] text-[#94A3B8]">
-                        {item.assignee_user_id && <span>負責人 #{item.assignee_user_id.slice(0, 8)}</span>}
+                    {(item.assignee_user_id || item.assignee_name || item.source) && (
+                      <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-[#94A3B8]">
+                        {(item.assignee_name || item.assignee_user_id) && (
+                          <span>
+                            負責人：{item.assignee_name ?? `#${item.assignee_user_id!.slice(0, 8)}`}
+                            {item.assignee_user_id && item.assignee_name && (
+                              <span className="ml-1 text-[#10B981]">●已對應帳號</span>
+                            )}
+                          </span>
+                        )}
                         {item.source && <span>來源：{item.source}</span>}
                       </div>
                     )}

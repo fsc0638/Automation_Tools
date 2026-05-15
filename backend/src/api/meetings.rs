@@ -1379,6 +1379,26 @@ struct LlmMeetingNotes {
     transcript_excerpts: Vec<LlmExcerpt>,
     #[serde(default)]
     task_impacts: Vec<LlmImpactHint>,
+    /// AgentK-aligned: structured action items keyed by `title`. The
+    /// `decisions` / `risks` lists are about retrospective facts; this
+    /// list is forward-looking work — who needs to do what after the
+    /// meeting. Synced to project_tasks via a future sync endpoint.
+    #[serde(default)]
+    action_items: Vec<LlmActionItem>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LlmActionItem {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// Free-text name of the person responsible; we don't try to
+    /// resolve to a user_id from the LLM output (too lossy). UI shows
+    /// it as a string. Future: match to attendees + populate
+    /// assignee_user_id.
+    #[serde(default)]
+    assignee: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1502,12 +1522,19 @@ async fn generate_ai_notes(
 
     let user_prompt = format!(
         "會議名稱：{}\n日期：{}\n與會者：{}\n\n逐字稿與附件：\n{}\n\n---\n\
-請以下方 JSON 結構回覆會議紀錄；只回 JSON，不要額外文字：\n\
+請以下方 JSON 結構回覆會議紀錄；只回 JSON，不要額外文字。\
+所有欄位都是選填，沒有的就回空陣列或空字串：\n\
 ```json\n{{\n  \"summary\": \"3-5 句條列重點\",\n\
   \"decisions\": [{{\"text\": \"...\", \"resolved\": true}}],\n\
   \"risks\": [{{\"text\": \"...\", \"severity\": \"high|medium|low\"}}],\n\
   \"transcript_excerpts\": [{{\"speaker\": \"...\", \"time\": \"09:42\", \"content\": \"...\"}}],\n\
-  \"task_impacts\": [{{\"impact_type\": \"new|update|progress\", \"description\": \"...\"}}]\n}}\n```",
+  \"action_items\": [{{\"title\": \"待辦事項標題\", \"description\": \"細節（選填）\", \"assignee\": \"負責人姓名（從與會者中挑，選填）\"}}],\n\
+  \"task_impacts\": [{{\"impact_type\": \"new|update|progress\", \"description\": \"...\"}}]\n}}\n```\n\n\
+重點：\n\
+- `decisions` 是「已經做出的決策」（過去式）\n\
+- `action_items` 是「會後要做的事」（未來式），必須有清楚的可執行動作\n\
+- 兩者語意不同，請勿混淆。例如「同意採用方案 A」屬於 decision；\
+「下週五前整理出方案 A 的實作計畫」屬於 action_item",
         meeting.title,
         meeting.start_at.format("%Y-%m-%d %H:%M"),
         attendees_str,
@@ -1549,6 +1576,75 @@ async fn generate_ai_notes(
             "severity": r.severity.clone().unwrap_or_else(|| "medium".into())
         }))
         .collect::<Vec<_>>());
+    // AgentK-aligned: best-effort map of assignee free-text name → a
+    // local user_id by looking up our attendees first, then falling
+    // back to portal_employees. If neither matches we drop user_id and
+    // keep the raw name; the UI shows the name regardless.
+    let resolve_assignee = |name: &str| -> Option<Uuid> {
+        let n = name.trim();
+        if n.is_empty() {
+            return None;
+        }
+        attendees.iter().find_map(|a| {
+            if a.display_name.trim() == n {
+                a.user_id
+            } else {
+                None
+            }
+        })
+    };
+    let mut action_items_value = Vec::new();
+    let mut resolve_jobs = Vec::new();
+    for ai in &parsed.action_items {
+        if ai.title.trim().is_empty() {
+            continue;
+        }
+        let raw_assignee = ai.assignee.as_deref().unwrap_or("").to_string();
+        let mut item = serde_json::json!({
+            "title": ai.title.trim(),
+            "description": ai.description.as_deref().unwrap_or("").to_string(),
+            "source": "ai-generated",
+        });
+        if let Some(uid) = resolve_assignee(&raw_assignee) {
+            item["assignee_user_id"] = serde_json::Value::String(uid.to_string());
+        }
+        if !raw_assignee.is_empty() {
+            item["assignee_name"] = serde_json::Value::String(raw_assignee.clone());
+        }
+        // Defer portal_employees fallback to a SQL pass (next block) so
+        // we don't do per-row queries inside the iterator.
+        resolve_jobs.push((action_items_value.len(), raw_assignee));
+        action_items_value.push(item);
+    }
+    // Async fallback: for assignees that didn't match an attendee,
+    // probe portal_employees by Chinese name and stash the resulting
+    // user_id (if the portal employee is linked to a local user). One
+    // round-trip per unresolved item — acceptable for the small lists
+    // an AI summary produces.
+    for (idx, name) in &resolve_jobs {
+        let item = &action_items_value[*idx];
+        if item.get("assignee_user_id").is_some() {
+            continue;
+        }
+        if name.is_empty() {
+            continue;
+        }
+        let uid: Option<Uuid> = sqlx::query_scalar(
+            "SELECT user_id FROM portal_employees
+             WHERE name = $1 AND user_id IS NOT NULL LIMIT 1",
+        )
+        .bind(name)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(uid) = uid {
+            action_items_value[*idx]["assignee_user_id"] =
+                serde_json::Value::String(uid.to_string());
+        }
+    }
+    let action_items_json = serde_json::Value::Array(action_items_value);
+
     let excerpts_json = serde_json::json!(parsed
         .transcript_excerpts
         .iter()
@@ -1565,8 +1661,8 @@ async fn generate_ai_notes(
 
     let inserted: MeetingNotes = sqlx::query_as(
         "INSERT INTO meeting_notes (meeting_id, version, summary, decisions, risks,
-            transcript_excerpts, generated_by)
-         VALUES ($1, $2, $3, $4, $5, $6, 'ai') RETURNING *",
+            transcript_excerpts, generated_by, action_items, ai_job_ids, task_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9) RETURNING *",
     )
     .bind(id)
     .bind(next_version)
@@ -1574,6 +1670,16 @@ async fn generate_ai_notes(
     .bind(&decisions_json)
     .bind(&risks_json)
     .bind(&excerpts_json)
+    .bind(&action_items_json)
+    // ai_job_ids: AgentK reserves refs into an `ai_jobs` table here.
+    // We don't have that table yet (would need a separate persistence
+    // layer for LLM call audit). The Hermes call itself is recorded in
+    // `agent_usage_events`. Leave empty for now; future work is to
+    // either reuse agent_usage_events ids or add a proper ai_jobs table.
+    .bind(serde_json::json!([]))
+    // task_ids: populated later by a future POST .../notes/sync-tasks
+    // endpoint that turns action_items into project_tasks.
+    .bind(serde_json::json!([]))
     .fetch_one(&state.db)
     .await?;
 
