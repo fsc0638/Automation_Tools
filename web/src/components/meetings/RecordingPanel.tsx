@@ -16,10 +16,13 @@ export function RecordingPanel({
   meetingId,
   files,
   onFilesChange,
+  canEdit,
 }: {
   meetingId: string;
   files: MeetingFile[];
   onFilesChange: () => void;
+  /** False ⇒ non-participant; render only the readonly recording list. */
+  canEdit: boolean;
 }) {
   const t = useT();
   const [state, setState] = useState<RecordingState>("idle");
@@ -136,6 +139,7 @@ export function RecordingPanel({
         </span>
       </header>
 
+      {canEdit && (
       <div className="rounded-xl border border-[#FCA5A5] bg-[#FEE2E2] px-4 py-3">
         <div className="flex items-center justify-between">
           <div>
@@ -199,8 +203,9 @@ export function RecordingPanel({
           )}
         </div>
       </div>
+      )}
 
-      {error && (
+      {error && canEdit && (
         <div className="mt-3 rounded-md bg-[#FEE2E2] px-2 py-1.5 text-[12px] text-[#991B1B]">
           {error}
         </div>
@@ -228,9 +233,11 @@ export function RecordingPanel({
                     </div>
                   </div>
                 </div>
-                <button className="rounded-md p-1 text-[#94A3B8] hover:bg-[#F1F5F9]">
-                  <MoreHorizontal size={14} />
-                </button>
+                {canEdit && (
+                  <button className="rounded-md p-1 text-[#94A3B8] hover:bg-[#F1F5F9]">
+                    <MoreHorizontal size={14} />
+                  </button>
+                )}
               </li>
             ))}
           </ul>

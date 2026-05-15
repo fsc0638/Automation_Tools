@@ -18,11 +18,14 @@ export function TaskImpactList({
   impacts,
   defaultProjectId,
   onChange,
+  canEdit,
 }: {
   meetingId: string;
   impacts: MeetingTaskImpact[];
   defaultProjectId: string | null;
   onChange: () => void;
+  /** False ⇒ hide 新增 button; read list still visible. */
+  canEdit: boolean;
 }) {
   const t = useT();
   const [showHidden, setShowHidden] = useState(false);
@@ -44,13 +47,15 @@ export function TaskImpactList({
           <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 text-[11px] text-[#475569]">
             {t("meetings.impacts.changes").replace("{n}", String(impacts.length))}
           </span>
-          <button
-            type="button"
-            onClick={() => setAdding(true)}
-            className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] font-medium text-[#475569] hover:bg-[#F8FAFC]"
-          >
-            <Plus size={11} /> 新增
-          </button>
+          {canEdit && (
+            <button
+              type="button"
+              onClick={() => setAdding(true)}
+              className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] font-medium text-[#475569] hover:bg-[#F8FAFC]"
+            >
+              <Plus size={11} /> 新增
+            </button>
+          )}
         </div>
       </header>
 

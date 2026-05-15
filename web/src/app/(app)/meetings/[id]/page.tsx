@@ -92,14 +92,23 @@ export default function MeetingViewPage({
   }
 
   const isDraft = detail.status === "draft";
-  // Edit/delete/reopen authority mirrors the backend gate: only the
-  // creator (Kway Dev admin role per meeting) gets the action buttons.
-  // Project owner/admin can still call DELETE/reopen via the API but
-  // we don't surface them in the UI for the non-creator case — that
-  // matches the user's brief: "非自己建立的會議應該要可以看到，但
-  // 不可以異動以及刪除".
+  // Two authority levels exposed to subcomponents:
+  //   - isCreator: edit metadata / delete / reopen / send-invitations
+  //   - isParticipant: also includes attendees — can upload files,
+  //     edit notes, generate AI minutes, sync tasks, etc. Operations
+  //     that "touch" the meeting workspace.
+  // Anyone outside both is strictly read-only per user brief 2026-05-15:
+  // "建立者 + 與會人員，以外都不可以任何操作".
   const isCreator =
     !!currentUser && currentUser.id === detail.creator_id;
+  const isParticipant =
+    isCreator ||
+    (!!currentUser &&
+      detail.attendees.some(
+        (a) =>
+          (a.user_id !== null && a.user_id === currentUser.id) ||
+          a.email.toLowerCase() === currentUser.email.toLowerCase()
+      ));
 
   async function handleCompleteReady() {
     try {
@@ -281,9 +290,9 @@ export default function MeetingViewPage({
 
         <div className="flex min-h-0 flex-1 gap-5 overflow-auto p-6">
           {tab === "info" ? (
-            <InfoTab detail={detail} uploaderNames={uploaderNames} onChange={refresh} />
+            <InfoTab detail={detail} uploaderNames={uploaderNames} onChange={refresh} canEdit={isParticipant} />
           ) : (
-            <RecordTab detail={detail} onChange={refresh} />
+            <RecordTab detail={detail} onChange={refresh} canEdit={isParticipant} />
           )}
         </div>
       </div>
@@ -295,10 +304,13 @@ function InfoTab({
   detail,
   uploaderNames,
   onChange,
+  canEdit,
 }: {
   detail: MeetingDetail;
   uploaderNames: Map<string, string>;
   onChange: () => void;
+  /** Creator OR attendee. False ⇒ all action buttons hidden (read-only). */
+  canEdit: boolean;
 }) {
   const t = useT();
 
@@ -311,16 +323,23 @@ function InfoTab({
           files={detail.files}
           latestNotes={detail.latest_notes}
           onChange={onChange}
+          canEdit={canEdit}
         />
       </section>
 
       <aside className="flex w-[400px] flex-shrink-0 flex-col gap-5 overflow-y-auto">
-        <RecordingPanel meetingId={detail.id} files={detail.files} onFilesChange={onChange} />
+        <RecordingPanel
+          meetingId={detail.id}
+          files={detail.files}
+          onFilesChange={onChange}
+          canEdit={canEdit}
+        />
         <FileWorkspace
           meetingId={detail.id}
           files={detail.files}
           uploaderNames={uploaderNames}
           onChange={onChange}
+          canEdit={canEdit}
         />
       </aside>
     </>
@@ -408,14 +427,21 @@ function Field({
 function RecordTab({
   detail,
   onChange,
+  canEdit,
 }: {
   detail: MeetingDetail;
   onChange: () => void;
+  canEdit: boolean;
 }) {
   return (
     <>
       <section className="flex-1 space-y-5">
-        <NotesSummary meetingId={detail.id} notes={detail.latest_notes} onChange={onChange} />
+        <NotesSummary
+          meetingId={detail.id}
+          notes={detail.latest_notes}
+          onChange={onChange}
+          canEdit={canEdit}
+        />
       </section>
       <aside className="flex w-[400px] flex-shrink-0 flex-col gap-5 overflow-y-auto">
         <AttendeeSignoff meetingId={detail.id} attendees={detail.attendees} onChange={onChange} />
@@ -424,6 +450,7 @@ function RecordTab({
           impacts={detail.task_impacts}
           defaultProjectId={detail.project_id}
           onChange={onChange}
+          canEdit={canEdit}
         />
         <NotesHistory meetingId={detail.id} />
       </aside>

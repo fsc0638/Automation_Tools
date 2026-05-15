@@ -7,10 +7,14 @@ export function NotesSummary({
   meetingId,
   notes,
   onChange,
+  canEdit,
 }: {
   meetingId: string;
   notes: MeetingNotes | null;
   onChange: () => void;
+  /** False ⇒ hide 同步成任務 button. Read of summary/decisions/risks
+   *  remains visible. */
+  canEdit: boolean;
 }) {
   const t = useT();
   const [syncing, setSyncing] = useState(false);
@@ -124,14 +128,16 @@ export function NotesSummary({
             <div className="text-[13px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
               待辦事項（Action Items）
             </div>
-            <button
-              type="button"
-              onClick={() => void handleSyncTasks()}
-              disabled={syncing}
-              className="rounded-md border border-[#0050A0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0050A0] hover:bg-[#EFF6FF] disabled:opacity-50"
-            >
-              {syncing ? "同步中…" : "同步成任務"}
-            </button>
+            {canEdit && (
+              <button
+                type="button"
+                onClick={() => void handleSyncTasks()}
+                disabled={syncing}
+                className="rounded-md border border-[#0050A0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0050A0] hover:bg-[#EFF6FF] disabled:opacity-50"
+              >
+                {syncing ? "同步中…" : "同步成任務"}
+              </button>
+            )}
           </div>
           {syncMsg && (
             <div className="mt-1 text-[11px] text-[#64748B]">{syncMsg}</div>

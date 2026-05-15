@@ -9,11 +9,14 @@ export function NotesCompilePanel({
   files,
   latestNotes,
   onChange,
+  canEdit,
 }: {
   meetingId: string;
   files: MeetingFile[];
   latestNotes: MeetingNotes | null;
   onChange: () => void;
+  /** False ⇒ hide AI generate button; only the file-count summary stays. */
+  canEdit: boolean;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -75,14 +78,16 @@ export function NotesCompilePanel({
       )}
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="button"
-          onClick={() => void handleGenerate()}
-          disabled={busy || textAttachments.length === 0}
-          className="inline-flex items-center gap-1.5 rounded-xl bg-[#1A1A2E] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#243149] disabled:opacity-60"
-        >
-          {busy ? "產出中…" : t("meetings.notes.generate")}
-        </button>
+        {canEdit && (
+          <button
+            type="button"
+            onClick={() => void handleGenerate()}
+            disabled={busy || textAttachments.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-[#1A1A2E] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#243149] disabled:opacity-60"
+          >
+            {busy ? "產出中…" : t("meetings.notes.generate")}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setPreviewing((v) => !v)}
