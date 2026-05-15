@@ -789,14 +789,20 @@ async fn update_meeting(
         }
     }
 
-    // AgentK-aligned auto-lock: if the caller is moving status into
-    // 'completed' WITHOUT also clearing is_locked explicitly, lock the
-    // meeting. This keeps "ended" defaults sensible (ended ⇒ locked) and
-    // doesn't override an explicit reopen-then-mark-complete request.
+    // AgentK-aligned auto-lock: when status moves into a terminal state
+    // (completed or cancelled) without an explicit is_locked override,
+    // lock the meeting. AgentK locks on BOTH ended AND cancelled; we
+    // matched that on 2026-05-15 audit by adding cancelled here.
     let computed_is_locked: Option<bool> = match (req.status.as_deref(), req.is_locked) {
-        (Some("completed"), None) => Some(true),
+        (Some("completed") | Some("cancelled"), None) => Some(true),
         (_, explicit) => explicit,
     };
+
+    // AgentK-aligned temporal validation: status='scheduled' requires
+    // both start_at + end_at. In our schema both columns are NOT NULL
+    // so this is implicitly enforced — leaving the explicit check off
+    // because it's noise. CreateMeetingRequest also makes them required
+    // at create-time, so a meeting cannot exist without them.
 
     sqlx::query(
         "UPDATE meetings SET
@@ -1191,6 +1197,7 @@ async fn upload_file(
     mut multipart: Multipart,
 ) -> AppResult<(StatusCode, Json<MeetingFile>)> {
     require_meeting_access(&state, id, auth_user.id, AccessLevel::View).await?;
+    require_unlocked(&state, id).await?;
 
     let mut filename: Option<String> = None;
     let mut category: String = "attachment".into();
@@ -1288,6 +1295,7 @@ async fn delete_file(
     Path((id, file_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
     require_meeting_access(&state, id, auth_user.id, AccessLevel::View).await?;
+    require_unlocked(&state, id).await?;
     // Uploader-only delete unless the user is the meeting owner.
     let row: Option<MeetingFile> =
         sqlx::query_as("SELECT * FROM meeting_files WHERE id = $1 AND meeting_id = $2")
@@ -1332,6 +1340,7 @@ async fn update_notes(
     Json(req): Json<UpdateNotesRequest>,
 ) -> AppResult<Json<MeetingNotes>> {
     require_meeting_access(&state, id, auth_user.id, AccessLevel::Edit).await?;
+    require_unlocked(&state, id).await?;
 
     let prev: Option<MeetingNotes> = sqlx::query_as(
         "SELECT * FROM meeting_notes WHERE meeting_id = $1
@@ -1526,6 +1535,7 @@ async fn generate_ai_notes(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<MeetingNotes>> {
     require_meeting_access(&state, id, auth_user.id, AccessLevel::Edit).await?;
+    require_unlocked(&state, id).await?;
 
     let meeting: Meeting = sqlx::query_as("SELECT * FROM meetings WHERE id = $1")
         .bind(id)
@@ -1838,6 +1848,7 @@ async fn sync_notes_to_tasks(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<SyncTasksResult>> {
     require_meeting_access(&state, id, auth_user.id, AccessLevel::Edit).await?;
+    require_unlocked(&state, id).await?;
 
     let meeting: (Option<Uuid>,) =
         sqlx::query_as("SELECT project_id FROM meetings WHERE id = $1")
@@ -1882,17 +1893,56 @@ async fn sync_notes_to_tasks(
         }));
     }
 
-    // Pre-fetch the project's existing task titles so we can dedupe in a
-    // single round-trip rather than N queries.
+    // AgentK-aligned dedup: casefold the comparison so "Send report" and
+    // "send report" collapse to one task. Pre-fetch all titles for the
+    // project in a single round-trip.
     let existing_titles: Vec<String> = sqlx::query_scalar(
         "SELECT title FROM project_tasks WHERE project_id = $1",
     )
     .bind(project_id)
     .fetch_all(&state.db)
     .await?;
-    let existing: std::collections::HashSet<String> =
-        existing_titles.into_iter().collect();
+    let existing_lower: std::collections::HashSet<String> = existing_titles
+        .iter()
+        .map(|s| s.trim().to_lowercase())
+        .collect();
 
+    // AgentK-aligned: pre-validate every assignee_user_id BEFORE any
+    // insert so we don't leave half-synced state if one row would fail.
+    // Free-text assignee names always pass (stored verbatim on the task).
+    let mut assignee_uuids: std::collections::HashSet<Uuid> = Default::default();
+    for it in &items {
+        if let Some(uid_str) = it.assignee_user_id.as_deref() {
+            if let Ok(uid) = Uuid::parse_str(uid_str) {
+                assignee_uuids.insert(uid);
+            }
+        }
+    }
+    if !assignee_uuids.is_empty() {
+        let ids: Vec<Uuid> = assignee_uuids.iter().copied().collect();
+        let found: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM users WHERE id = ANY($1)",
+        )
+        .bind(&ids)
+        .fetch_all(&state.db)
+        .await?;
+        let found_set: std::collections::HashSet<Uuid> = found.into_iter().collect();
+        let missing: Vec<String> = assignee_uuids
+            .iter()
+            .filter(|u| !found_set.contains(u))
+            .map(|u| u.to_string())
+            .collect();
+        if !missing.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "assignee_user_id not found in users table: {}",
+                missing.join(", ")
+            )));
+        }
+    }
+
+    // Atomic insert: wrap all task creates + the meeting_notes UPDATE in
+    // one transaction so a mid-loop failure leaves no half-synced state.
+    let mut tx = state.db.begin().await?;
     let mut created: Vec<Uuid> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for it in items {
@@ -1900,7 +1950,7 @@ async fn sync_notes_to_tasks(
         if title.is_empty() {
             continue;
         }
-        if existing.contains(title) {
+        if existing_lower.contains(&title.to_lowercase()) {
             skipped.push(title.to_string());
             continue;
         }
@@ -1921,11 +1971,10 @@ async fn sync_notes_to_tasks(
         .bind(title)
         .bind(it.description.trim())
         .bind(assignee)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *tx)
         .await?;
         created.push(new_id);
     }
-
     // Append the new ids into `task_ids` on the latest notes row so the
     // record aggregate stays the source of truth.
     if !created.is_empty() {
@@ -1936,14 +1985,13 @@ async fn sync_notes_to_tasks(
         for nid in &created {
             all_ids.push(nid.to_string());
         }
-        sqlx::query(
-            "UPDATE meeting_notes SET task_ids = $1 WHERE id = $2",
-        )
-        .bind(serde_json::json!(all_ids))
-        .bind(notes.id)
-        .execute(&state.db)
-        .await?;
+        sqlx::query("UPDATE meeting_notes SET task_ids = $1 WHERE id = $2")
+            .bind(serde_json::json!(all_ids))
+            .bind(notes.id)
+            .execute(&mut *tx)
+            .await?;
     }
+    tx.commit().await?;
 
     if !created.is_empty() {
         emit_meeting_event(&state, MeetingEvent::RecordUpdated { meeting_id: id });
@@ -2381,6 +2429,25 @@ async fn require_meeting_access(
                 Err(AppError::NotFound("Meeting not found".into()))
             }
         }
+    }
+}
+
+/// AgentK-aligned: refuse the call when the meeting is locked. Used at
+/// the top of every mutation that AgentK guards with `_require_unlocked`
+/// — record edits, AI minutes generation, task sync, file upload, file
+/// delete. Returns 409 Conflict so the UI can surface a clear "reopen
+/// first" message instead of treating it as a generic write failure.
+async fn require_unlocked(state: &AppState, meeting_id: Uuid) -> AppResult<()> {
+    let locked: Option<bool> =
+        sqlx::query_scalar("SELECT is_locked FROM meetings WHERE id = $1")
+            .bind(meeting_id)
+            .fetch_optional(&state.db)
+            .await?;
+    match locked {
+        Some(true) => Err(AppError::Conflict(
+            "meeting is locked — reopen before editing records, files, or notes".into(),
+        )),
+        _ => Ok(()),
     }
 }
 
