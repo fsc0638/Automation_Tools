@@ -30,6 +30,11 @@ export default function MeetingViewPage({
   const t = useT();
   const router = useRouter();
   const { id } = use(params);
+  // All hooks MUST be called in the same order every render — including
+  // the zustand store read. Putting `useAuthStore` after the early
+  // `if (loading) return …` blocks below caused a hook-count mismatch
+  // on the second render (Rules of Hooks violation). Keep it up here.
+  const currentUser = useAuthStore((s) => s.user);
   const [tab, setTab] = useState<Tab>("info");
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -93,7 +98,6 @@ export default function MeetingViewPage({
   // we don't surface them in the UI for the non-creator case — that
   // matches the user's brief: "非自己建立的會議應該要可以看到，但
   // 不可以異動以及刪除".
-  const currentUser = useAuthStore((s) => s.user);
   const isCreator =
     !!currentUser && currentUser.id === detail.creator_id;
 
