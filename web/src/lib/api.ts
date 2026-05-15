@@ -414,6 +414,12 @@ export interface MeetingFile {
   metadata?: unknown;
 }
 
+export interface SyncTasksResult {
+  synced_notes_version: number;
+  created_task_ids: string[];
+  skipped_existing_titles: string[];
+}
+
 export interface MeetingActionItem {
   title: string;
   description?: string;
@@ -614,6 +620,8 @@ export const meetings = {
     request<void>(`/meetings/${id}/files/${fileId}`, { method: "DELETE" }),
   generateNotes: (id: string) =>
     request<MeetingNotes>(`/meetings/${id}/notes/generate`, { method: "POST" }),
+  syncNotesToTasks: (id: string) =>
+    request<SyncTasksResult>(`/meetings/${id}/notes/sync-tasks`, { method: "POST" }),
   updateNotes: (
     id: string,
     body: Partial<Pick<MeetingNotes,
@@ -720,6 +728,31 @@ export interface ConversationSummary {
   keywords: string[];
   source_message_count: number;
   updated_at: string;
+}
+
+/** AgentK-aligned: subscribe to meeting lifecycle events. Server pushes
+ *  JSON like `{type:"updated",meeting_id:"..."}`. The handler is fired
+ *  per event; lagged subscribers receive `{type:"resync"}` and should
+ *  refetch from scratch. Returns the WebSocket so the caller can close
+ *  it on unmount. */
+export function createMeetingsWsConnection(
+  onEvent: (event: { type: string; meeting_id?: string; is_locked?: boolean }) => void
+): WebSocket {
+  const token = getToken();
+  const apiUrl = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080/api");
+  const wsProtocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+  const params = new URLSearchParams({ ...(token ? { token } : {}) });
+  const ws = new WebSocket(
+    `${wsProtocol}//${apiUrl.host}${apiUrl.pathname.replace(/\/$/, "")}/ws/meetings?${params}`
+  );
+  ws.onmessage = (e) => {
+    try {
+      onEvent(JSON.parse(e.data));
+    } catch {
+      /* ignore malformed payloads */
+    }
+  };
+  return ws;
 }
 
 export function createWsConnection(conversationId: string, projectId: string): WebSocket {

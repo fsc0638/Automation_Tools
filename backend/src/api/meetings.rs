@@ -19,9 +19,15 @@ use uuid::Uuid;
 
 use crate::{
     agents::{hermes::HermesClient, openclaw::ChatMessage},
-    api::{auth::AuthUser, AppState},
+    api::{auth::AuthUser, AppState, MeetingEvent},
     error::{AppError, AppResult},
 };
+
+/// Best-effort event publish — failure (no subscribers) is normal and
+/// silenced. Wrap every CRUD success path with this.
+fn emit_meeting_event(state: &AppState, event: MeetingEvent) {
+    let _ = state.meeting_events.send(event);
+}
 use kway_dev_backend::portal_book::{self, BookOp, BookRequest};
 use kway_dev_backend::portal_sync::{self, SyncOptions};
 
@@ -426,6 +432,7 @@ pub fn routes() -> Router<AppState> {
         .route("/meetings/:id/files/:file_id", http_delete(delete_file))
         .route("/meetings/:id/notes", http_patch(update_notes))
         .route("/meetings/:id/notes/generate", post(generate_ai_notes))
+        .route("/meetings/:id/notes/sync-tasks", post(sync_notes_to_tasks))
         .route("/meetings/:id/notes/history", get(notes_history))
         .route(
             "/meetings/:id/task-impacts",
@@ -646,6 +653,10 @@ async fn create_meeting(
         }
     }
 
+    emit_meeting_event(&state, MeetingEvent::Created { meeting_id: meeting.id });
+    if !req.save_as_draft {
+        emit_meeting_event(&state, MeetingEvent::Scheduled { meeting_id: meeting.id });
+    }
     let detail = load_detail(&state, meeting.id, auth_user.id).await?;
     Ok((StatusCode::CREATED, Json(detail)))
 }
@@ -874,6 +885,23 @@ async fn update_meeting(
         }
     }
 
+    // Emit specific lifecycle events when status / lock changed; always
+    // emit a generic Updated as well so subscribers without specific
+    // handlers still refetch.
+    match req.status.as_deref() {
+        Some("scheduled")  => emit_meeting_event(&state, MeetingEvent::Scheduled { meeting_id: id }),
+        Some("completed")  => emit_meeting_event(&state, MeetingEvent::Ended     { meeting_id: id }),
+        Some("cancelled")  => emit_meeting_event(&state, MeetingEvent::Cancelled { meeting_id: id }),
+        _ => {}
+    }
+    if let Some(locked) = computed_is_locked {
+        emit_meeting_event(
+            &state,
+            MeetingEvent::LockChanged { meeting_id: id, is_locked: locked },
+        );
+    }
+    emit_meeting_event(&state, MeetingEvent::Updated { meeting_id: id });
+
     let detail = load_detail(&state, id, auth_user.id).await?;
     Ok(Json(detail))
 }
@@ -957,6 +985,7 @@ async fn delete_meeting(
         .bind(id)
         .execute(&state.db)
         .await?;
+    emit_meeting_event(&state, MeetingEvent::Deleted { meeting_id: id });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1030,6 +1059,8 @@ async fn send_invitations(
             }
         }
     }
+    emit_meeting_event(&state, MeetingEvent::Scheduled { meeting_id: id });
+    emit_meeting_event(&state, MeetingEvent::Updated { meeting_id: id });
     // Actual email dispatch is still deferred to a future mail-service
     // feature; we just flip the status + reserve the room here.
     let detail = load_detail(&state, id, auth_user.id).await?;
@@ -1095,6 +1126,11 @@ async fn reopen_meeting(
     .await?;
 
     tracing::info!("meeting {} reopened by user {}", id, auth_user.id);
+    emit_meeting_event(
+        &state,
+        MeetingEvent::LockChanged { meeting_id: id, is_locked: false },
+    );
+    emit_meeting_event(&state, MeetingEvent::Updated { meeting_id: id });
     let detail = load_detail(&state, id, auth_user.id).await?;
     Ok(Json(detail))
 }
@@ -1364,6 +1400,7 @@ async fn update_notes(
     .execute(&state.db)
     .await?;
 
+    emit_meeting_event(&state, MeetingEvent::RecordUpdated { meeting_id: id });
     Ok(Json(inserted))
 }
 
@@ -1541,22 +1578,79 @@ async fn generate_ai_notes(
         transcript,
     );
 
+    let system_prompt = "你是會議記錄助手，依據逐字稿輸出結構化 JSON 紀錄。";
     let messages = vec![
         ChatMessage {
             role: "system".into(),
-            content: "你是會議記錄助手，依據逐字稿輸出結構化 JSON 紀錄。".into(),
+            content: system_prompt.into(),
         },
         ChatMessage {
             role: "user".into(),
-            content: user_prompt,
+            content: user_prompt.clone(),
         },
     ];
 
-    let raw = HermesClient::new(&state.config)
-        .chat(messages)
-        .await
-        .map_err(|e| AppError::Agent(e.to_string()))?;
+    // AgentK-aligned audit: record an ai_jobs row for every Hermes call.
+    // We stamp the row with status='failed' upfront and UPDATE to
+    // 'success' once the call completes, so a crashed handler leaves
+    // a discoverable failure rather than no record at all.
+    let started = std::time::Instant::now();
+    let prompt_hash = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(user_prompt.as_bytes());
+        format!("{:x}", h.finalize())
+    };
+    let input_chars = (system_prompt.len() + user_prompt.len()) as i32;
+    let ai_job_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO ai_jobs
+            (kind, provider, model, requested_by, meeting_id,
+             status, input_chars, prompt_hash)
+         VALUES ('meeting_minutes', $1, $2, $3, $4,
+                 'failed', $5, $6) RETURNING id",
+    )
+    .bind("hermes")
+    .bind(&state.config.hermes_model)
+    .bind(auth_user.id)
+    .bind(id)
+    .bind(input_chars)
+    .bind(&prompt_hash)
+    .fetch_one(&state.db)
+    .await?;
+
+    let raw = match HermesClient::new(&state.config).chat(messages).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err_msg = e.to_string();
+            let elapsed = started.elapsed().as_millis() as i32;
+            let _ = sqlx::query(
+                "UPDATE ai_jobs SET status='failed',
+                                     error=$2,
+                                     duration_ms=$3
+                 WHERE id=$1",
+            )
+            .bind(ai_job_id)
+            .bind(&err_msg)
+            .bind(elapsed)
+            .execute(&state.db)
+            .await;
+            return Err(AppError::Agent(err_msg));
+        }
+    };
     let cleaned = strip_json_fences(&raw);
+    let elapsed_ms = started.elapsed().as_millis() as i32;
+    let output_chars = raw.len() as i32;
+    let _ = sqlx::query(
+        "UPDATE ai_jobs SET status='success',
+                             output_chars=$2,
+                             duration_ms=$3
+         WHERE id=$1",
+    )
+    .bind(ai_job_id)
+    .bind(output_chars)
+    .bind(elapsed_ms)
+    .execute(&state.db)
+    .await;
 
     let parsed: LlmMeetingNotes = serde_json::from_str(&cleaned).unwrap_or_else(|_| LlmMeetingNotes {
         summary: cleaned.clone(),
@@ -1671,12 +1765,12 @@ async fn generate_ai_notes(
     .bind(&risks_json)
     .bind(&excerpts_json)
     .bind(&action_items_json)
-    // ai_job_ids: AgentK reserves refs into an `ai_jobs` table here.
-    // We don't have that table yet (would need a separate persistence
-    // layer for LLM call audit). The Hermes call itself is recorded in
-    // `agent_usage_events`. Leave empty for now; future work is to
-    // either reuse agent_usage_events ids or add a proper ai_jobs table.
-    .bind(serde_json::json!([]))
+    // ai_job_ids: refs into the `ai_jobs` table (migration 0035). Each
+    // entry is the UUID of one chat() call that contributed to this
+    // note. Today there's exactly one per generate (the Hermes call
+    // above); we keep this as an array so a future multi-step pipeline
+    // (e.g. transcribe → summarise → critique) can chain entries.
+    .bind(serde_json::json!([ai_job_id.to_string()]))
     // task_ids: populated later by a future POST .../notes/sync-tasks
     // endpoint that turns action_items into project_tasks.
     .bind(serde_json::json!([]))
@@ -1716,7 +1810,149 @@ async fn generate_ai_notes(
         .await;
     }
 
+    emit_meeting_event(&state, MeetingEvent::RecordUpdated { meeting_id: id });
     Ok(Json(inserted))
+}
+
+/// Response shape for POST /meetings/:id/notes/sync-tasks.
+#[derive(Debug, Serialize)]
+pub struct SyncTasksResult {
+    pub synced_notes_version: i32,
+    pub created_task_ids: Vec<Uuid>,
+    pub skipped_existing_titles: Vec<String>,
+}
+
+/// POST /meetings/:id/notes/sync-tasks
+///
+/// AgentK-aligned: turn the latest note's `action_items` into rows in
+/// `project_tasks`. Idempotent in the sense that a re-run won't double-
+/// create — we skip any action item whose title already exists as a
+/// task on the same project. Caveat: a meeting without a `project_id`
+/// has nowhere to put the tasks, so we 400 in that case rather than
+/// silently dropping them.
+///
+/// Per docs/agentk-fusion/fusion-plan.md §3.2.
+async fn sync_notes_to_tasks(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<SyncTasksResult>> {
+    require_meeting_access(&state, id, auth_user.id, AccessLevel::Edit).await?;
+
+    let meeting: (Option<Uuid>,) =
+        sqlx::query_as("SELECT project_id FROM meetings WHERE id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
+    let Some(project_id) = meeting.0 else {
+        return Err(AppError::BadRequest(
+            "meeting is not linked to a project; cannot sync action items into tasks".into(),
+        ));
+    };
+
+    let prev: Option<MeetingNotes> = sqlx::query_as(
+        "SELECT * FROM meeting_notes WHERE meeting_id = $1
+         ORDER BY version DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let notes = prev.ok_or_else(|| {
+        AppError::BadRequest("no meeting notes to sync; generate or write notes first".into())
+    })?;
+
+    // action_items is JSONB — decode into a typed view so we can iterate.
+    #[derive(Deserialize, Default)]
+    struct ActionItemRow {
+        title: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        assignee_user_id: Option<String>,
+        #[serde(default)]
+        assignee_name: Option<String>,
+    }
+    let items: Vec<ActionItemRow> =
+        serde_json::from_value(notes.action_items.clone()).unwrap_or_default();
+    if items.is_empty() {
+        return Ok(Json(SyncTasksResult {
+            synced_notes_version: notes.version,
+            created_task_ids: vec![],
+            skipped_existing_titles: vec![],
+        }));
+    }
+
+    // Pre-fetch the project's existing task titles so we can dedupe in a
+    // single round-trip rather than N queries.
+    let existing_titles: Vec<String> = sqlx::query_scalar(
+        "SELECT title FROM project_tasks WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_all(&state.db)
+    .await?;
+    let existing: std::collections::HashSet<String> =
+        existing_titles.into_iter().collect();
+
+    let mut created: Vec<Uuid> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for it in items {
+        let title = it.title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        if existing.contains(title) {
+            skipped.push(title.to_string());
+            continue;
+        }
+        // Use whichever assignee form we have; assignee column on tasks
+        // is plain TEXT so display names are fine, but we prefer a
+        // user_id-resolved value when present.
+        let assignee = it
+            .assignee_name
+            .as_deref()
+            .or(it.assignee_user_id.as_deref());
+        let new_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO project_tasks
+                (project_id, title, why, assignee, status, priority)
+             VALUES ($1, $2, $3, $4, 'todo', 'medium')
+             RETURNING id",
+        )
+        .bind(project_id)
+        .bind(title)
+        .bind(it.description.trim())
+        .bind(assignee)
+        .fetch_one(&state.db)
+        .await?;
+        created.push(new_id);
+    }
+
+    // Append the new ids into `task_ids` on the latest notes row so the
+    // record aggregate stays the source of truth.
+    if !created.is_empty() {
+        let mut all_ids: Vec<String> = serde_json::from_value::<Vec<String>>(
+            notes.task_ids.clone(),
+        )
+        .unwrap_or_default();
+        for nid in &created {
+            all_ids.push(nid.to_string());
+        }
+        sqlx::query(
+            "UPDATE meeting_notes SET task_ids = $1 WHERE id = $2",
+        )
+        .bind(serde_json::json!(all_ids))
+        .bind(notes.id)
+        .execute(&state.db)
+        .await?;
+    }
+
+    if !created.is_empty() {
+        emit_meeting_event(&state, MeetingEvent::RecordUpdated { meeting_id: id });
+    }
+    Ok(Json(SyncTasksResult {
+        synced_notes_version: notes.version,
+        created_task_ids: created,
+        skipped_existing_titles: skipped,
+    }))
 }
 
 async fn notes_history(

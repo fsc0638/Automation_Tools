@@ -55,7 +55,72 @@ enum ClientEvent {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/ws/chat", get(ws_handler))
+    Router::new()
+        .route("/ws/chat", get(ws_handler))
+        .route("/ws/meetings", get(meetings_ws_handler))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MeetingsWsQuery {
+    pub token: String,
+}
+
+/// AgentK-aligned meeting lifecycle realtime. Clients open one WS per
+/// session and receive a JSON event whenever any meeting they can see
+/// changes. Filtering by viewer is left to the client — events carry
+/// `meeting_id` and the client decides whether to refetch. We picked
+/// this over per-meeting subscriptions because the average user follows
+/// 5-10 meetings tops and the broadcast traffic is negligible.
+async fn meetings_ws_handler(
+    ws: WebSocketUpgrade,
+    Query(query): Query<MeetingsWsQuery>,
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let claims = verify_token(&query.token, &state.config.jwt_secret)?;
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
+    Ok(ws.on_upgrade(move |socket| handle_meetings_socket(socket, state, user_id)))
+}
+
+async fn handle_meetings_socket(socket: WebSocket, state: AppState, user_id: Uuid) {
+    use tokio::sync::broadcast::error::RecvError;
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.meeting_events.subscribe();
+    tracing::debug!("meetings ws: user {user_id} subscribed");
+
+    // Loop: forward broadcast events as JSON; respond to client pings;
+    // exit when either side closes. broadcast::Lagged (slow consumer)
+    // triggers a single "resync" sentinel so the client refetches.
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Ok(ev) => {
+                    let payload = match serde_json::to_string(&ev) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!("meetings ws: serialize failed: {e:?}");
+                            continue;
+                        }
+                    };
+                    if sender.send(WsMessage::Text(payload)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {
+                    let _ = sender
+                        .send(WsMessage::Text("{\"type\":\"resync\"}".into()))
+                        .await;
+                }
+                Err(RecvError::Closed) => break,
+            },
+            client_msg = receiver.next() => match client_msg {
+                Some(Ok(WsMessage::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                _ => continue,  // ignore pings / text from client
+            }
+        }
+    }
+    tracing::debug!("meetings ws: user {user_id} disconnected");
 }
 
 async fn ws_handler(

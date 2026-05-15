@@ -78,12 +78,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let portal_sync_lock = SyncLock::new();
+    // AgentK-aligned: broadcast::channel for meeting lifecycle events.
+    // Capacity 256 absorbs short bursts (e.g. status flip + portal book
+    // + invitation send in quick succession). Lagging subscribers get
+    // RecvError::Lagged on the WS side and refetch.
+    let (meeting_events_tx, _) = tokio::sync::broadcast::channel(256);
 
     let state = AppState {
         db: db.clone(),
         config: config.clone(),
         cipher,
         portal_sync_lock: portal_sync_lock.clone(),
+        meeting_events: meeting_events_tx,
     };
 
     // Background portal-sync scheduler. Wakes every 30 mins aligned to

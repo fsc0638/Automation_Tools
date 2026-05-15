@@ -10,7 +10,11 @@ import { NotesCompilePanel } from "@/components/meetings/NotesCompilePanel";
 import { AttendeeSignoff } from "@/components/meetings/AttendeeSignoff";
 import { TaskImpactList } from "@/components/meetings/TaskImpactList";
 import { NotesHistory } from "@/components/meetings/NotesHistory";
-import { meetings as meetingsApi, type MeetingDetail } from "@/lib/api";
+import {
+  createMeetingsWsConnection,
+  meetings as meetingsApi,
+  type MeetingDetail,
+} from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { formatDateOnly, formatTimeRange } from "@/components/meetings/meeting-utils";
@@ -44,6 +48,25 @@ export default function MeetingViewPage({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // AgentK-aligned: subscribe to meeting lifecycle events and refetch
+  // on anything that touches this meeting (lock change, status flip,
+  // record update). Other events are ignored — the sidebar / list pages
+  // can subscribe separately if they need finer-grained updates.
+  useEffect(() => {
+    const ws = createMeetingsWsConnection((ev) => {
+      if (ev.type === "resync" || ev.meeting_id === id) {
+        void refresh();
+      }
+    });
+    return () => {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [id, refresh]);
 
   if (loading) {
     return (

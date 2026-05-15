@@ -1,17 +1,43 @@
 "use client";
-import { type MeetingNotes } from "@/lib/api";
+import { useState } from "react";
+import { meetings as meetingsApi, type MeetingNotes } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
 export function NotesSummary({
-  meetingId: _meetingId,
+  meetingId,
   notes,
-  onChange: _onChange,
+  onChange,
 }: {
   meetingId: string;
   notes: MeetingNotes | null;
   onChange: () => void;
 }) {
   const t = useT();
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string>("");
+
+  async function handleSyncTasks() {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncMsg("");
+    try {
+      const r = await meetingsApi.syncNotesToTasks(meetingId);
+      const created = r.created_task_ids.length;
+      const skipped = r.skipped_existing_titles.length;
+      setSyncMsg(
+        created === 0 && skipped === 0
+          ? "沒有可同步的待辦事項。"
+          : `已建立 ${created} 筆任務${skipped > 0 ? `；略過 ${skipped} 筆同名` : ""}。`
+      );
+      onChange();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "同步失敗";
+      // 400 when the meeting has no project_id is the common path.
+      setSyncMsg(/project/i.test(msg) ? "此會議未連結至專案，無法同步成任務。" : msg);
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   if (!notes) {
     return (
@@ -94,9 +120,22 @@ export function NotesSummary({
        *  notes carry. */}
       {notes.action_items && notes.action_items.length > 0 && (
         <section className="mt-5">
-          <div className="text-[13px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
-            待辦事項（Action Items）
+          <div className="flex items-center justify-between">
+            <div className="text-[13px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
+              待辦事項（Action Items）
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleSyncTasks()}
+              disabled={syncing}
+              className="rounded-md border border-[#0050A0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0050A0] hover:bg-[#EFF6FF] disabled:opacity-50"
+            >
+              {syncing ? "同步中…" : "同步成任務"}
+            </button>
           </div>
+          {syncMsg && (
+            <div className="mt-1 text-[11px] text-[#64748B]">{syncMsg}</div>
+          )}
           <div className="mt-2 space-y-2">
             {notes.action_items.map((item, i) => (
               <div key={i} className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3">
