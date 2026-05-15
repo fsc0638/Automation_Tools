@@ -52,6 +52,13 @@ BOOK_URL = "https://crm.kway.com.tw/cgi/conference/conference_mgr.jsp?key=C"
 BOOK_MULTI_URL = "https://crm.kway.com.tw/cgi/conference/conference_mgrM.jsp?key=C"
 CANCEL_URL = "https://crm.kway.com.tw/cgi/conference/conference_mgrD.jsp?key=C"
 
+# Booking list page; same one the meeting_rooms scraper uses. The portal's
+# fn_open() refuses to take a direct conference_mgr.jsp URL — it punts back
+# to main_new.jsp — so we *first* land on the list page (menuid=251510)
+# inside the portal frame, *then* navigate to the form by page.goto() which
+# does keep session cookies because we're already on the correct host.
+BOOKING_LIST_URL = "https://crm.kway.com.tw/portal_login.jsp?menuid=251510"
+
 ERROR_TOKENS = (
     "已被預約",
     "重複預約",
@@ -136,18 +143,45 @@ class MeetingBookFeature(PortalFeature):
         snapshot_dir: Path,
     ) -> dict[str, Any]:
         op = args.op
-        page = session.page
-
-        # Land on the right form. Use page.goto so we deterministically wait
-        # for DOMContentLoaded; same pattern as the scraper's date switch.
         target = {
             "book": BOOK_URL,
             "book-multi": BOOK_MULTI_URL,
             "cancel": CANCEL_URL,
         }[op]
-        await page.goto(target, wait_until="domcontentloaded", timeout=session.cfg.timeout_ms)
+
+        # Two-step navigation. fn_open() refuses arbitrary URLs (it punts
+        # back to main_new.jsp), so:
+        #   1. Open the booking list via the portal menu (menuid=251510).
+        #      This is exactly the page the meeting_rooms scraper uses.
+        #   2. From that page, page.goto() the specific form URL. By this
+        #      point we share the booking-list frame's host + session
+        #      cookies, so the form actually loads.
+        page = await session.open_portal_link(
+            link_text_candidates=[],
+            direct_url=BOOKING_LIST_URL,
+        )
         await session.safe_wait_networkidle()
-        await session.close_announcement_popups(f"after open {op}")
+        await session.close_announcement_popups(f"after open list ({op})")
+        await page.goto(target, wait_until="domcontentloaded",
+                        timeout=session.cfg.timeout_ms)
+        await session.safe_wait_networkidle()
+        await session.close_announcement_popups(f"after open form ({op})")
+
+        # The portal sometimes lazy-loads the room <select> options after
+        # initial DOMContentLoaded. Wait until at least one <select> in the
+        # form has > 1 option before trying to pick a room. Short timeout
+        # because if it's still empty after 5s, something else is wrong.
+        try:
+            await page.wait_for_function(
+                "() => Array.from(document.querySelectorAll('form select'))"
+                ".some(s => s.options.length > 1)",
+                timeout=5000,
+            )
+        except Exception:
+            session.warnings.append(
+                f"{op}: no populated <select> on form within 5s; "
+                "proceeding anyway — _pick_room will surface the diagnosis."
+            )
 
         # Pick the room. Two strategies: match <option value="..."> against
         # --room-code first; if no <option> has that value, fall back to
@@ -155,6 +189,30 @@ class MeetingBookFeature(PortalFeature):
         # by form; we try the common KWay names in order.
         chosen = await _pick_room(page, args.room_code, args.room_name)
         if chosen is None:
+            # Dump *what we actually saw* — current URL, every <select>'s
+            # name + first 30 options. Previous "room not found" message
+            # gave zero clue whether we'd hit the login page, an empty
+            # form, or a form with a select whose label format differs.
+            page_diag = await page.evaluate(
+                """
+                () => {
+                  const selects = Array.from(document.querySelectorAll('select')).map(s => ({
+                    name: s.name || s.id || '(unnamed)',
+                    option_count: s.options.length,
+                    sample_options: Array.from(s.options).slice(0, 30).map(o => ({
+                      value: o.value, text: (o.text || '').trim()
+                    })),
+                  }));
+                  return {
+                    url: location.href,
+                    title: document.title,
+                    has_form: !!document.querySelector('form'),
+                    select_count: selects.length,
+                    selects,
+                  };
+                }
+                """
+            )
             html_p, png_p = await save_snapshot(
                 page,
                 snapshot_dir,
@@ -164,6 +222,8 @@ class MeetingBookFeature(PortalFeature):
                 "op": op,
                 "success": False,
                 "room_code": args.room_code,
+                "room_name": args.room_name,
+                "page_diagnostic": page_diag,
                 "date": args.date,
                 "date_start": args.date_start,
                 "date_end": args.date_end,
@@ -173,6 +233,36 @@ class MeetingBookFeature(PortalFeature):
                 "snapshot_html": str(html_p),
                 "screenshot": str(png_p),
             }
+
+        # Before filling, snapshot every named field on the form. This is
+        # how we discover the actual time / period / subject field names
+        # for the first time — selector lists in _fill_form are guesses
+        # against KWay's naming convention, and "portal reported: 時間
+        # 錯誤" with no filled time means the time guess missed.
+        form_inputs = await page.evaluate(
+            """
+            () => {
+              const out = [];
+              for (const el of document.querySelectorAll('form input, form select, form textarea')) {
+                const item = {
+                  tag: el.tagName.toLowerCase(),
+                  type: el.type || '',
+                  name: el.name || '',
+                  id: el.id || '',
+                  readonly: el.hasAttribute('readonly') || !!el.readOnly,
+                  value: el.value ?? '',
+                };
+                if (el.tagName === 'SELECT') {
+                  item.option_count = el.options.length;
+                  item.sample_options = Array.from(el.options).slice(0, 8)
+                    .map(o => ({value: o.value, text: (o.text || '').trim()}));
+                }
+                out.push(item);
+              }
+              return out;
+            }
+            """
+        )
 
         # Fill the date / time / 說明 fields. Each helper is tolerant of
         # missing fields and reports back what it actually filled so the
@@ -208,6 +298,7 @@ class MeetingBookFeature(PortalFeature):
             "subject": args.subject,
             "submitted_url": submitted_url,
             "filled_fields": filled,
+            "form_inputs": form_inputs,
             "result_text": body_text[-800:],
             "snapshot_html": str(html_p),
             "screenshot": str(png_p),
@@ -253,16 +344,55 @@ async def _select_option(loc, room_code: str, room_name: str) -> str | None:
     options = await loc.evaluate(
         "(el) => Array.from(el.options).map(o => ({value: o.value, text: o.text.trim()}))"
     )
-    for o in options:
-        if o["value"] == room_code or o["value"].endswith(room_code):
-            await loc.select_option(value=o["value"])
-            return o["text"]
-    if room_name:
+    # IMPORTANT: skip code matching when room_code is empty — `"C18".endswith("")`
+    # returns True, which would silently pick the *first* option (台中大會議室
+    # on conference_mgr.jsp) regardless of the actual room the user chose.
+    # The 2026-05-15 first-success run hit exactly this and booked the
+    # wrong room.
+    if room_code:
         for o in options:
-            if room_name in o["text"]:
+            if o["value"] == room_code or o["value"].endswith(room_code):
                 await loc.select_option(value=o["value"])
                 return o["text"]
+    if room_name:
+        # Bidirectional substring: portal may shorten ("6號會議室" vs our
+        # "6號會議室(8人)") or pad ("6號會議室 - 1F"). Either direction is
+        # fine because the room dropdown values are unambiguous within
+        # one workspace.
+        rn = room_name.strip()
+        for o in options:
+            text = o["text"].strip()
+            if rn and (rn in text or text in rn):
+                await loc.select_option(value=o["value"])
+                return text
     return None
+
+
+async def _fill_input(loc, value: str) -> None:
+    """Fill an input that may be readonly.
+
+    Many KWay forms put `readonly="true"` on date fields so the user has to
+    use the custom calendar picker (onclick="new Calendar(...).show(this)").
+    Playwright's `fill()` respects readonly and refuses to type — so for
+    those inputs we set `value` via DOM and dispatch the input/change
+    events the form's onchange handlers expect to see. Non-readonly inputs
+    take the normal fill() path so we don't lose Playwright's input
+    masking / IME handling.
+    """
+    is_readonly = await loc.evaluate(
+        "(el) => el.hasAttribute('readonly') || el.readOnly"
+    )
+    if is_readonly:
+        await loc.evaluate(
+            """(el, v) => {
+                el.value = v;
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+            }""",
+            value,
+        )
+    else:
+        await loc.fill(value)
 
 
 async def _fill_form(page, op: str, args) -> dict[str, str]:
@@ -278,53 +408,68 @@ async def _fill_form(page, op: str, args) -> dict[str, str]:
         ):
             loc = page.locator(sel).first
             if await loc.count():
-                await loc.fill(portal_date)
+                await _fill_input(loc, portal_date)
                 filled["date"] = portal_date
                 break
     else:
+        # KWay's cancel form (conference_mgrD.jsp) names — verified
+        # 2026-05-15 via a form_inputs dump:
+        #   from-date input = dat_conference (yes, same as single-day book)
+        #   to-date input   = dat_conference_end
+        #   recurrence      = week_count
+        # The book-multi form (conference_mgrM.jsp) hasn't been form-
+        # dumped yet; we keep the older guesses as fallbacks so a future
+        # multi-book test surfaces what's actually there without 500ing.
         d1 = _to_portal_date(args.date_start)
         d2 = _to_portal_date(args.date_end)
         for sel in (
-            'input[name="dat_conference1"]',
+            'input[name="dat_conference"]',       # cancel form
+            'input[name="dat_conference1"]',      # speculative for multi
             'input[name="dat_start"]',
             'input[name="date_start"]',
         ):
             loc = page.locator(sel).first
             if await loc.count():
-                await loc.fill(d1)
+                await _fill_input(loc, d1)
                 filled["date_start"] = d1
                 break
         for sel in (
-            'input[name="dat_conference2"]',
+            'input[name="dat_conference_end"]',   # cancel form
+            'input[name="dat_conference2"]',      # speculative for multi
             'input[name="dat_end"]',
             'input[name="date_end"]',
         ):
             loc = page.locator(sel).first
             if await loc.count():
-                await loc.fill(d2)
+                await _fill_input(loc, d2)
                 filled["date_end"] = d2
                 break
-        # 週期 — usually one numeric input.
+        # 週期 — cancel uses `week_count`; multi may use a different name.
         for sel in (
+            'input[name="week_count"]',
             'input[name="period"]',
             'input[name="week_period"]',
             'input[name="cycle"]',
         ):
             loc = page.locator(sel).first
             if await loc.count():
-                await loc.fill(str(args.period_weeks))
+                await _fill_input(loc, str(args.period_weeks))
                 filled["period_weeks"] = str(args.period_weeks)
                 break
 
-    # Start / end time. Try 4-dropdown layout (h/m × start/end) first; fall
-    # back to single text inputs.
+    # Start / end time. KWay's conference_mgr.jsp uses the names
+    # `time_start` (hour) + `time_start2` (minute) — confirmed by a
+    # form-inputs dump on 2026-05-15. Minute select only has options
+    # "00" / "30", so anything else gets rounded down to the nearest 30
+    # before submit (we leave that to the caller for now and just match
+    # an exact value).
     sh, sm = _to_hhmm_parts(args.time_start)
     eh, em = _to_hhmm_parts(args.time_end)
     for sel, val, key in (
-        ('select[name="time_start_h"]', sh, "time_start_h"),
-        ('select[name="time_start_m"]', sm, "time_start_m"),
-        ('select[name="time_end_h"]', eh, "time_end_h"),
-        ('select[name="time_end_m"]', em, "time_end_m"),
+        ('select[name="time_start"]',  sh, "time_start_h"),
+        ('select[name="time_start2"]', sm, "time_start_m"),
+        ('select[name="time_end"]',    eh, "time_end_h"),
+        ('select[name="time_end2"]',   em, "time_end_m"),
     ):
         loc = page.locator(sel).first
         if await loc.count():
@@ -332,7 +477,10 @@ async def _fill_form(page, op: str, args) -> dict[str, str]:
                 await loc.select_option(value=val)
                 filled[key] = val
             except Exception:
-                # Some option values are zero-padded, some aren't.
+                # Defensive: if the zero-padded value isn't there, try the
+                # unpadded form. The portal's dump showed padded values
+                # ("08", "09") so this should never trigger, but it costs
+                # nothing to keep as a safety net.
                 await loc.select_option(value=val.lstrip("0") or "0")
                 filled[key] = val.lstrip("0") or "0"
 
@@ -345,7 +493,7 @@ async def _fill_form(page, op: str, args) -> dict[str, str]:
         ):
             loc = page.locator(sel).first
             if await loc.count():
-                await loc.fill(args.subject)
+                await _fill_input(loc, args.subject)
                 filled["subject"] = args.subject
                 break
 

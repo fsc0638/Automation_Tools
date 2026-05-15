@@ -748,12 +748,25 @@ async fn delete_meeting(
     // local record, and a stranded portal booking can be cleaned up by
     // running the scraper's cancellation tab manually. We bias toward
     // "don't refuse the delete because automation flaked."
-    let booked: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT portal_booked_at FROM meetings WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
-    if let Some((Some(_),)) = booked {
+    // Fire portal cancel for two kinds of rows:
+    //   1. We booked it via the app (portal_booked_at IS NOT NULL)
+    //   2. We scraped it from the portal (external_id IS NOT NULL)
+    // Case 2 covers meetings the operator wants to clean up that we didn't
+    // originally create. The portal will refuse cancel attempts the
+    // service account isn't allowed to make — we treat that as a logged
+    // warning and proceed with the local delete anyway. Per user
+    // 2026-05-15: "(a) + best-effort 失敗就 log".
+    let portal_known: Option<(Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
+        "SELECT portal_booked_at, external_id FROM meetings WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let should_try_cancel = matches!(
+        portal_known,
+        Some((Some(_), _)) | Some((_, Some(_)))
+    );
+    if should_try_cancel {
         if let Err(e) = try_portal_cancel(&state, id).await {
             tracing::warn!("portal cancel failed for meeting {id}: {e:?}");
         }
