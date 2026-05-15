@@ -468,7 +468,7 @@ async fn list_meetings(
     // The visibility column is computed inline so we don't need a second
     // round-trip. Permission management is unchanged: this widens what's
     // listed, not who can see details.
-    let mut meetings: Vec<Meeting> = sqlx::query_as(
+    let meetings: Vec<Meeting> = sqlx::query_as(
         "SELECT m.*,
                 COALESCE(m.external_creator_name, u.display_name) AS creator_name,
                 CASE
@@ -505,22 +505,12 @@ async fn list_meetings(
     .fetch_all(&state.db)
     .await?;
 
-    // Post-process: blank the human-readable fields on busy rows so the
-    // serialized JSON doesn't leak details the caller shouldn't see. We
-    // keep room slot info (location stays NULL but start/end/status/
-    // is_locked etc. remain) — the UI surfaces this as a 「忙碌」 chip.
-    for m in &mut meetings {
-        if m.visibility.as_deref() == Some("busy") {
-            m.title = "(忙碌)".to_string();
-            m.notification_note = None;
-            m.description = None;
-            m.join_url = None;
-            m.external_event_url = None;
-            // location intentionally retained — the room is occupancy info.
-            // creator_name retained too — knowing WHO booked a room is OK
-            // (portal page already shows the booker's name to everyone).
-        }
-    }
+    // NO field blanking: per user 2026-05-15 — "非自己建立的會議應該
+    // 要可以看到". This is an internal company tool; colleagues trust
+    // each other and need to read content. The `visibility` flag stays
+    // (so the UI can mark "他人預約" rows differently for context),
+    // but title / location / etc. are returned as-is. Edit / delete
+    // gates are still enforced separately at PATCH / DELETE time.
 
     Ok(Json(meetings))
 }
@@ -2414,21 +2404,12 @@ async fn require_meeting_access(
         AccessLevel::Edit => Err(AppError::Forbidden(
             "Only the meeting creator can perform this action".into(),
         )),
-        AccessLevel::View => {
-            let is_attendee: Option<(Uuid,)> = sqlx::query_as(
-                "SELECT meeting_id FROM meeting_attendees
-                 WHERE meeting_id = $1 AND user_id = $2",
-            )
-            .bind(meeting_id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?;
-            if is_attendee.is_some() {
-                Ok(())
-            } else {
-                Err(AppError::NotFound("Meeting not found".into()))
-            }
-        }
+        // Per user 2026-05-15 — "非自己建立的會議應該要可以看到". Any
+        // authenticated user gets View on any meeting that exists. Edit
+        // / delete / reopen remain creator-locked (or wider for
+        // delete/reopen via project ACL). This is an internal-tool
+        // posture; revisit if external attendees ever come into scope.
+        AccessLevel::View => Ok(()),
     }
 }
 

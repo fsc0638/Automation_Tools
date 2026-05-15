@@ -208,33 +208,36 @@ export function MeetingSidebar({
             </div>
           ) : (
             upcoming.map((m) => {
-              const isBusy = m.visibility === "busy";
-              // Busy rows are occupancy hints only — backend already
-              // blanked title to "(忙碌)" and stripped notes / join_url.
-              // Visually grey them out and disable the detail link
-              // (clicking 404s anyway because the caller can't view).
-              const Card = isBusy ? "div" : Link;
-              const cardProps = isBusy
-                ? {}
-                : { href: `/meetings/${m.id}` };
+              // visibility='busy' marks "this isn't your meeting" but
+              // per 2026-05-15 brief — "非自己建立的會議應該要可以看到"
+              // — non-creator rows are still rendered with real title
+              // and remain clickable to the read-only detail page.
+              const isOther = m.visibility === "busy";
               return (
-                <Card
+                <Link
                   key={m.id}
-                  {...(cardProps as { href: string })}
+                  href={`/meetings/${m.id}`}
                   className={cn(
                     "block rounded-xl border px-3 py-3 transition",
-                    isBusy
-                      ? "border-dashed border-[#CBD5E1] bg-[#F8FAFC] cursor-default"
-                      : activeMeetingId === m.id
-                        ? "border-[#0050A0] bg-[#EFF6FF]"
+                    activeMeetingId === m.id
+                      ? "border-[#0050A0] bg-[#EFF6FF]"
+                      : isOther
+                        ? "border-[#E2E8F0] bg-[#F8FAFC] hover:border-[#CBD5E1]"
                         : "border-[#E2E8F0] bg-white hover:border-[#CBD5E1]"
                   )}
                 >
-                  <div className={cn(
-                    "text-[13px] font-semibold",
-                    isBusy ? "text-[#94A3B8] italic" : "text-[#1A1A2E]"
-                  )}>
-                    {isBusy ? "忙碌（他人預約）" : m.title}
+                  <div className="flex items-center gap-2">
+                    <div className={cn(
+                      "min-w-0 flex-1 truncate text-[13px] font-semibold",
+                      isOther ? "text-[#475569]" : "text-[#1A1A2E]"
+                    )}>
+                      {m.title}
+                    </div>
+                    {isOther && (
+                      <span className="shrink-0 rounded-md border border-[#E2E8F0] bg-white px-1.5 py-0.5 text-[10px] text-[#64748B]">
+                        檢視
+                      </span>
+                    )}
                   </div>
                   <div className="mt-1 text-[11px] text-[#94A3B8]">
                     {formatDateOnly(m.start_at)} · {formatTimeRange(m.start_at, m.end_at)}
@@ -242,10 +245,7 @@ export function MeetingSidebar({
                   {(m.location || m.creator_name) && (
                     <div className="mt-1.5 flex items-center justify-between gap-2">
                       {m.location ? (
-                        <span className={cn(
-                          "inline-block truncate rounded-md px-2 py-0.5 text-[11px]",
-                          isBusy ? "bg-[#E2E8F0] text-[#94A3B8]" : "bg-[#F1F5F9] text-[#475569]"
-                        )}>
+                        <span className="inline-block truncate rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] text-[#475569]">
                           {m.location.split(" / ")[0]}
                         </span>
                       ) : (
@@ -258,7 +258,7 @@ export function MeetingSidebar({
                       )}
                     </div>
                   )}
-                </Card>
+                </Link>
               );
             })
           )}
