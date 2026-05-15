@@ -68,6 +68,53 @@ pub struct Meeting {
     /// is still a draft.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub portal_book_error: Option<String>,
+
+    // ─── AgentK-aligned columns (migration 0032) — see
+    //     docs/agentk-fusion/fusion-plan.md §2.1 for the rationale.
+    //     Existing notification_note / external_id / portal_* coexist.
+    /// Long-form description of the meeting itself (distinct from
+    /// `notification_note`, which is the invitation message).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Independent lock flag. Defaults FALSE; flipped TRUE when status
+    /// moves to 'completed' or when an admin explicitly locks the
+    /// meeting. Reopen flow clears it.
+    #[serde(default)]
+    pub is_locked: bool,
+    /// Online meeting URL (Webex / Teams / Meet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_url: Option<String>,
+    /// Symbolic external provider (`webex` / `teams` / `meet` /
+    /// `kway-portal`). Distinct from the opaque `external_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_provider: Option<String>,
+    /// External system's event id (Webex/Teams return one; KWay portal
+    /// doesn't, the column is still reserved).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_event_id: Option<String>,
+    /// Clickable URL back to the external provider's event page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_event_url: Option<String>,
+    /// Generic sync status (`pending` / `synced` / `failed`). Coexists
+    /// with the KWay-specific `portal_booked_at` / `portal_book_error`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_status: Option<String>,
+    /// Last sync timestamp across any provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_synced_at: Option<DateTime<Utc>>,
+    /// Last user to mutate this row (audit; `updated_at` carries the
+    /// time, this carries the who).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by_user_id: Option<Uuid>,
+
+    /// AgentK-aligned busy masking flag: `"full"` when the caller is a
+    /// participant (creator or attendee) and sees all fields; `"busy"`
+    /// when this row is included only as an occupancy hint — fields like
+    /// title/location/notification_note/description/join_url are blanked
+    /// before serialization. Populated by `list_meetings` only.
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow, Clone)]
@@ -98,6 +145,21 @@ pub struct MeetingFile {
     pub duration_seconds: Option<i32>,
     pub transcript_meta: Option<String>,
     pub created_at: DateTime<Utc>,
+
+    // AgentK-aligned retention (migration 0034). NULL on active rows;
+    // populated when DELETE is called via the soft-delete path.
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soft_deleted_until: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hard_delete_after: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonValue>,
 }
 
 #[derive(Debug, Serialize, FromRow, Clone)]
@@ -111,6 +173,17 @@ pub struct MeetingNotes {
     pub transcript_excerpts: JsonValue,
     pub generated_by: String,
     pub created_at: DateTime<Utc>,
+
+    // AgentK-aligned record aggregate fields (migration 0033).
+    /// `[{title, description?, assignee_user_id?, source?}]`.
+    #[sqlx(default)]
+    pub action_items: JsonValue,
+    /// AI job IDs that produced this note (refs into `ai_jobs`).
+    #[sqlx(default)]
+    pub ai_job_ids: JsonValue,
+    /// `project_tasks` IDs synced from this note's action_items.
+    #[sqlx(default)]
+    pub task_ids: JsonValue,
 }
 
 #[derive(Debug, Serialize, FromRow, Clone)]
@@ -180,6 +253,19 @@ pub struct CreateMeetingRequest {
     pub project_id: Option<Uuid>,
     #[serde(default = "default_save_as_draft")]
     pub save_as_draft: bool,
+
+    // AgentK-aligned optional fields (migration 0032). All None by
+    // default so existing clients keep working without changes.
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub join_url: Option<String>,
+    #[serde(default)]
+    pub external_provider: Option<String>,
+    #[serde(default)]
+    pub external_event_id: Option<String>,
+    #[serde(default)]
+    pub external_event_url: Option<String>,
 }
 
 fn default_importance() -> String { "normal".into() }
@@ -201,6 +287,17 @@ pub struct UpdateMeetingRequest {
     pub status: Option<String>,
     pub attendee_emails: Option<Vec<String>>,
     pub project_id: Option<Uuid>,
+
+    // AgentK-aligned optional fields (migration 0032). All None = leave
+    // unchanged. is_locked is settable but reopen flow has its own
+    // endpoint with role guard — clients shouldn't normally write this
+    // directly through PATCH.
+    pub description: Option<String>,
+    pub join_url: Option<String>,
+    pub external_provider: Option<String>,
+    pub external_event_id: Option<String>,
+    pub external_event_url: Option<String>,
+    pub is_locked: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +356,10 @@ pub struct UpdateNotesRequest {
     pub risks: Option<JsonValue>,
     pub transcript_excerpts: Option<JsonValue>,
     pub edit_summary: Option<String>,
+    // AgentK-aligned record aggregate fields (migration 0033).
+    pub action_items: Option<JsonValue>,
+    pub ai_job_ids: Option<JsonValue>,
+    pub task_ids: Option<JsonValue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,6 +410,7 @@ pub fn routes() -> Router<AppState> {
             get(get_meeting).patch(update_meeting).delete(delete_meeting),
         )
         .route("/meetings/:id/send-invitations", post(send_invitations))
+        .route("/meetings/:id/reopen", post(reopen_meeting))
         .route(
             "/meetings/:id/attendees/:email/confirm",
             http_patch(confirm_attendance),
@@ -347,22 +449,40 @@ async fn list_meetings(
     // A user can see meetings they created OR are invited to. SQL uses
     // EXISTS instead of JOIN so the SELECT doesn't multiply rows when
     // the user is an attendee.
-    let meetings: Vec<Meeting> = sqlx::query_as(
-        // For portal-imported rows the actual booker (e.g. \"張淑芬\") lives
-        // in `external_creator_name`; `creator_id` is a fallback system
-        // user. Prefer the external name so the sidebar shows who booked
-        // the room. App-created meetings have no external name, so we
-        // fall through to the joined `users.display_name`.
+    // AgentK-aligned busy masking. We return three buckets of rows:
+    //   1. visibility='full' — caller is creator or attendee; sees all
+    //   2. visibility='busy' — portal-imported or project-accessible
+    //      meeting that the caller has no detail right to. Title /
+    //      location / notification_note / description / join_url get
+    //      blanked below before serialization, but start/end/room slot
+    //      remain so the caller can see "this slot is occupied".
+    //   3. omitted entirely — neither participant nor in shared scope.
+    //
+    // The visibility column is computed inline so we don't need a second
+    // round-trip. Permission management is unchanged: this widens what's
+    // listed, not who can see details.
+    let mut meetings: Vec<Meeting> = sqlx::query_as(
         "SELECT m.*,
-                COALESCE(m.external_creator_name, u.display_name) AS creator_name
+                COALESCE(m.external_creator_name, u.display_name) AS creator_name,
+                CASE
+                    WHEN m.creator_id = $1
+                         OR EXISTS (SELECT 1 FROM meeting_attendees ma
+                                    WHERE ma.meeting_id = m.id AND ma.user_id = $1)
+                    THEN 'full'
+                    ELSE 'busy'
+                END AS visibility
          FROM meetings m
          LEFT JOIN users u ON u.id = m.creator_id
          WHERE (
+             -- Full-visibility scope
              m.creator_id = $1
-             OR EXISTS (
-                 SELECT 1 FROM meeting_attendees ma
-                 WHERE ma.meeting_id = m.id AND ma.user_id = $1
-             )
+             OR EXISTS (SELECT 1 FROM meeting_attendees ma
+                        WHERE ma.meeting_id = m.id AND ma.user_id = $1)
+             -- Busy-masked scope: portal scraped rows (org-wide occupancy)
+             OR m.external_id IS NOT NULL
+             -- Busy-masked scope: meetings inside a project the user can read
+             OR (m.project_id IS NOT NULL
+                 AND user_can_access_project(m.project_id, $1, 'viewer'))
          )
          AND ($2::uuid IS NULL OR m.project_id = $2)
          AND ($3::text IS NULL OR m.status = $3)
@@ -377,6 +497,24 @@ async fn list_meetings(
     .bind(q.to)
     .fetch_all(&state.db)
     .await?;
+
+    // Post-process: blank the human-readable fields on busy rows so the
+    // serialized JSON doesn't leak details the caller shouldn't see. We
+    // keep room slot info (location stays NULL but start/end/status/
+    // is_locked etc. remain) — the UI surfaces this as a 「忙碌」 chip.
+    for m in &mut meetings {
+        if m.visibility.as_deref() == Some("busy") {
+            m.title = "(忙碌)".to_string();
+            m.notification_note = None;
+            m.description = None;
+            m.join_url = None;
+            m.external_event_url = None;
+            // location intentionally retained — the room is occupancy info.
+            // creator_name retained too — knowing WHO booked a room is OK
+            // (portal page already shows the booker's name to everyone).
+        }
+    }
+
     Ok(Json(meetings))
 }
 
@@ -416,8 +554,11 @@ async fn create_meeting(
     let meeting: Meeting = sqlx::query_as(
         "INSERT INTO meetings (creator_id, organization_id, project_id, title,
             importance, start_at, end_at, all_day, recurrence, timezone,
-            location, notification_note, status, invitations_sent_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *",
+            location, notification_note, status, invitations_sent_at,
+            description, join_url, external_provider, external_event_id,
+            external_event_url, updated_by_user_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                 $15,$16,$17,$18,$19,$20) RETURNING *",
     )
     .bind(auth_user.id)
     .bind(organization_id)
@@ -433,6 +574,12 @@ async fn create_meeting(
     .bind(req.notification_note.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .bind(status)
     .bind(invitations_sent_at)
+    .bind(req.description.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(req.join_url.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(req.external_provider.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(req.external_event_id.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(req.external_event_url.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(auth_user.id)
     .fetch_one(&state.db)
     .await?;
 
@@ -631,20 +778,36 @@ async fn update_meeting(
         }
     }
 
+    // AgentK-aligned auto-lock: if the caller is moving status into
+    // 'completed' WITHOUT also clearing is_locked explicitly, lock the
+    // meeting. This keeps "ended" defaults sensible (ended ⇒ locked) and
+    // doesn't override an explicit reopen-then-mark-complete request.
+    let computed_is_locked: Option<bool> = match (req.status.as_deref(), req.is_locked) {
+        (Some("completed"), None) => Some(true),
+        (_, explicit) => explicit,
+    };
+
     sqlx::query(
         "UPDATE meetings SET
-            title             = COALESCE($1, title),
-            importance        = COALESCE($2, importance),
-            start_at          = COALESCE($3, start_at),
-            end_at            = COALESCE($4, end_at),
-            all_day           = COALESCE($5, all_day),
-            recurrence        = COALESCE($6, recurrence),
-            timezone          = COALESCE($7, timezone),
-            location          = COALESCE($8, location),
-            notification_note = COALESCE($9, notification_note),
-            status            = COALESCE($10, status),
-            project_id        = COALESCE($11, project_id),
-            updated_at        = NOW()
+            title              = COALESCE($1, title),
+            importance         = COALESCE($2, importance),
+            start_at           = COALESCE($3, start_at),
+            end_at             = COALESCE($4, end_at),
+            all_day            = COALESCE($5, all_day),
+            recurrence         = COALESCE($6, recurrence),
+            timezone           = COALESCE($7, timezone),
+            location           = COALESCE($8, location),
+            notification_note  = COALESCE($9, notification_note),
+            status             = COALESCE($10, status),
+            project_id         = COALESCE($11, project_id),
+            description        = COALESCE($13, description),
+            join_url           = COALESCE($14, join_url),
+            external_provider  = COALESCE($15, external_provider),
+            external_event_id  = COALESCE($16, external_event_id),
+            external_event_url = COALESCE($17, external_event_url),
+            is_locked          = COALESCE($18, is_locked),
+            updated_by_user_id = $19,
+            updated_at         = NOW()
          WHERE id = $12",
     )
     .bind(req.title.as_deref().map(str::trim))
@@ -659,6 +822,13 @@ async fn update_meeting(
     .bind(req.status.as_deref())
     .bind(req.project_id)
     .bind(id)
+    .bind(req.description.as_deref())
+    .bind(req.join_url.as_deref())
+    .bind(req.external_provider.as_deref())
+    .bind(req.external_event_id.as_deref())
+    .bind(req.external_event_url.as_deref())
+    .bind(computed_is_locked)
+    .bind(auth_user.id)
     .execute(&state.db)
     .await?;
 
@@ -866,6 +1036,69 @@ async fn send_invitations(
     Ok(Json(detail))
 }
 
+/// POST /meetings/:id/reopen
+///
+/// Clears `is_locked` so a previously-completed meeting can be edited
+/// again. Per docs/agentk-fusion/fusion-plan.md §3.1 — this is the only
+/// blessed way out of the auto-lock that fires on status='completed'.
+/// Authority matches `delete_meeting`: the meeting creator OR a project-
+/// level owner/admin (Kway Dev role names). Workspace-wide reopen by
+/// other admins is not modelled yet because the project ACL is the
+/// closest analog to AgentK's workspace.admin we have today.
+async fn reopen_meeting(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<MeetingDetail>> {
+    let row: Option<(Uuid, Option<Uuid>, bool)> = sqlx::query_as(
+        "SELECT creator_id, project_id, is_locked FROM meetings WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (creator_id, project_id, is_locked) =
+        row.ok_or_else(|| AppError::NotFound("Meeting not found".into()))?;
+
+    if !is_locked {
+        // Idempotent — already unlocked just returns current detail.
+        let detail = load_detail(&state, id, auth_user.id).await?;
+        return Ok(Json(detail));
+    }
+
+    let allowed = if creator_id == auth_user.id {
+        true
+    } else if let Some(pid) = project_id {
+        sqlx::query_scalar::<_, bool>("SELECT user_can_access_project($1, $2, 'admin')")
+            .bind(pid)
+            .bind(auth_user.id)
+            .fetch_one(&state.db)
+            .await?
+    } else {
+        false
+    };
+    if !allowed {
+        return Err(AppError::Forbidden(
+            "Only the meeting creator or a project admin/owner can reopen this meeting".into(),
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE meetings SET
+            is_locked          = FALSE,
+            updated_by_user_id = $2,
+            updated_at         = NOW()
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(auth_user.id)
+    .execute(&state.db)
+    .await?;
+
+    tracing::info!("meeting {} reopened by user {}", id, auth_user.id);
+    let detail = load_detail(&state, id, auth_user.id).await?;
+    Ok(Json(detail))
+}
+
 async fn confirm_attendance(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -1034,11 +1267,21 @@ async fn delete_file(
     if file.uploader_id != auth_user.id && creator_id != Some(auth_user.id) {
         return Err(AppError::Forbidden("Only the uploader or meeting owner can delete this file".into()));
     }
-    sqlx::query("DELETE FROM meeting_files WHERE id = $1")
-        .bind(file_id)
-        .execute(&state.db)
-        .await?;
-    let _ = fs::remove_file(&file.storage_path);
+    // AgentK-aligned soft delete (migration 0034): instead of removing
+    // the row + on-disk file immediately, stamp the retention timestamps
+    // and let the background sweep worker do the real cleanup. Users get
+    // a 30-day grace period to recover; the file is physically erased
+    // 60 days after `deleted_at`.
+    sqlx::query(
+        "UPDATE meeting_files SET
+            deleted_at         = NOW(),
+            soft_deleted_until = NOW() + INTERVAL '30 days',
+            hard_delete_after  = NOW() + INTERVAL '60 days'
+         WHERE id = $1",
+    )
+    .bind(file_id)
+    .execute(&state.db)
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1076,11 +1319,25 @@ async fn update_notes(
         .transcript_excerpts
         .or_else(|| prev.as_ref().map(|n| n.transcript_excerpts.clone()))
         .unwrap_or_else(|| serde_json::json!([]));
+    // AgentK-aligned: action_items / ai_job_ids / task_ids carry forward
+    // from prev unless the caller explicitly sends a new value.
+    let action_items = req
+        .action_items
+        .or_else(|| prev.as_ref().map(|n| n.action_items.clone()))
+        .unwrap_or_else(|| serde_json::json!([]));
+    let ai_job_ids = req
+        .ai_job_ids
+        .or_else(|| prev.as_ref().map(|n| n.ai_job_ids.clone()))
+        .unwrap_or_else(|| serde_json::json!([]));
+    let task_ids = req
+        .task_ids
+        .or_else(|| prev.as_ref().map(|n| n.task_ids.clone()))
+        .unwrap_or_else(|| serde_json::json!([]));
 
     let inserted: MeetingNotes = sqlx::query_as(
         "INSERT INTO meeting_notes (meeting_id, version, summary, decisions, risks,
-            transcript_excerpts, generated_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+            transcript_excerpts, generated_by, action_items, ai_job_ids, task_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
     )
     .bind(id)
     .bind(next_version)
@@ -1089,6 +1346,9 @@ async fn update_notes(
     .bind(&risks)
     .bind(&excerpts)
     .bind(auth_user.id.to_string())
+    .bind(&action_items)
+    .bind(&ai_job_ids)
+    .bind(&task_ids)
     .fetch_one(&state.db)
     .await?;
 
@@ -1858,7 +2118,11 @@ async fn load_detail(
     .fetch_all(&state.db)
     .await?;
     let files: Vec<MeetingFile> = sqlx::query_as(
-        "SELECT * FROM meeting_files WHERE meeting_id = $1
+        // AgentK-aligned: hide soft-deleted files from the default list.
+        // Recovery is a separate (future) endpoint that explicitly asks
+        // for `deleted_at IS NOT NULL AND hard_delete_after > NOW()`.
+        "SELECT * FROM meeting_files
+         WHERE meeting_id = $1 AND deleted_at IS NULL
          ORDER BY created_at DESC",
     )
     .bind(meeting_id)

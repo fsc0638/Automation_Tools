@@ -1,7 +1,7 @@
 "use client";
 import { use, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { ArrowLeft, Lock, LockOpen, Trash2 } from "lucide-react";
 import { MeetingSidebar } from "@/components/meetings/MeetingSidebar";
 import { RecordingPanel } from "@/components/meetings/RecordingPanel";
 import { FileWorkspace } from "@/components/meetings/FileWorkspace";
@@ -97,6 +97,23 @@ export default function MeetingViewPage({
     setTab("record");
   }
 
+  async function handleReopen() {
+    // Reopen is the only blessed way out of is_locked=TRUE; backend
+    // gates by role (creator / project admin/owner). Surface the 403
+    // as a friendly message instead of the generic API error.
+    try {
+      await meetingsApi.reopen(id);
+      await refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "重新開啟失敗";
+      setError(
+        /forbidden|403/i.test(msg)
+          ? "您沒有重新開啟此會議的權限（僅會議建立者或所屬專案的 Owner / Admin 可開啟）"
+          : msg
+      );
+    }
+  }
+
   const uploaderNames = new Map<string, string>();
   for (const a of detail.attendees) {
     if (a.user_id) uploaderNames.set(a.user_id, a.display_name || a.email);
@@ -118,13 +135,31 @@ export default function MeetingViewPage({
               <ArrowLeft size={16} />
             </button>
             <div>
-              <h1 className="text-[20px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
+              <h1 className="flex items-center gap-2 text-[20px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
                 {t("meetings.viewTitle")}
+                {detail.is_locked && (
+                  <span
+                    title="會議已鎖定（completed 自動上鎖）"
+                    className="inline-flex items-center gap-1 rounded-md border border-[#FDE68A] bg-[#FEF3C7] px-2 py-0.5 text-[11px] font-medium text-[#92400E]"
+                  >
+                    <Lock size={12} /> 已鎖定
+                  </span>
+                )}
               </h1>
               <p className="mt-1 text-[12px] text-[#94A3B8]">{t("meetings.viewDesc")}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {detail.is_locked && (
+              <button
+                type="button"
+                onClick={() => void handleReopen()}
+                title="重新開啟（清除鎖定）"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#FDE68A] bg-[#FEF3C7] px-3 py-2 text-[13px] font-medium text-[#92400E] transition hover:bg-[#FDE68A]"
+              >
+                <LockOpen size={14} /> 重新開啟
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handleDelete()}

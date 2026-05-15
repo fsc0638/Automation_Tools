@@ -354,6 +354,27 @@ export interface Meeting {
   /** Last portal-side failure (cleared on success). Surfaced as a red
    *  banner on the detail page so the operator can retry. */
   portal_book_error?: string;
+
+  // AgentK-aligned optional fields (migration 0032).
+  /** Long-form description; distinct from notification_note. */
+  description?: string;
+  /** Independent lock flag. True ⇒ no further edits; reopen clears. */
+  is_locked?: boolean;
+  /** Online meeting URL (Webex / Teams / Meet). */
+  join_url?: string;
+  /** Symbolic provider (`webex` / `teams` / `meet` / `kway-portal`). */
+  external_provider?: string;
+  external_event_id?: string;
+  external_event_url?: string;
+  sync_status?: string;
+  last_synced_at?: string;
+  updated_by_user_id?: string;
+  /** AgentK-aligned busy masking. `"full"` = caller is a participant
+   *  (creator / attendee) and sees all fields; `"busy"` = caller can
+   *  only see this row as occupancy — title is `"(忙碌)"` and
+   *  notification_note / description / join_url are blanked. Absent on
+   *  detail responses. */
+  visibility?: "full" | "busy";
   created_at: string;
   updated_at: string;
 }
@@ -384,6 +405,20 @@ export interface MeetingFile {
   duration_seconds: number | null;
   transcript_meta: string | null;
   created_at: string;
+  // AgentK-aligned soft-delete retention (migration 0034). Present only
+  // on soft-deleted files. Default file-list endpoint hides those, so
+  // these fields are mostly relevant for a future recovery view.
+  deleted_at?: string;
+  soft_deleted_until?: string;
+  hard_delete_after?: string;
+  metadata?: unknown;
+}
+
+export interface MeetingActionItem {
+  title: string;
+  description?: string;
+  assignee_user_id?: string;
+  source?: string;
 }
 
 export interface MeetingNotes {
@@ -396,6 +431,10 @@ export interface MeetingNotes {
   transcript_excerpts: Array<{ speaker: string; time: string; content: string }>;
   generated_by: string;
   created_at: string;
+  // AgentK-aligned record aggregate fields (migration 0033).
+  action_items: MeetingActionItem[];
+  ai_job_ids: string[];
+  task_ids: string[];
 }
 
 export interface MeetingTaskImpact {
@@ -458,6 +497,13 @@ export interface CreateMeetingInput {
   attendee_emails?: string[];
   project_id?: string | null;
   save_as_draft?: boolean;
+  // AgentK-aligned optional fields. All omittable — backend tolerates
+  // missing keys.
+  description?: string | null;
+  join_url?: string | null;
+  external_provider?: string | null;
+  external_event_id?: string | null;
+  external_event_url?: string | null;
 }
 
 export interface UpdateMeetingInput {
@@ -473,6 +519,14 @@ export interface UpdateMeetingInput {
   status?: MeetingStatus;
   attendee_emails?: string[];
   project_id?: string | null;
+  // AgentK-aligned. is_locked is settable but reopen flow should
+  // normally go through its dedicated endpoint (role-guarded).
+  description?: string | null;
+  join_url?: string | null;
+  external_provider?: string | null;
+  external_event_id?: string | null;
+  external_event_url?: string | null;
+  is_locked?: boolean;
 }
 
 export interface MeetingSyncReport {
@@ -511,6 +565,8 @@ export const meetings = {
   delete: (id: string) => request<void>(`/meetings/${id}`, { method: "DELETE" }),
   sendInvitations: (id: string) =>
     request<MeetingDetail>(`/meetings/${id}/send-invitations`, { method: "POST" }),
+  reopen: (id: string) =>
+    request<MeetingDetail>(`/meetings/${id}/reopen`, { method: "POST" }),
   calendar: (year: number, month: number) =>
     request<MeetingCalendarDay[]>(`/meetings/calendar?year=${year}&month=${month}`),
   availableSlots: (date: string, durationMins: number, emails: string[] = []) => {
@@ -556,7 +612,9 @@ export const meetings = {
     request<MeetingNotes>(`/meetings/${id}/notes/generate`, { method: "POST" }),
   updateNotes: (
     id: string,
-    body: Partial<Pick<MeetingNotes, "summary" | "decisions" | "risks" | "transcript_excerpts">> & {
+    body: Partial<Pick<MeetingNotes,
+      "summary" | "decisions" | "risks" | "transcript_excerpts" |
+      "action_items" | "ai_job_ids" | "task_ids">> & {
       edit_summary?: string;
     }
   ) => request<MeetingNotes>(`/meetings/${id}/notes`, { method: "PATCH", body: JSON.stringify(body) }),

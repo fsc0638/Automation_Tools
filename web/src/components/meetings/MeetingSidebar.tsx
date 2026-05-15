@@ -207,39 +207,60 @@ export function MeetingSidebar({
               {t("meetings.list.empty")}
             </div>
           ) : (
-            upcoming.map((m) => (
-              <Link
-                key={m.id}
-                href={`/meetings/${m.id}`}
-                className={cn(
-                  "block rounded-xl border px-3 py-3 transition",
-                  activeMeetingId === m.id
-                    ? "border-[#0050A0] bg-[#EFF6FF]"
-                    : "border-[#E2E8F0] bg-white hover:border-[#CBD5E1]"
-                )}
-              >
-                <div className="text-[13px] font-semibold text-[#1A1A2E]">{m.title}</div>
-                <div className="mt-1 text-[11px] text-[#94A3B8]">
-                  {formatDateOnly(m.start_at)} · {formatTimeRange(m.start_at, m.end_at)}
-                </div>
-                {(m.location || m.creator_name) && (
-                  <div className="mt-1.5 flex items-center justify-between gap-2">
-                    {m.location ? (
-                      <span className="inline-block truncate rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] text-[#475569]">
-                        {m.location.split(" / ")[0]}
-                      </span>
-                    ) : (
-                      <span />
-                    )}
-                    {m.creator_name && (
-                      <span className="shrink-0 text-[11px] text-[#94A3B8]">
-                        {m.creator_name}
-                      </span>
-                    )}
+            upcoming.map((m) => {
+              const isBusy = m.visibility === "busy";
+              // Busy rows are occupancy hints only — backend already
+              // blanked title to "(忙碌)" and stripped notes / join_url.
+              // Visually grey them out and disable the detail link
+              // (clicking 404s anyway because the caller can't view).
+              const Card = isBusy ? "div" : Link;
+              const cardProps = isBusy
+                ? {}
+                : { href: `/meetings/${m.id}` };
+              return (
+                <Card
+                  key={m.id}
+                  {...(cardProps as { href: string })}
+                  className={cn(
+                    "block rounded-xl border px-3 py-3 transition",
+                    isBusy
+                      ? "border-dashed border-[#CBD5E1] bg-[#F8FAFC] cursor-default"
+                      : activeMeetingId === m.id
+                        ? "border-[#0050A0] bg-[#EFF6FF]"
+                        : "border-[#E2E8F0] bg-white hover:border-[#CBD5E1]"
+                  )}
+                >
+                  <div className={cn(
+                    "text-[13px] font-semibold",
+                    isBusy ? "text-[#94A3B8] italic" : "text-[#1A1A2E]"
+                  )}>
+                    {isBusy ? "忙碌（他人預約）" : m.title}
                   </div>
-                )}
-              </Link>
-            ))
+                  <div className="mt-1 text-[11px] text-[#94A3B8]">
+                    {formatDateOnly(m.start_at)} · {formatTimeRange(m.start_at, m.end_at)}
+                  </div>
+                  {(m.location || m.creator_name) && (
+                    <div className="mt-1.5 flex items-center justify-between gap-2">
+                      {m.location ? (
+                        <span className={cn(
+                          "inline-block truncate rounded-md px-2 py-0.5 text-[11px]",
+                          isBusy ? "bg-[#E2E8F0] text-[#94A3B8]" : "bg-[#F1F5F9] text-[#475569]"
+                        )}>
+                          {m.location.split(" / ")[0]}
+                        </span>
+                      ) : (
+                        <span />
+                      )}
+                      {m.creator_name && (
+                        <span className="shrink-0 text-[11px] text-[#94A3B8]">
+                          {m.creator_name}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </Card>
+              );
+            })
           )}
         </div>
       </div>

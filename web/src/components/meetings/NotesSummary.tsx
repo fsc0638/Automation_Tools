@@ -87,6 +87,47 @@ export function NotesSummary({
         </section>
       )}
 
+      {/* AgentK-aligned action items (migration 0033). Visually mirrors
+       *  decisions/risks so the demo lines up with AgentK.pen's records
+       *  layout. The "同步成任務" sync-to-tasks endpoint is deferred —
+       *  this panel is read-only for now and just renders whatever the
+       *  notes carry. */}
+      {notes.action_items && notes.action_items.length > 0 && (
+        <section className="mt-5">
+          <div className="text-[13px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
+            待辦事項（Action Items）
+          </div>
+          <div className="mt-2 space-y-2">
+            {notes.action_items.map((item, i) => (
+              <div key={i} className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3">
+                <div className="flex items-start gap-2 text-[13px] text-[#1A1A2E]">
+                  <span className="mt-0.5 text-[#0050A0]">▸</span>
+                  <div className="flex-1">
+                    <div className="font-medium">{item.title}</div>
+                    {item.description && (
+                      <div className="mt-0.5 text-[12px] leading-5 text-[#475569]">
+                        {item.description}
+                      </div>
+                    )}
+                    {(item.assignee_user_id || item.source) && (
+                      <div className="mt-1 flex gap-2 text-[11px] text-[#94A3B8]">
+                        {item.assignee_user_id && <span>負責人 #{item.assignee_user_id.slice(0, 8)}</span>}
+                        {item.source && <span>來源：{item.source}</span>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          {notes.task_ids && notes.task_ids.length > 0 && (
+            <div className="mt-2 text-[11px] text-[#64748B]">
+              已同步為 {notes.task_ids.length} 筆任務
+            </div>
+          )}
+        </section>
+      )}
+
       {notes.transcript_excerpts.length > 0 && (
         <section className="mt-5">
           <div className="text-[13px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
