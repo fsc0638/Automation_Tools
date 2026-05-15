@@ -15,6 +15,7 @@ import {
   meetings as meetingsApi,
   type MeetingDetail,
 } from "@/lib/api";
+import { useAuthStore } from "@/lib/store";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { formatDateOnly, formatTimeRange } from "@/components/meetings/meeting-utils";
@@ -86,6 +87,15 @@ export default function MeetingViewPage({
   }
 
   const isDraft = detail.status === "draft";
+  // Edit/delete/reopen authority mirrors the backend gate: only the
+  // creator (Kway Dev admin role per meeting) gets the action buttons.
+  // Project owner/admin can still call DELETE/reopen via the API but
+  // we don't surface them in the UI for the non-creator case — that
+  // matches the user's brief: "非自己建立的會議應該要可以看到，但
+  // 不可以異動以及刪除".
+  const currentUser = useAuthStore((s) => s.user);
+  const isCreator =
+    !!currentUser && currentUser.id === detail.creator_id;
 
   async function handleCompleteReady() {
     try {
@@ -173,7 +183,12 @@ export default function MeetingViewPage({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {detail.is_locked && (
+            {!isCreator && (
+              <span className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 text-[11px] text-[#64748B]">
+                檢視模式（非建立者）
+              </span>
+            )}
+            {isCreator && detail.is_locked && (
               <button
                 type="button"
                 onClick={() => void handleReopen()}
@@ -183,29 +198,35 @@ export default function MeetingViewPage({
                 <LockOpen size={14} /> 重新開啟
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => void handleDelete()}
-              title="刪除會議"
-              aria-label="刪除會議"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#FCA5A5] bg-white text-[#C8102E] transition hover:bg-[#FEE2E2]"
-            >
-              <Trash2 size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push(`/meetings/new?clone=${id}`)}
-              className="rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2 text-[13px] font-medium text-[#1A1A2E] hover:bg-[#F8FAFC]"
-            >
-              {isDraft ? t("meetings.action.editInfo") : t("meetings.action.exportRecord")}
-            </button>
-            <button
-              type="button"
-              onClick={() => void (isDraft ? handleCompleteReady() : handleGenerate())}
-              className="rounded-xl bg-[#1A1A2E] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#243149]"
-            >
-              {isDraft ? t("meetings.action.completeReady") : t("meetings.action.shareRecord")}
-            </button>
+            {isCreator && (
+              <button
+                type="button"
+                onClick={() => void handleDelete()}
+                title="刪除會議"
+                aria-label="刪除會議"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#FCA5A5] bg-white text-[#C8102E] transition hover:bg-[#FEE2E2]"
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
+            {isCreator && (
+              <button
+                type="button"
+                onClick={() => router.push(`/meetings/${id}/edit`)}
+                className="rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2 text-[13px] font-medium text-[#1A1A2E] hover:bg-[#F8FAFC]"
+              >
+                編輯會議
+              </button>
+            )}
+            {isCreator && (
+              <button
+                type="button"
+                onClick={() => void (isDraft ? handleCompleteReady() : handleGenerate())}
+                className="rounded-xl bg-[#1A1A2E] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#243149]"
+              >
+                {isDraft ? t("meetings.action.completeReady") : t("meetings.action.shareRecord")}
+              </button>
+            )}
           </div>
         </header>
 

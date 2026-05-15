@@ -94,6 +94,26 @@ export default function NewMeetingPage() {
   const [slots, setSlots] = useState<MeetingTimeSlot[]>([]);
   const [selectedSlotStart, setSelectedSlotStart] = useState<string | null>(null);
 
+  // Available projects for the linkage dropdown. Empty array until the
+  // first fetch resolves. Without this list the user could only link a
+  // meeting via `?project_id=...` in the URL, which made the "同步成任務"
+  // button on the detail page always say "未連結至專案".
+  const [allProjects, setAllProjects] = useState<Array<{ id: string; name: string }>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await projectsApi.list();
+        if (!cancelled) setAllProjects(list.map((p) => ({ id: p.id, name: p.name })));
+      } catch {
+        if (!cancelled) setAllProjects([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Hydrate linked project name when we arrived from a project page.
   useEffect(() => {
     if (!projectId) {
@@ -390,11 +410,29 @@ export default function NewMeetingPage() {
         <div className="flex min-h-0 flex-1 gap-5 overflow-auto p-6">
           {/* Main form */}
           <section className="flex-1 space-y-5">
-            {projectId && projectName && (
-              <div className="rounded-lg bg-[#EFF6FF] px-3 py-2 text-[13px] text-[#0050A0]">
-                {t("meetings.linkedProject")} <strong>{projectName}</strong>
-              </div>
-            )}
+            <div className="rounded-2xl border border-[#E2E8F0] bg-white p-3">
+              <label className="block text-[12px] font-medium text-[#475569]">
+                連結專案（選填，連結後 action items 才能同步成任務）
+              </label>
+              <select
+                value={projectId ?? ""}
+                onChange={(e) => setProjectId(e.target.value || null)}
+                className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-[14px] focus:border-[#0050A0] focus:outline-none"
+              >
+                <option value="">— 不連結專案 —</option>
+                {allProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              {projectId && projectName && (
+                <div className="mt-1 text-[11px] text-[#0050A0]">
+                  ● 已連結 <strong>{projectName}</strong>
+                </div>
+              )}
+            </div>
+
 
             <div className="rounded-2xl border border-[#E2E8F0] bg-white p-5">
               <div className="mb-1 text-[16px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
