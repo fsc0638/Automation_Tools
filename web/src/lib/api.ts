@@ -420,6 +420,29 @@ export interface SyncTasksResult {
   skipped_existing_titles: string[];
 }
 
+export interface ProjectMeetingActionItem {
+  title: string;
+  description?: string;
+  assignee_name?: string;
+  /** Present when the action item title matched a project_task. */
+  task_id?: string;
+  /** Live status of that task: todo / in_progress / done / ... */
+  task_status?: string;
+}
+
+export interface ProjectMeetingHistoryItem {
+  meeting_id: string;
+  title: string;
+  start_at: string;
+  end_at: string;
+  status: MeetingStatus;
+  is_locked: boolean;
+  creator_name?: string;
+  summary?: string;
+  decisions: Array<{ text: string; resolved?: boolean }>;
+  action_items: ProjectMeetingActionItem[];
+}
+
 export interface MeetingActionItem {
   title: string;
   description?: string;
@@ -622,6 +645,8 @@ export const meetings = {
     request<MeetingNotes>(`/meetings/${id}/notes/generate`, { method: "POST" }),
   syncNotesToTasks: (id: string) =>
     request<SyncTasksResult>(`/meetings/${id}/notes/sync-tasks`, { method: "POST" }),
+  projectMeetingHistory: (projectId: string) =>
+    request<ProjectMeetingHistoryItem[]>(`/projects/${projectId}/meeting-history`),
   updateNotes: (
     id: string,
     body: Partial<Pick<MeetingNotes,

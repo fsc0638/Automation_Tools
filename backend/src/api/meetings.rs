@@ -409,6 +409,7 @@ pub fn routes() -> Router<AppState> {
         .route("/meetings", get(list_meetings).post(create_meeting))
         .route("/meetings/sync", post(sync_from_portal))
         .route("/meetings/calendar", get(calendar_view))
+        .route("/projects/:project_id/meeting-history", get(project_meeting_history))
         .route("/meetings/available-slots", get(find_available_slots))
         .route("/meetings/rooms/available", get(rooms_available))
         .route(
@@ -513,6 +514,268 @@ async fn list_meetings(
     // gates are still enforced separately at PATCH / DELETE time.
 
     Ok(Json(meetings))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Project meeting history (continuity timeline)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ProjectMeetingActionItem {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_name: Option<String>,
+    /// Live task linkage — present when an action item title casefold-
+    /// matches a project_task on the same project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectMeetingHistoryItem {
+    pub meeting_id: Uuid,
+    pub title: String,
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+    pub status: String,
+    pub is_locked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub decisions: JsonValue,
+    pub action_items: Vec<ProjectMeetingActionItem>,
+}
+
+/// GET /projects/:project_id/meeting-history
+///
+/// The continuity backbone: every meeting linked to this project,
+/// newest first, each carrying its latest note's summary / decisions /
+/// action items — and for every action item, the *live* status of the
+/// project_task it became (matched casefold by title). This is what
+/// makes a meeting "know the project's whole history" rather than being
+/// an isolated event. Powers the detail-page condensed panel (last N)
+/// and the project page's full 會議 tab.
+async fn project_meeting_history(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+) -> AppResult<Json<Vec<ProjectMeetingHistoryItem>>> {
+    // Viewer-level project ACL gate — consistent with the rest of the
+    // project-scoped surface.
+    let can_view: bool = sqlx::query_scalar(
+        "SELECT user_can_access_project($1, $2, 'viewer')",
+    )
+    .bind(project_id)
+    .bind(auth_user.id)
+    .fetch_one(&state.db)
+    .await?;
+    if !can_view {
+        return Err(AppError::Forbidden(
+            "You do not have access to this project".into(),
+        ));
+    }
+
+    // Build a casefold(title) → (task_id, status) map for the whole
+    // project once, so per-action-item resolution is O(1) in memory
+    // instead of a query per item.
+    let task_rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, title, status FROM project_tasks WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut task_by_title: std::collections::HashMap<String, (Uuid, String)> =
+        std::collections::HashMap::new();
+    for (tid, title, status) in task_rows {
+        // First write wins; project task titles are effectively unique
+        // for our purposes (sync dedups them).
+        task_by_title
+            .entry(title.trim().to_lowercase())
+            .or_insert((tid, status));
+    }
+
+    // All meetings on the project, newest first. Cap at 100 so a very
+    // old project doesn't return an unbounded payload.
+    let meetings: Vec<(Uuid, String, DateTime<Utc>, DateTime<Utc>, String, bool, Option<String>)> =
+        sqlx::query_as(
+            "SELECT m.id, m.title, m.start_at, m.end_at, m.status, m.is_locked,
+                    COALESCE(m.external_creator_name, u.display_name)
+             FROM meetings m
+             LEFT JOIN users u ON u.id = m.creator_id
+             WHERE m.project_id = $1
+             ORDER BY m.start_at DESC
+             LIMIT 100",
+        )
+        .bind(project_id)
+        .fetch_all(&state.db)
+        .await?;
+
+    #[derive(serde::Deserialize, Default)]
+    struct RawActionItem {
+        title: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        assignee_name: Option<String>,
+    }
+
+    let mut out: Vec<ProjectMeetingHistoryItem> = Vec::with_capacity(meetings.len());
+    for (mid, title, start_at, end_at, status, is_locked, creator_name) in meetings {
+        // Latest note version for this meeting (if any).
+        let note: Option<(Option<String>, JsonValue, JsonValue)> = sqlx::query_as(
+            "SELECT summary, decisions, action_items
+             FROM meeting_notes WHERE meeting_id = $1
+             ORDER BY version DESC LIMIT 1",
+        )
+        .bind(mid)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let (summary, decisions, action_items) = match note {
+            Some((s, d, a)) => {
+                let raw: Vec<RawActionItem> =
+                    serde_json::from_value(a).unwrap_or_default();
+                let items = raw
+                    .into_iter()
+                    .filter(|r| !r.title.trim().is_empty())
+                    .map(|r| {
+                        let key = r.title.trim().to_lowercase();
+                        let (task_id, task_status) = match task_by_title.get(&key) {
+                            Some((tid, st)) => (Some(*tid), Some(st.clone())),
+                            None => (None, None),
+                        };
+                        ProjectMeetingActionItem {
+                            title: r.title,
+                            description: r.description,
+                            assignee_name: r.assignee_name,
+                            task_id,
+                            task_status,
+                        }
+                    })
+                    .collect();
+                (s, d, items)
+            }
+            None => (None, serde_json::json!([]), Vec::new()),
+        };
+
+        out.push(ProjectMeetingHistoryItem {
+            meeting_id: mid,
+            title,
+            start_at,
+            end_at,
+            status,
+            is_locked,
+            creator_name,
+            summary,
+            decisions,
+            action_items,
+        });
+    }
+
+    Ok(Json(out))
+}
+
+/// Build the "本專案會議脈絡" preamble for the AI minutes prompt. Returns
+/// an empty string for project-less meetings (prompt stays as-is). Pulls
+/// up to the 5 most recent PRIOR meetings (excluding the one being
+/// generated) — their summary + decisions — plus every project_task that
+/// is still open, so the model can explicitly track follow-through.
+async fn build_project_context(state: &AppState, meeting: &Meeting) -> String {
+    let Some(project_id) = meeting.project_id else {
+        return String::new();
+    };
+
+    // Prior meetings: same project, started before this one, newest 5.
+    let prior: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT m.title, m.start_at
+         FROM meetings m
+         WHERE m.project_id = $1 AND m.id <> $2 AND m.start_at < $3
+         ORDER BY m.start_at DESC
+         LIMIT 5",
+    )
+    .bind(project_id)
+    .bind(meeting.id)
+    .bind(meeting.start_at)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut sections: Vec<String> = Vec::new();
+    for (ptitle, pstart) in &prior {
+        // Latest note summary + decisions for that prior meeting.
+        let note: Option<(Option<String>, JsonValue)> = sqlx::query_as(
+            "SELECT summary, decisions FROM meeting_notes
+             WHERE meeting_id = (SELECT id FROM meetings
+                                 WHERE project_id = $1 AND title = $2
+                                 ORDER BY start_at DESC LIMIT 1)
+             ORDER BY version DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(ptitle)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        let (summary, decisions) = note.unwrap_or((None, serde_json::json!([])));
+        let dec_txt = decisions
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| d.get("text").and_then(|v| v.as_str()))
+                    .map(|s| format!("    · {s}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        sections.push(format!(
+            "  [{}] {}\n    摘要：{}\n  決議：\n{}",
+            pstart.format("%Y-%m-%d"),
+            ptitle,
+            summary.as_deref().unwrap_or("（無）"),
+            if dec_txt.is_empty() { "    （無）".to_string() } else { dec_txt },
+        ));
+    }
+
+    // Open tasks on the project — the still-being-tracked work.
+    let open_tasks: Vec<(String, String)> = sqlx::query_as(
+        "SELECT title, status FROM project_tasks
+         WHERE project_id = $1 AND status <> 'done'
+         ORDER BY created_at DESC LIMIT 20",
+    )
+    .bind(project_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    if sections.is_empty() && open_tasks.is_empty() {
+        return String::new();
+    }
+
+    let mut ctx = String::from(
+        "===== 本專案會議脈絡（請延續，不要當作孤立會議）=====\n",
+    );
+    if !sections.is_empty() {
+        ctx.push_str("過往會議（新→舊）：\n");
+        ctx.push_str(&sections.join("\n"));
+        ctx.push('\n');
+    }
+    if !open_tasks.is_empty() {
+        ctx.push_str("\n尚未完成的任務（請在 summary 或 decisions 點出哪些有進展 / 哪些仍卡住）：\n");
+        for (t, st) in &open_tasks {
+            ctx.push_str(&format!("  · [{st}] {t}\n"));
+        }
+    }
+    ctx.push_str(
+        "\n產生本次紀錄時：若本次內容延續/完成/推翻了上述項目，請在 \
+summary 與 decisions 明確寫出關聯（例：「上次決議的 X 已於本次確認完成」）。\n\
+=====================================================\n\n",
+    );
+    ctx
 }
 
 async fn create_meeting(
@@ -1557,8 +1820,17 @@ async fn generate_ai_notes(
         .collect::<Vec<_>>()
         .join("、");
 
+    // ── Continuity context ────────────────────────────────────────────
+    // If this meeting is linked to a project, feed the AI a digest of the
+    // project's PRIOR meetings (summaries + decisions) plus the live
+    // status of every task that came out of them. This is what makes the
+    // generated minutes evolve the thread ("延續上次決議的 A 已完成…")
+    // instead of treating each meeting as an island. No project ⇒ empty
+    // string, prompt unchanged.
+    let project_context = build_project_context(&state, &meeting).await;
+
     let user_prompt = format!(
-        "會議名稱：{}\n日期：{}\n與會者：{}\n\n逐字稿與附件：\n{}\n\n---\n\
+        "{project_context}會議名稱：{}\n日期：{}\n與會者：{}\n\n逐字稿與附件：\n{}\n\n---\n\
 請以下方 JSON 結構回覆會議紀錄；只回 JSON，不要額外文字。\
 所有欄位都是選填，沒有的就回空陣列或空字串：\n\
 ```json\n{{\n  \"summary\": \"3-5 句條列重點\",\n\

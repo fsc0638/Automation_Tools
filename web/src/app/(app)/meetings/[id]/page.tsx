@@ -10,6 +10,7 @@ import { NotesCompilePanel } from "@/components/meetings/NotesCompilePanel";
 import { AttendeeSignoff } from "@/components/meetings/AttendeeSignoff";
 import { TaskImpactList } from "@/components/meetings/TaskImpactList";
 import { NotesHistory } from "@/components/meetings/NotesHistory";
+import { ProjectMeetingTimeline } from "@/components/meetings/ProjectMeetingTimeline";
 import {
   createMeetingsWsConnection,
   meetings as meetingsApi,
@@ -442,6 +443,13 @@ function RecordTab({
           onChange={onChange}
           canEdit={canEdit}
         />
+        {detail.project_id && (
+          <ProjectMeetingTimeline
+            projectId={detail.project_id}
+            currentMeetingId={detail.id}
+            limit={3}
+          />
+        )}
       </section>
       <aside className="flex w-[400px] flex-shrink-0 flex-col gap-5 overflow-y-auto">
         <AttendeeSignoff meetingId={detail.id} attendees={detail.attendees} onChange={onChange} />
