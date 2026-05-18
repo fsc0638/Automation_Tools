@@ -11,21 +11,33 @@
 # Keep this script English-only (runtime data from the API may be
 # non-ASCII - that is fine, only the script bytes must stay ASCII).
 #
+# Login is the Kway Dev APP account (kway_dev DB users table), NOT any
+# other email. No default account is baked in - you must supply it.
+#
 # Usage:
-#   .\reindex-all.ps1                         prompt for password
+#   .\reindex-all.ps1                         prompt for email + password
 #   .\reindex-all.ps1 -Email a@b -Password p  non-interactive
-#   $env:KWAY_PASSWORD='p'; .\reindex-all.ps1 use env for password
+#   $env:KWAY_EMAIL='a@b'; $env:KWAY_PASSWORD='p'; .\reindex-all.ps1
 #
 # Backend must be running (http://localhost:8888). Start it first with
 # .\start-all.ps1 if needed.
 
 param(
     [string]$BaseUrl  = "http://localhost:8888/api",
-    [string]$Email    = "kwayrnd03@mail.kway.com.tw",
+    [string]$Email    = $env:KWAY_EMAIL,
     [string]$Password = $env:KWAY_PASSWORD
 )
 
 $ErrorActionPreference = "Stop"
+
+# ---- email -----------------------------------------------------------
+# No baked-in default on purpose: this logs into the Kway Dev APP
+# account system (the kway_dev DB users table), which is unrelated to
+# any other email. Supply -Email, set $env:KWAY_EMAIL, or enter it when
+# prompted.
+if ([string]::IsNullOrWhiteSpace($Email)) {
+    $Email = Read-Host "Kway Dev login email"
+}
 
 # ---- password --------------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($Password)) {
