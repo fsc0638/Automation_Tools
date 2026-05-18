@@ -779,6 +779,94 @@ summary 與 decisions 明確寫出關聯（例：「上次決議的 X 已於本�
     ctx
 }
 
+// ── Phase 4: meeting AI grounding + DLP firewall ──────────────────────
+//
+// The chat flow grounds + firewalls through `crate::grounding::assemble`
+// (Phase 1). Meeting minutes generation used to send the raw transcript
+// straight to Hermes with no project file grounding and no secret
+// redaction / classification gate / audit row. Phase 4 routes a
+// project-linked meeting's (project_context + transcript) through the
+// SAME unified provider so the minutes are evidence-grounded on the
+// codebase and the transcript gets the identical DLP treatment as chat.
+//
+// The firewall audit table FK-references conversations(id); meetings
+// have none, so we lazily anchor one dedicated conversation per meeting
+// (migration 0036, additive nullable link). Unlinked meetings are left
+// on the original raw path untouched.
+
+/// Get-or-create the single grounding conversation that anchors a
+/// meeting's AI activity (so agent_context_audit_logs FK is satisfied).
+async fn ensure_meeting_grounding_conversation(
+    state: &AppState,
+    meeting: &Meeting,
+    project_id: Uuid,
+    user_id: Uuid,
+) -> AppResult<Uuid> {
+    if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM conversations WHERE meeting_id = $1 LIMIT 1",
+    )
+    .bind(meeting.id)
+    .fetch_optional(&state.db)
+    .await?
+    {
+        return Ok(existing);
+    }
+    let title = format!("[會議接地] {}", meeting.title);
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO conversations (project_id, user_id, title, meeting_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (meeting_id) WHERE meeting_id IS NOT NULL
+         DO UPDATE SET updated_at = NOW()
+         RETURNING id",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .bind(&title)
+    .bind(meeting.id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(id)
+}
+
+/// Ground + firewall a project-linked meeting body. Returns
+/// `(redacted_body, grounded_code_context)`. Errors bubble so the
+/// caller can fall back to the raw (unlinked) path.
+async fn ground_meeting_body(
+    state: &AppState,
+    project_id: Uuid,
+    meeting: &Meeting,
+    user_id: Uuid,
+    sensitive_body: &str,
+) -> AppResult<(String, Option<String>)> {
+    let project: crate::db::models::Project =
+        sqlx::query_as("SELECT * FROM projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_one(&state.db)
+            .await?;
+    let base_scope = crate::agents::orchestrator::build_project_scope(&project);
+    let conversation_id =
+        ensure_meeting_grounding_conversation(state, meeting, project_id, user_id).await?;
+    let policy = crate::security::context_firewall::AgentDataPolicy::managed_default();
+    let secured = crate::grounding::assemble(crate::grounding::GroundingInputs {
+        db: &state.db,
+        user_id,
+        project_id,
+        conversation_id,
+        mode_label: "meeting_minutes",
+        data_policy: &policy,
+        base_scope: &base_scope,
+        history: &[],
+        project_summary: None,
+        query: sensitive_body,
+    })
+    .await
+    .map_err(|e| AppError::Agent(e.to_string()))?;
+    Ok((
+        secured.user_message,
+        secured.project_scope.relevant_file_context,
+    ))
+}
+
 async fn create_meeting(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -1830,8 +1918,54 @@ async fn generate_ai_notes(
     // string, prompt unchanged.
     let project_context = build_project_context(&state, &meeting).await;
 
+    // ── Phase 4: ground + firewall the sensitive meeting body ─────────
+    // The project_context (prior decisions/tasks) + transcript are the
+    // sensitive material. For project-linked meetings, route them
+    // through the unified grounding provider: it overlays relevant
+    // project FILE context (evidence grounding) and runs the same DLP
+    // firewall as chat (secret redaction + classification gate +
+    // agent_context_audit_logs). Unlinked meetings keep the raw body.
+    let sensitive_body = format!("{project_context}逐字稿與附件：\n{transcript}");
+    let (grounded_body, code_grounding) = match meeting.project_id {
+        Some(project_id) => {
+            match ground_meeting_body(
+                &state,
+                project_id,
+                &meeting,
+                auth_user.id,
+                &sensitive_body,
+            )
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!(
+                        meeting_id = %meeting.id,
+                        error = %e,
+                        "meeting grounding/firewall failed; falling back to raw body"
+                    );
+                    (sensitive_body.clone(), None)
+                }
+            }
+        }
+        None => (sensitive_body.clone(), None),
+    };
+
+    let code_section = code_grounding
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            format!(
+                "===== 專案程式碼脈絡（接地證據；產生 decisions / risks 時，\
+若有依據請標明「依據 <檔案>」）=====\n{c}\n\
+=====================================================\n\n"
+            )
+        })
+        .unwrap_or_default();
+
     let user_prompt = format!(
-        "{project_context}會議名稱：{}\n日期：{}\n與會者：{}\n\n逐字稿與附件：\n{}\n\n---\n\
+        "{code_section}會議名稱：{}\n日期：{}\n與會者：{}\n\n{grounded_body}\n\n---\n\
 請以下方 JSON 結構回覆會議紀錄；只回 JSON，不要額外文字。\
 所有欄位都是選填，沒有的就回空陣列或空字串：\n\
 ```json\n{{\n  \"summary\": \"3-5 句條列重點\",\n\
@@ -1848,7 +1982,6 @@ async fn generate_ai_notes(
         meeting.title,
         meeting.start_at.format("%Y-%m-%d %H:%M"),
         attendees_str,
-        transcript,
     );
 
     let system_prompt = "你是會議記錄助手，依據逐字稿輸出結構化 JSON 紀錄。";
