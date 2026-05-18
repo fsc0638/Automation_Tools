@@ -32,6 +32,8 @@
 //! grounding and drifting apart (which is exactly the state Phase 0
 //! found).
 
+pub mod embedding;
+
 use anyhow::{anyhow, Result};
 use sqlx::PgPool;
 use uuid::Uuid;

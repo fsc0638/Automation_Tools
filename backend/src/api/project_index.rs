@@ -9,6 +9,15 @@ const MAX_INDEX_FILES: usize = 2_000;
 const CHUNK_CHARS: usize = 4_000;
 const MAX_RELEVANT_CHUNKS: i64 = 8;
 
+// Phase 3 hybrid-retrieval fusion weights. `score = W_LEX·lexical_norm
+// + W_VEC·cosine`. Lexical still leads (exact symbol/path hits are the
+// strongest signal in code search); the vector term adds paraphrase /
+// morphology recall. COS_FLOOR is the minimum cosine for a chunk with
+// NO lexical hit to still be admitted (keeps pure-vector noise out).
+const W_LEX: f32 = 0.55;
+const W_VEC: f32 = 0.45;
+const COS_FLOOR: f32 = 0.18;
+
 const IGNORED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -109,15 +118,22 @@ pub async fn rebuild_project_index(db: &PgPool, project_id: Uuid, root: &str) ->
         .await?;
 
         for (chunk_index, chunk) in split_chunks(&content).into_iter().enumerate() {
+            // Phase 3: store a per-chunk embedding alongside the text.
+            // Embed path + content so file-name tokens contribute to
+            // the vector too. NULL when nothing embeddable — retrieval
+            // transparently falls back to lexical for that row.
+            let embedding =
+                crate::grounding::embedding::embed(&format!("{rel}\n{chunk}"));
             sqlx::query(
-                "INSERT INTO project_file_chunks (project_file_id, project_id, path, chunk_index, content, indexed_at)
-                 VALUES ($1, $2, $3, $4, $5, NOW())",
+                "INSERT INTO project_file_chunks (project_file_id, project_id, path, chunk_index, content, embedding, indexed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, NOW())",
             )
             .bind(file_id)
             .bind(project_id)
             .bind(&rel)
             .bind(chunk_index as i32)
             .bind(chunk)
+            .bind(embedding)
             .execute(db)
             .await?;
         }
@@ -132,13 +148,20 @@ pub async fn relevant_file_context(
     project_id: Uuid,
     query: &str,
 ) -> Result<Option<String>> {
+    // Hybrid retrieval (Phase 3): lexical term scoring fused with
+    // vector cosine. Either signal alone is enough to run — pure
+    // lexical when there's no query embedding or chunks predate the
+    // embedding column (NULL), pure/assisted vector otherwise. This is
+    // why the migration could be additive and the rollout is safe:
+    // un-reindexed projects behave exactly as the old lexical path.
     let terms = query_terms(query);
-    if terms.is_empty() {
+    let query_emb = crate::grounding::embedding::embed(query);
+    if terms.is_empty() && query_emb.is_none() {
         return Ok(None);
     }
 
-    let chunks: Vec<(String, i32, String)> = sqlx::query_as(
-        "SELECT path, chunk_index, content
+    let chunks: Vec<(String, i32, String, Option<Vec<f32>>)> = sqlx::query_as(
+        "SELECT path, chunk_index, content, embedding
          FROM project_file_chunks
          WHERE project_id = $1
          ORDER BY indexed_at DESC
@@ -148,15 +171,48 @@ pub async fn relevant_file_context(
     .fetch_all(db)
     .await?;
 
-    let mut scored = chunks
-        .into_iter()
-        .filter_map(|(path, idx, content)| {
-            let score = score_chunk(&path, &content, &terms);
-            (score > 0).then_some((score, path, idx, content))
-        })
-        .collect::<Vec<_>>();
+    // Pass 1: raw lexical score + raw cosine per candidate.
+    let mut max_lex = 0i32;
+    let mut candidates: Vec<(i32, f32, String, i32, String)> = Vec::new();
+    for (path, idx, content, emb) in chunks {
+        let lex = score_chunk(&path, &content, &terms);
+        let cos = match (&query_emb, &emb) {
+            (Some(q), Some(e)) => crate::grounding::embedding::cosine(q, e).max(0.0),
+            _ => 0.0,
+        };
+        // Admit if lexically relevant OR vector-similar enough on its
+        // own (paraphrase match with no shared tokens).
+        if lex <= 0 && cos < COS_FLOOR {
+            continue;
+        }
+        max_lex = max_lex.max(lex);
+        candidates.push((lex, cos, path, idx, content));
+    }
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    // Pass 2: normalise lexical to [0,1] by the batch max, then fuse.
+    let mut scored: Vec<(f32, String, i32, String)> = candidates
+        .into_iter()
+        .map(|(lex, cos, path, idx, content)| {
+            let lex_n = if max_lex > 0 {
+                lex as f32 / max_lex as f32
+            } else {
+                0.0
+            };
+            let hybrid = W_LEX * lex_n + W_VEC * cos;
+            (hybrid, path, idx, content)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
     scored.truncate(MAX_RELEVANT_CHUNKS as usize);
 
     if scored.is_empty() {
