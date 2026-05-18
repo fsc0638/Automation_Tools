@@ -374,8 +374,8 @@ export default function NewMeetingPage() {
           <div className="flex items-start gap-3">
             <button
               type="button"
-              onClick={() => router.back()}
-              aria-label="返回上一頁"
+              onClick={() => router.push("/meetings")}
+              aria-label="回會議工作台"
               className="mt-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#475569] hover:bg-[#F8FAFC] hover:text-[#1A1A2E]"
             >
               <ArrowLeft size={16} />

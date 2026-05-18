@@ -179,8 +179,8 @@ export default function EditMeetingPage({
           <div className="flex items-start gap-3">
             <button
               type="button"
-              onClick={() => router.back()}
-              aria-label="返回"
+              onClick={() => router.push(`/meetings/${id}`)}
+              aria-label="回會議詳情"
               className="mt-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#475569] hover:bg-[#F8FAFC]"
             >
               <ArrowLeft size={16} />
