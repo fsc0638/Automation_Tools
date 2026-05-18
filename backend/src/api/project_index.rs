@@ -271,7 +271,15 @@ fn collect_indexable_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> R
                 continue;
             }
             collect_indexable_files(root, &path, out)?;
-        } else if file_type.is_file() && is_text_file(&path) && path.starts_with(root) {
+        } else if file_type.is_file()
+            && is_text_file(&path)
+            && path.starts_with(root)
+            && !crate::grounding::is_secret_path(&name)
+        {
+            // Hardening: secret files (*.env, *.pem, id_rsa, …) are
+            // never chunked/embedded. Source code stays indexed (it's
+            // "readable-but-redacted"); pure-secret files don't belong
+            // in the corpus at all.
             out.push(path);
         }
     }

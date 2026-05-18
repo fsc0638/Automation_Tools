@@ -71,6 +71,12 @@ pub struct GroundingInputs<'a> {
     /// The user's message — doubles as the retrieval query and the
     /// firewall-redacted user content.
     pub query: &'a str,
+    /// Optional — enables backend-driven remote reads. When the user
+    /// names `path@ref`, the backend fetches that ref via the
+    /// GitHub/GitLab Contents API (Phase 2b) instead of the local
+    /// clone. `None` ⇒ local-only named-path reads (still works).
+    pub project: Option<&'a Project>,
+    pub credentials: Option<&'a GitCredentials>,
 }
 
 /// Assemble grounded + firewalled context for an agent call.
@@ -93,7 +99,14 @@ pub async fn assemble(input: GroundingInputs<'_>) -> Result<SecuredAgentContext>
     //     real content. Confined to the project root; goes through the
     //     same firewall/redaction/audit below (it's folded into
     //     relevant_file_context). No gateway cooperation required.
-    if let Some(block) = read_named_files(scope.root.as_deref(), input.query) {
+    if let Some(block) = read_named_files(
+        scope.root.as_deref(),
+        input.project,
+        input.credentials,
+        input.query,
+    )
+    .await
+    {
         ctx = Some(match ctx {
             Some(existing) => format!("{block}\n\n{existing}"),
             None => block,
@@ -130,6 +143,66 @@ pub async fn assemble(input: GroundingInputs<'_>) -> Result<SecuredAgentContext>
 const NAMED_FILE_MAX_BYTES: usize = 16_000;
 const NAMED_FILES_MAX: usize = 4;
 
+/// Secret-file deny-list (single source of truth, also enforced by the
+/// indexer and the Phase 5 read_file tool). Field tests showed
+/// `classification_max=secret` every turn — secret-grade files were
+/// reaching context. Source code (auth.rs etc.) is legitimately
+/// "readable-but-redacted"; these files are pure secrets and must never
+/// be indexed, named-fetched, or tool-read at all. Decision by basename
+/// (case-insensitive). Placeholder samples are explicitly allowed.
+pub fn is_secret_path(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let name = p.rsplit('/').next().unwrap_or(&p).to_ascii_lowercase();
+
+    // Placeholders / templates are safe and useful — never deny.
+    if name.ends_with(".example")
+        || name.ends_with(".sample")
+        || name.ends_with(".template")
+        || name.ends_with(".dist")
+    {
+        return false;
+    }
+    // dotenv in all its forms: .env, .env.local, .env.production,
+    // prod.env, database.env …
+    if name == ".env" || name.starts_with(".env.") || name.ends_with(".env") {
+        return true;
+    }
+    // Private key / keystore material.
+    for ext in [
+        ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".ppk",
+    ] {
+        if name.ends_with(ext) {
+            return true;
+        }
+    }
+    // Well-known credential files.
+    matches!(
+        name.as_str(),
+        "id_rsa"
+            | "id_dsa"
+            | "id_ecdsa"
+            | "id_ed25519"
+            | ".npmrc"
+            | ".pypirc"
+            | ".netrc"
+            | "_netrc"
+            | ".git-credentials"
+            | ".htpasswd"
+            | ".pgpass"
+            | ".dockercfg"
+            | "kubeconfig"
+            | "credentials"
+            | "credentials.json"
+            | "credentials.yaml"
+            | "credentials.yml"
+            | "secrets.json"
+            | "secrets.yaml"
+            | "secrets.yml"
+            | "service-account.json"
+            | "serviceaccount.json"
+    )
+}
+
 /// Extensions that make a bare `name.ext` token (no slash) count as a
 /// file reference. Tokens containing `/` are always considered paths.
 const PATHISH_EXTS: &[&str] = &[
@@ -159,11 +232,12 @@ fn extract_query_paths(query: &str) -> Vec<String> {
         if t.len() < 3 || t.len() > 256 {
             continue;
         }
-        // Qualify by a real file extension on the basename — NOT merely
-        // a slash (otherwise prose like "and/or" is mistaken for a
-        // path). Dir-only tokens are intentionally excluded; this
-        // feature fetches file *content*.
-        let base = t.rsplit('/').next().unwrap_or(t);
+        // A token may carry a remote ref as `path@ref`
+        // (e.g. backend/src/api/auth.rs@main). Qualify by extension on
+        // the PATH part only; keep the whole `path@ref` token so
+        // read_named_files can route it to the remote reader.
+        let path_part = t.split('@').next().unwrap_or(t);
+        let base = path_part.rsplit('/').next().unwrap_or(path_part);
         let has_ext = base.contains('.')
             && !base.ends_with('.')
             && base
@@ -197,35 +271,74 @@ fn confine(root: &str, rel: &str) -> Option<std::path::PathBuf> {
     canon.starts_with(&root_canon).then_some(canon)
 }
 
-/// Read every project-root-confined file the question explicitly named,
-/// as one labelled block (or `None` when the question named no resolvable
-/// path — the overwhelmingly common case, so normal questions are
-/// completely unaffected).
-fn read_named_files(root: Option<&str>, query: &str) -> Option<String> {
-    let root = root?;
-    if root.trim().is_empty() {
-        return None;
-    }
+/// Read every file the question explicitly named, as one labelled
+/// block, or `None` when nothing resolvable was named (the common case
+/// — normal questions are completely unaffected).
+///
+/// - `path@ref` → read that ref straight from the remote (Phase 2b
+///   `remote_file`), so the user can ask about a remote branch/commit
+///   in plain chat without a local checkout. Falls back to the local
+///   copy if the remote read fails.
+/// - bare `path` → local read, strictly confined to the project root.
+/// - secret files (`is_secret_path`) are always refused.
+async fn read_named_files(
+    root: Option<&str>,
+    project: Option<&Project>,
+    credentials: Option<&GitCredentials>,
+    query: &str,
+) -> Option<String> {
     let mut body = String::new();
     let mut count = 0usize;
     for cand in extract_query_paths(query) {
         if count >= NAMED_FILES_MAX {
             break;
         }
-        let Some(abs) = confine(root, &cand) else {
-            continue;
+        let (path_part, git_ref) = match cand.split_once('@') {
+            Some((p, r)) if !r.trim().is_empty() => (p.to_string(), Some(r.trim().to_string())),
+            _ => (cand.clone(), None),
         };
-        if !abs.is_file() {
+        // Hard refusal: secret files are never read, local or remote.
+        if is_secret_path(&path_part) {
+            body.push_str(&format!(
+                "\n--- FILE: {path_part} ---\n[已依資安政策拒絕讀取機密類檔案]\n"
+            ));
+            count += 1;
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&abs) else {
+
+        let (label, content): (String, Option<String>) = if let Some(rf) = &git_ref {
+            // Remote read at an explicit ref.
+            match project {
+                Some(p) => match remote_file(p, credentials, &path_part, rf).await {
+                    Ok(text) => (format!("{path_part}@{rf} (remote)"), Some(text)),
+                    Err(_) => {
+                        // Fall back to local copy of the same path.
+                        let local = root
+                            .and_then(|r| confine(r, &path_part))
+                            .filter(|a| a.is_file())
+                            .and_then(|a| std::fs::read_to_string(a).ok());
+                        (format!("{path_part} (remote {rf} 讀取失敗，改用本地)"), local)
+                    }
+                },
+                None => (format!("{path_part}@{rf}"), None),
+            }
+        } else {
+            // Local read, confined to the project root.
+            let local = root
+                .and_then(|r| confine(r, &path_part))
+                .filter(|a| a.is_file())
+                .and_then(|a| std::fs::read_to_string(a).ok());
+            (path_part.clone(), local)
+        };
+
+        let Some(text) = content else {
             continue;
         };
         let truncated = text.len() > NAMED_FILE_MAX_BYTES;
         let snippet: String = text.chars().take(NAMED_FILE_MAX_BYTES).collect();
         body.push_str(&format!(
             "\n--- FILE: {} ---\n{}\n{}",
-            cand,
+            label,
             snippet,
             if truncated { "（檔案過長，已截斷）\n" } else { "" }
         ));
@@ -271,6 +384,57 @@ mod named_path_tests {
         assert!(confine(".", "../../etc/passwd").is_none());
         assert!(confine(".", "/etc/passwd").is_none());
         assert!(confine(".", "a/../../b").is_none());
+    }
+
+    #[test]
+    fn secret_deny_list() {
+        // Pure-secret files: denied.
+        for p in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            "backend/.env",
+            "config/database.env",
+            "certs/server.pem",
+            "tls/app.key",
+            "keystore.p12",
+            "deploy/id_rsa",
+            ".npmrc",
+            ".git-credentials",
+            "k8s/secrets.yaml",
+            "credentials.json",
+        ] {
+            assert!(is_secret_path(p), "should deny: {p}");
+        }
+        // Source code & safe placeholders: allowed.
+        for p in [
+            "backend/src/api/auth.rs",
+            "web/src/lib/api.ts",
+            ".env.example",
+            ".env.sample",
+            "config.toml",
+            "README.md",
+        ] {
+            assert!(!is_secret_path(p), "should allow: {p}");
+        }
+    }
+
+    #[test]
+    fn extracts_path_with_remote_ref() {
+        // `path@ref` must survive extraction (ext checked on path part)
+        // so read_named_files can route it to the remote reader.
+        let got = extract_query_paths(
+            "比較本地與 backend/src/api/auth.rs@main 有沒有差",
+        );
+        assert!(
+            got.contains(&"backend/src/api/auth.rs@main".to_string()),
+            "{got:?}"
+        );
+        // Secret file named with a ref is still detected here; the
+        // refusal happens in read_named_files via is_secret_path.
+        assert!(is_secret_path(
+            "backend/.env@main".split('@').next().unwrap()
+        ));
     }
 }
 

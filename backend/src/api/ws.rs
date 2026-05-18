@@ -323,6 +323,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                 history: &history,
                 project_summary: project_summary.map(|summary| summary.summary),
                 query: &content,
+                project: Some(&project),
+                credentials: git_credentials.as_ref(),
             },
         )
         .await

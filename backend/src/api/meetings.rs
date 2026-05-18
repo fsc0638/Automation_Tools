@@ -846,10 +846,12 @@ async fn ground_meeting_body(
     // Phase 2a: refresh the local clone from origin before snapshotting
     // so the minutes are grounded on code that tracks the remote.
     // Best-effort + timeout-bounded; failure ⇒ ground on stale copy.
+    let git_creds =
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await;
     let freshen = crate::grounding::freshen_local(
         &project,
-        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
-            .await,
+        git_creds.clone(),
         &crate::grounding::GroundingSource::default(),
     )
     .await;
@@ -873,6 +875,8 @@ async fn ground_meeting_body(
         history: &[],
         project_summary: None,
         query: sensitive_body,
+        project: Some(&project),
+        credentials: git_creds.as_ref(),
     })
     .await
     .map_err(|e| AppError::Agent(e.to_string()))?;

@@ -459,6 +459,8 @@ async fn react_agent(
         history: &[],
         project_summary: None,
         query: &query,
+        project: Some(&project),
+        credentials: credentials.as_ref(),
     })
     .await
     .map_err(|e| AppError::Agent(e.to_string()))?;

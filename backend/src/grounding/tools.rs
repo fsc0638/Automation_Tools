@@ -239,6 +239,9 @@ pub async fn run_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
                 .filter(|s| !s.is_empty());
             if path.is_empty() {
                 "(read_file: missing 'path')".to_string()
+            } else if super::is_secret_path(path) {
+                // Secret files are refused regardless of local/remote.
+                "(read_file: 機密類檔案，依資安政策拒絕)".to_string()
             } else if let Some(r) = git_ref {
                 // ref given ⇒ Phase 2b live remote read (RemoteLive).
                 match crate::grounding::remote_file(
