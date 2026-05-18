@@ -433,6 +433,7 @@ pub fn routes() -> Router<AppState> {
         .route("/meetings/:id/files/:file_id", http_delete(delete_file))
         .route("/meetings/:id/notes", http_patch(update_notes))
         .route("/meetings/:id/notes/generate", post(generate_ai_notes))
+        .route("/meetings/:id/notes/sync-tasks/preview", post(sync_tasks_preview))
         .route("/meetings/:id/notes/sync-tasks", post(sync_notes_to_tasks))
         .route("/meetings/:id/notes/history", get(notes_history))
         .route(
@@ -2086,112 +2087,382 @@ async fn generate_ai_notes(
     Ok(Json(inserted))
 }
 
-/// Response shape for POST /meetings/:id/notes/sync-tasks.
+// action_items JSONB row — shared by preview + apply.
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ActionItemRow {
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    assignee_user_id: Option<String>,
+    #[serde(default)]
+    assignee_name: Option<String>,
+}
+
+/// Load (project_id, latest notes, action_items). Centralises the three
+/// 400 cases (no project / no notes / nothing actionable) shared by the
+/// preview and apply endpoints.
+async fn load_sync_inputs(
+    state: &AppState,
+    meeting_id: Uuid,
+) -> AppResult<(Uuid, MeetingNotes, Vec<ActionItemRow>)> {
+    let meeting: (Option<Uuid>,) =
+        sqlx::query_as("SELECT project_id FROM meetings WHERE id = $1")
+            .bind(meeting_id)
+            .fetch_one(&state.db)
+            .await?;
+    let project_id = meeting.0.ok_or_else(|| {
+        AppError::BadRequest(
+            "meeting is not linked to a project; cannot sync action items into tasks".into(),
+        )
+    })?;
+    let notes: MeetingNotes = sqlx::query_as(
+        "SELECT * FROM meeting_notes WHERE meeting_id = $1
+         ORDER BY version DESC LIMIT 1",
+    )
+    .bind(meeting_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| {
+        AppError::BadRequest("no meeting notes to sync; generate or write notes first".into())
+    })?;
+    let items: Vec<ActionItemRow> = serde_json::from_value(notes.action_items.clone())
+        .unwrap_or_default();
+    let items: Vec<ActionItemRow> = items
+        .into_iter()
+        .filter(|it| !it.title.trim().is_empty())
+        .collect();
+    Ok((project_id, notes, items))
+}
+
+// ── Reconcile preview ─────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ReconcileProposal {
+    pub title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// AI suggestion: "new" | "continue" | "duplicate".
+    pub suggested: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_task_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_task_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_task_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncPreviewResult {
+    pub notes_version: i32,
+    pub proposals: Vec<ReconcileProposal>,
+}
+
+/// POST /meetings/:id/notes/sync-tasks/preview
+///
+/// History-aware reconciliation. Instead of blindly creating a task per
+/// action item, we hand the LLM the project's existing tasks + the new
+/// action items and ask: for each item, is this NEW work, a CONTINUE of
+/// an existing task, or a DUPLICATE? The proposal is returned for human
+/// confirmation — no DB writes happen here. This is what stops the
+/// project accumulating near-identical tasks across meetings.
+async fn sync_tasks_preview(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<SyncPreviewResult>> {
+    require_meeting_access(&state, id, auth_user.id, AccessLevel::Edit).await?;
+    require_unlocked(&state, id).await?;
+    let (project_id, notes, items) = load_sync_inputs(&state, id).await?;
+    if items.is_empty() {
+        return Ok(Json(SyncPreviewResult {
+            notes_version: notes.version,
+            proposals: vec![],
+        }));
+    }
+
+    // Every project task (incl. done) so we can also flag "this was
+    // already completed last sprint" duplicates, not just open ones.
+    let existing: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, title, status FROM project_tasks WHERE project_id = $1
+         ORDER BY created_at DESC LIMIT 200",
+    )
+    .bind(project_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    // No existing tasks ⇒ everything is trivially new; skip the AI call.
+    if existing.is_empty() {
+        let proposals = items
+            .iter()
+            .map(|it| ReconcileProposal {
+                title: it.title.trim().to_string(),
+                description: it.description.trim().to_string(),
+                suggested: "new".into(),
+                target_task_id: None,
+                target_task_title: None,
+                target_task_status: None,
+                reason: Some("專案目前沒有任何任務，全部視為新建".into()),
+            })
+            .collect();
+        return Ok(Json(SyncPreviewResult {
+            notes_version: notes.version,
+            proposals,
+        }));
+    }
+
+    let existing_block = existing
+        .iter()
+        .map(|(tid, t, st)| format!("- {tid}｜{st}｜{t}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items_block = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            format!(
+                "{}. {} — {}",
+                i + 1,
+                it.title.trim(),
+                it.description.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let system_prompt =
+        "你是專案任務管家。判斷新會議待辦是不是專案現有任務的延續或重複。";
+    let user_prompt = format!(
+        "專案現有任務（id｜狀態｜標題）：\n{existing_block}\n\n\
+新會議待辦（編號. 標題 — 說明）：\n{items_block}\n\n---\n\
+請逐項判斷，只回 JSON 陣列，不要額外文字：\n\
+```json\n[{{\"index\":1,\"decision\":\"new|continue|duplicate\",\
+\"target_task_id\":\"<僅 continue/duplicate 需附現有任務 id>\",\
+\"reason\":\"一句話理由\"}}]\n```\n\
+判斷標準：\n\
+- new：與所有現有任務都不同主題\n\
+- continue：跟某個現有任務同主題，是它的後續推進 / 更新（附該任務 id）\n\
+- duplicate：跟某個現有任務幾乎一樣，不需重做（附該任務 id）\n\
+務必每個待辦都有一筆，index 對應上面編號。"
+    );
+
+    let messages = vec![
+        ChatMessage { role: "system".into(), content: system_prompt.into() },
+        ChatMessage { role: "user".into(), content: user_prompt.clone() },
+    ];
+
+    // ai_jobs audit (kind='task_reconcile').
+    let started = std::time::Instant::now();
+    let prompt_hash = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(user_prompt.as_bytes());
+        format!("{:x}", h.finalize())
+    };
+    let ai_job_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO ai_jobs (kind, provider, model, requested_by, meeting_id,
+            status, input_chars, prompt_hash)
+         VALUES ('task_reconcile', 'hermes', $1, $2, $3, 'failed', $4, $5)
+         RETURNING id",
+    )
+    .bind(&state.config.hermes_model)
+    .bind(auth_user.id)
+    .bind(id)
+    .bind((system_prompt.len() + user_prompt.len()) as i32)
+    .bind(&prompt_hash)
+    .fetch_one(&state.db)
+    .await?;
+
+    let raw = match HermesClient::new(&state.config).chat(messages).await {
+        Ok(r) => {
+            let _ = sqlx::query(
+                "UPDATE ai_jobs SET status='success', output_chars=$2,
+                    duration_ms=$3 WHERE id=$1",
+            )
+            .bind(ai_job_id)
+            .bind(r.len() as i32)
+            .bind(started.elapsed().as_millis() as i32)
+            .execute(&state.db)
+            .await;
+            r
+        }
+        Err(e) => {
+            let _ = sqlx::query(
+                "UPDATE ai_jobs SET status='failed', error=$2,
+                    duration_ms=$3 WHERE id=$1",
+            )
+            .bind(ai_job_id)
+            .bind(e.to_string())
+            .bind(started.elapsed().as_millis() as i32)
+            .execute(&state.db)
+            .await;
+            return Err(AppError::Agent(e.to_string()));
+        }
+    };
+
+    #[derive(Deserialize)]
+    struct LlmDecision {
+        index: usize,
+        decision: String,
+        #[serde(default)]
+        target_task_id: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let decisions: Vec<LlmDecision> =
+        serde_json::from_str(&strip_json_fences(&raw)).unwrap_or_default();
+    let task_by_id: std::collections::HashMap<Uuid, (String, String)> = existing
+        .iter()
+        .map(|(tid, t, st)| (*tid, (t.clone(), st.clone())))
+        .collect();
+
+    // Build proposals; any item the LLM missed defaults to "new" so the
+    // user never silently loses an action item.
+    let mut proposals: Vec<ReconcileProposal> = items
+        .iter()
+        .map(|it| ReconcileProposal {
+            title: it.title.trim().to_string(),
+            description: it.description.trim().to_string(),
+            suggested: "new".into(),
+            target_task_id: None,
+            target_task_title: None,
+            target_task_status: None,
+            reason: None,
+        })
+        .collect();
+    for d in decisions {
+        if d.index == 0 || d.index > proposals.len() {
+            continue;
+        }
+        let p = &mut proposals[d.index - 1];
+        let dec = match d.decision.as_str() {
+            "continue" | "duplicate" | "new" => d.decision.clone(),
+            _ => "new".into(),
+        };
+        p.suggested = dec.clone();
+        p.reason = d.reason;
+        if dec != "new" {
+            if let Some(tid) = d.target_task_id.and_then(|s| Uuid::parse_str(s.trim()).ok()) {
+                if let Some((t, st)) = task_by_id.get(&tid) {
+                    p.target_task_id = Some(tid);
+                    p.target_task_title = Some(t.clone());
+                    p.target_task_status = Some(st.clone());
+                } else {
+                    // LLM hallucinated an id → demote to new, safest.
+                    p.suggested = "new".into();
+                }
+            } else {
+                p.suggested = "new".into();
+            }
+        }
+    }
+
+    Ok(Json(SyncPreviewResult {
+        notes_version: notes.version,
+        proposals,
+    }))
+}
+
+// ── Apply ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SyncDecision {
+    /// Matches an action item by its (trimmed) title.
+    pub title: String,
+    /// "new" | "continue" | "skip".
+    pub decision: String,
+    #[serde(default)]
+    pub target_task_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SyncTasksRequest {
+    /// When present, the user-confirmed plan. When absent, fall back to
+    /// the legacy casefold auto-create (keeps old callers working).
+    #[serde(default)]
+    pub decisions: Vec<SyncDecision>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SyncTasksResult {
     pub synced_notes_version: i32,
     pub created_task_ids: Vec<Uuid>,
+    /// Action items linked to an existing task instead of creating one.
+    pub linked_task_ids: Vec<Uuid>,
     pub skipped_existing_titles: Vec<String>,
 }
 
 /// POST /meetings/:id/notes/sync-tasks
 ///
-/// AgentK-aligned: turn the latest note's `action_items` into rows in
-/// `project_tasks`. Idempotent in the sense that a re-run won't double-
-/// create — we skip any action item whose title already exists as a
-/// task on the same project. Caveat: a meeting without a `project_id`
-/// has nowhere to put the tasks, so we 400 in that case rather than
-/// silently dropping them.
-///
-/// Per docs/agentk-fusion/fusion-plan.md §3.2.
+/// Apply step. With a `decisions` body (from the preview the user
+/// confirmed): new → create task; continue → DON'T create, link the
+/// existing task into the note + drop a follow-up comment on it
+/// ("YYYY-MM-DD 會議再次提及…"); skip → nothing. Without a body: legacy
+/// casefold auto-create so older callers / direct API hits still work.
 async fn sync_notes_to_tasks(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
+    body: Option<Json<SyncTasksRequest>>,
 ) -> AppResult<Json<SyncTasksResult>> {
     require_meeting_access(&state, id, auth_user.id, AccessLevel::Edit).await?;
     require_unlocked(&state, id).await?;
-
-    let meeting: (Option<Uuid>,) =
-        sqlx::query_as("SELECT project_id FROM meetings WHERE id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
-    let Some(project_id) = meeting.0 else {
-        return Err(AppError::BadRequest(
-            "meeting is not linked to a project; cannot sync action items into tasks".into(),
-        ));
-    };
-
-    let prev: Option<MeetingNotes> = sqlx::query_as(
-        "SELECT * FROM meeting_notes WHERE meeting_id = $1
-         ORDER BY version DESC LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
-    let notes = prev.ok_or_else(|| {
-        AppError::BadRequest("no meeting notes to sync; generate or write notes first".into())
-    })?;
-
-    // action_items is JSONB — decode into a typed view so we can iterate.
-    #[derive(Deserialize, Default)]
-    struct ActionItemRow {
-        title: String,
-        #[serde(default)]
-        description: String,
-        #[serde(default)]
-        assignee_user_id: Option<String>,
-        #[serde(default)]
-        assignee_name: Option<String>,
-    }
-    let items: Vec<ActionItemRow> =
-        serde_json::from_value(notes.action_items.clone()).unwrap_or_default();
+    let (project_id, notes, items) = load_sync_inputs(&state, id).await?;
     if items.is_empty() {
         return Ok(Json(SyncTasksResult {
             synced_notes_version: notes.version,
             created_task_ids: vec![],
+            linked_task_ids: vec![],
             skipped_existing_titles: vec![],
         }));
     }
 
-    // AgentK-aligned dedup: casefold the comparison so "Send report" and
-    // "send report" collapse to one task. Pre-fetch all titles for the
-    // project in a single round-trip.
-    let existing_titles: Vec<String> = sqlx::query_scalar(
-        "SELECT title FROM project_tasks WHERE project_id = $1",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
-    let existing_lower: std::collections::HashSet<String> = existing_titles
+    // Decision map by trimmed title. Empty ⇒ legacy auto mode.
+    let decisions: std::collections::HashMap<String, SyncDecision> = body
+        .map(|Json(b)| b.decisions)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| (d.title.trim().to_string(), d))
+        .collect();
+    let legacy_mode = decisions.is_empty();
+
+    // Legacy casefold dedup set (only consulted in legacy mode).
+    let existing_lower: std::collections::HashSet<String> = if legacy_mode {
+        sqlx::query_scalar::<_, String>(
+            "SELECT title FROM project_tasks WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_all(&state.db)
+        .await?
         .iter()
         .map(|s| s.trim().to_lowercase())
-        .collect();
+        .collect()
+    } else {
+        Default::default()
+    };
 
-    // AgentK-aligned: pre-validate every assignee_user_id BEFORE any
-    // insert so we don't leave half-synced state if one row would fail.
-    // Free-text assignee names always pass (stored verbatim on the task).
+    // Pre-validate assignee user ids (same atomic guarantee as before).
     let mut assignee_uuids: std::collections::HashSet<Uuid> = Default::default();
     for it in &items {
-        if let Some(uid_str) = it.assignee_user_id.as_deref() {
-            if let Ok(uid) = Uuid::parse_str(uid_str) {
-                assignee_uuids.insert(uid);
-            }
+        if let Some(u) = it.assignee_user_id.as_deref().and_then(|s| Uuid::parse_str(s).ok()) {
+            assignee_uuids.insert(u);
         }
     }
     if !assignee_uuids.is_empty() {
         let ids: Vec<Uuid> = assignee_uuids.iter().copied().collect();
-        let found: Vec<Uuid> = sqlx::query_scalar(
+        let found: std::collections::HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM users WHERE id = ANY($1)",
         )
         .bind(&ids)
         .fetch_all(&state.db)
-        .await?;
-        let found_set: std::collections::HashSet<Uuid> = found.into_iter().collect();
+        .await?
+        .into_iter()
+        .collect();
         let missing: Vec<String> = assignee_uuids
             .iter()
-            .filter(|u| !found_set.contains(u))
+            .filter(|u| !found.contains(u))
             .map(|u| u.to_string())
             .collect();
         if !missing.is_empty() {
@@ -2202,50 +2473,105 @@ async fn sync_notes_to_tasks(
         }
     }
 
-    // Atomic insert: wrap all task creates + the meeting_notes UPDATE in
-    // one transaction so a mid-loop failure leaves no half-synced state.
+    let meeting_title: String =
+        sqlx::query_scalar("SELECT title FROM meetings WHERE id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
     let mut tx = state.db.begin().await?;
     let mut created: Vec<Uuid> = Vec::new();
+    let mut linked: Vec<Uuid> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
-    for it in items {
+
+    for it in &items {
         let title = it.title.trim();
         if title.is_empty() {
             continue;
         }
-        if existing_lower.contains(&title.to_lowercase()) {
-            skipped.push(title.to_string());
-            continue;
+        let assignee = it.assignee_name.as_deref().or(it.assignee_user_id.as_deref());
+
+        // Resolve the action for this item.
+        let (action, target): (&str, Option<Uuid>) = if legacy_mode {
+            if existing_lower.contains(&title.to_lowercase()) {
+                ("skip", None)
+            } else {
+                ("new", None)
+            }
+        } else {
+            match decisions.get(title) {
+                Some(d) => (d.decision.as_str(), d.target_task_id),
+                // Item the user didn't decide on → safest is create.
+                None => ("new", None),
+            }
+        };
+
+        match action {
+            "continue" => {
+                if let Some(tid) = target {
+                    // Follow-up note on the existing task — the history
+                    // thread the user asked for.
+                    sqlx::query(
+                        "INSERT INTO task_comments (task_id, user_id, content)
+                         VALUES ($1, $2, $3)",
+                    )
+                    .bind(tid)
+                    .bind(auth_user.id)
+                    .bind(format!(
+                        "[{today}] 會議「{meeting_title}」再次提及：{title}"
+                    ))
+                    .execute(&mut *tx)
+                    .await?;
+                    linked.push(tid);
+                } else {
+                    // continue without a target is meaningless → create.
+                    let nid: Uuid = sqlx::query_scalar(
+                        "INSERT INTO project_tasks
+                            (project_id, title, why, assignee, status, priority)
+                         VALUES ($1,$2,$3,$4,'todo','medium') RETURNING id",
+                    )
+                    .bind(project_id)
+                    .bind(title)
+                    .bind(it.description.trim())
+                    .bind(assignee)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    created.push(nid);
+                }
+            }
+            "skip" => {
+                skipped.push(title.to_string());
+            }
+            _ /* "new" */ => {
+                let nid: Uuid = sqlx::query_scalar(
+                    "INSERT INTO project_tasks
+                        (project_id, title, why, assignee, status, priority)
+                     VALUES ($1,$2,$3,$4,'todo','medium') RETURNING id",
+                )
+                .bind(project_id)
+                .bind(title)
+                .bind(it.description.trim())
+                .bind(assignee)
+                .fetch_one(&mut *tx)
+                .await?;
+                created.push(nid);
+            }
         }
-        // Use whichever assignee form we have; assignee column on tasks
-        // is plain TEXT so display names are fine, but we prefer a
-        // user_id-resolved value when present.
-        let assignee = it
-            .assignee_name
-            .as_deref()
-            .or(it.assignee_user_id.as_deref());
-        let new_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO project_tasks
-                (project_id, title, why, assignee, status, priority)
-             VALUES ($1, $2, $3, $4, 'todo', 'medium')
-             RETURNING id",
-        )
-        .bind(project_id)
-        .bind(title)
-        .bind(it.description.trim())
-        .bind(assignee)
-        .fetch_one(&mut *tx)
-        .await?;
-        created.push(new_id);
     }
-    // Append the new ids into `task_ids` on the latest notes row so the
-    // record aggregate stays the source of truth.
-    if !created.is_empty() {
-        let mut all_ids: Vec<String> = serde_json::from_value::<Vec<String>>(
-            notes.task_ids.clone(),
-        )
-        .unwrap_or_default();
-        for nid in &created {
-            all_ids.push(nid.to_string());
+
+    // task_ids on the note tracks BOTH created and linked — the record
+    // aggregate should point at every task this meeting touched.
+    let touched: Vec<Uuid> = created.iter().chain(linked.iter()).copied().collect();
+    if !touched.is_empty() {
+        let mut all_ids: Vec<String> =
+            serde_json::from_value::<Vec<String>>(notes.task_ids.clone())
+                .unwrap_or_default();
+        for tid in &touched {
+            let s = tid.to_string();
+            if !all_ids.contains(&s) {
+                all_ids.push(s);
+            }
         }
         sqlx::query("UPDATE meeting_notes SET task_ids = $1 WHERE id = $2")
             .bind(serde_json::json!(all_ids))
@@ -2255,12 +2581,13 @@ async fn sync_notes_to_tasks(
     }
     tx.commit().await?;
 
-    if !created.is_empty() {
+    if !touched.is_empty() {
         emit_meeting_event(&state, MeetingEvent::RecordUpdated { meeting_id: id });
     }
     Ok(Json(SyncTasksResult {
         synced_notes_version: notes.version,
         created_task_ids: created,
+        linked_task_ids: linked,
         skipped_existing_titles: skipped,
     }))
 }

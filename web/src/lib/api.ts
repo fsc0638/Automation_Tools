@@ -414,9 +414,33 @@ export interface MeetingFile {
   metadata?: unknown;
 }
 
+export interface ReconcileProposal {
+  title: string;
+  description: string;
+  /** AI suggestion: new | continue | duplicate */
+  suggested: "new" | "continue" | "duplicate";
+  target_task_id?: string;
+  target_task_title?: string;
+  target_task_status?: string;
+  reason?: string;
+}
+
+export interface SyncPreviewResult {
+  notes_version: number;
+  proposals: ReconcileProposal[];
+}
+
+export interface SyncDecisionInput {
+  title: string;
+  /** new | continue | skip */
+  decision: "new" | "continue" | "skip";
+  target_task_id?: string;
+}
+
 export interface SyncTasksResult {
   synced_notes_version: number;
   created_task_ids: string[];
+  linked_task_ids: string[];
   skipped_existing_titles: string[];
 }
 
@@ -643,8 +667,20 @@ export const meetings = {
     request<void>(`/meetings/${id}/files/${fileId}`, { method: "DELETE" }),
   generateNotes: (id: string) =>
     request<MeetingNotes>(`/meetings/${id}/notes/generate`, { method: "POST" }),
-  syncNotesToTasks: (id: string) =>
-    request<SyncTasksResult>(`/meetings/${id}/notes/sync-tasks`, { method: "POST" }),
+  /** Step 1: AI-reconcile the latest notes' action items against the
+   *  project's existing tasks. No DB writes — returns a proposal the
+   *  user confirms. */
+  syncTasksPreview: (id: string) =>
+    request<SyncPreviewResult>(`/meetings/${id}/notes/sync-tasks/preview`, {
+      method: "POST",
+    }),
+  /** Step 2: apply the user-confirmed decisions. Omit `decisions` to
+   *  fall back to legacy casefold auto-create. */
+  syncNotesToTasks: (id: string, decisions?: SyncDecisionInput[]) =>
+    request<SyncTasksResult>(`/meetings/${id}/notes/sync-tasks`, {
+      method: "POST",
+      ...(decisions ? { body: JSON.stringify({ decisions }) } : {}),
+    }),
   projectMeetingHistory: (projectId: string) =>
     request<ProjectMeetingHistoryItem[]>(`/projects/${projectId}/meeting-history`),
   updateNotes: (
