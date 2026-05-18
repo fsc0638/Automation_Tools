@@ -78,13 +78,28 @@ pub struct GroundingInputs<'a> {
 /// Equivalent to the old ws.rs inline block; returns the same
 /// [`SecuredAgentContext`] the caller already consumed.
 pub async fn assemble(input: GroundingInputs<'_>) -> Result<SecuredAgentContext> {
-    // 1. Per-turn lexical retrieval overlaid on the session snapshot.
+    // 1. Per-turn hybrid retrieval overlaid on the session snapshot.
     let mut scope = input.base_scope.clone();
-    scope.relevant_file_context =
-        relevant_file_context(input.db, input.project_id, input.query)
-            .await
-            .ok()
-            .flatten();
+    let mut ctx = relevant_file_context(input.db, input.project_id, input.query)
+        .await
+        .ok()
+        .flatten();
+
+    // 1b. Backend-driven explicit-path fetch. Field tests proved the
+    //     gateway ignores client tool protocols, so instead of asking
+    //     the model to "call read_file", the BACKEND deterministically
+    //     reads any file path the user literally named in the question
+    //     (e.g. "看 backend/src/api/auth.rs 怎麼寫") and injects its
+    //     real content. Confined to the project root; goes through the
+    //     same firewall/redaction/audit below (it's folded into
+    //     relevant_file_context). No gateway cooperation required.
+    if let Some(block) = read_named_files(scope.root.as_deref(), input.query) {
+        ctx = Some(match ctx {
+            Some(existing) => format!("{block}\n\n{existing}"),
+            None => block,
+        });
+    }
+    scope.relevant_file_context = ctx;
 
     // 2. DLP context firewall (classification gate + secret redaction +
     //    audit row). Unchanged from before — just relocated.
@@ -101,6 +116,162 @@ pub async fn assemble(input: GroundingInputs<'_>) -> Result<SecuredAgentContext>
         input.query,
     )
     .await
+}
+
+// ── Backend-driven explicit-path retrieval ───────────────────────────
+//
+// The user-chosen path (2026-05-18) after proving the gateway won't do
+// client-side tool calls: the BACKEND, not the model, resolves file
+// paths named in the question and reads them. Deterministic, needs zero
+// gateway cooperation, confined to the project root, and the output is
+// firewalled/redacted/audited downstream (it's merged into
+// relevant_file_context before secure_agent_context runs).
+
+const NAMED_FILE_MAX_BYTES: usize = 16_000;
+const NAMED_FILES_MAX: usize = 4;
+
+/// Extensions that make a bare `name.ext` token (no slash) count as a
+/// file reference. Tokens containing `/` are always considered paths.
+const PATHISH_EXTS: &[&str] = &[
+    "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "kt", "swift",
+    "rb", "php", "cs", "cpp", "cc", "c", "h", "hpp", "sql", "md", "toml",
+    "yaml", "yml", "json", "sh", "ps1", "css", "scss", "html", "xml",
+    "txt", "env", "cfg", "ini", "gradle", "proto",
+];
+
+/// Pull file-path-looking tokens out of a free-form question. Conservative:
+/// a token qualifies only if it has a path separator OR ends in a known
+/// code extension, so ordinary prose ("and/or", "v3.0") rarely matches.
+fn extract_query_paths(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let raw = query.replace('\\', "/");
+    for tok in raw.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
+                    | '<' | '>' | ',' | ';' | '：' | '，' | '。' | '、'
+                    | '；' | '「' | '」' | '『' | '』' | '（' | '）'
+                    | '【' | '】' | '？' | '！'
+            )
+    }) {
+        let t = tok.trim_matches(|c: char| c == '.' || c == ':' || c == '#');
+        if t.len() < 3 || t.len() > 256 {
+            continue;
+        }
+        // Qualify by a real file extension on the basename — NOT merely
+        // a slash (otherwise prose like "and/or" is mistaken for a
+        // path). Dir-only tokens are intentionally excluded; this
+        // feature fetches file *content*.
+        let base = t.rsplit('/').next().unwrap_or(t);
+        let has_ext = base.contains('.')
+            && !base.ends_with('.')
+            && base
+                .rsplit('.')
+                .next()
+                .map(|e| PATHISH_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+                .unwrap_or(false);
+        if has_ext && !out.iter().any(|p| p == t) {
+            out.push(t.to_string());
+            if out.len() >= NAMED_FILES_MAX * 3 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Resolve `rel` strictly inside `root` (no `..`, no absolute escape,
+/// no symlink-out). Returns the canonical absolute path or `None`.
+fn confine(root: &str, rel: &str) -> Option<std::path::PathBuf> {
+    let rel = rel.trim().trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|s| s == "..") {
+        return None;
+    }
+    if std::path::Path::new(rel).is_absolute() {
+        return None;
+    }
+    let root_canon = std::fs::canonicalize(root).ok()?;
+    let joined = root_canon.join(rel);
+    let canon = std::fs::canonicalize(&joined).ok()?;
+    canon.starts_with(&root_canon).then_some(canon)
+}
+
+/// Read every project-root-confined file the question explicitly named,
+/// as one labelled block (or `None` when the question named no resolvable
+/// path — the overwhelmingly common case, so normal questions are
+/// completely unaffected).
+fn read_named_files(root: Option<&str>, query: &str) -> Option<String> {
+    let root = root?;
+    if root.trim().is_empty() {
+        return None;
+    }
+    let mut body = String::new();
+    let mut count = 0usize;
+    for cand in extract_query_paths(query) {
+        if count >= NAMED_FILES_MAX {
+            break;
+        }
+        let Some(abs) = confine(root, &cand) else {
+            continue;
+        };
+        if !abs.is_file() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        let truncated = text.len() > NAMED_FILE_MAX_BYTES;
+        let snippet: String = text.chars().take(NAMED_FILE_MAX_BYTES).collect();
+        body.push_str(&format!(
+            "\n--- FILE: {} ---\n{}\n{}",
+            cand,
+            snippet,
+            if truncated { "（檔案過長，已截斷）\n" } else { "" }
+        ));
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(format!(
+        "===== 使用者於問題中點名的檔案（後端依問句自動讀入；以下為實際內容，\
+非推測；引用時請標明檔名）=====\
+{body}\n====================================================="
+    ))
+}
+
+#[cfg(test)]
+mod named_path_tests {
+    use super::*;
+
+    #[test]
+    fn detects_real_paths_ignores_prose() {
+        // Positive: explicit code paths in a natural question.
+        let q = "這專案登入流程怎麼寫的？看 `backend/src/api/auth.rs` 跟 web/src/lib/api.ts";
+        let got = extract_query_paths(q);
+        assert!(got.contains(&"backend/src/api/auth.rs".to_string()), "{got:?}");
+        assert!(got.contains(&"web/src/lib/api.ts".to_string()), "{got:?}");
+
+        // Negative: ordinary prose must not be mistaken for paths.
+        let p = extract_query_paths("請比較 A 方案 and/or B 方案的優缺點與版本 v3.0");
+        assert!(p.is_empty(), "false positive on prose: {p:?}");
+
+        // Bare filename with a code extension still counts.
+        assert_eq!(
+            extract_query_paths("看一下 sessions.py 的實作"),
+            vec!["sessions.py".to_string()]
+        );
+    }
+
+    #[test]
+    fn confine_blocks_escape() {
+        // Path traversal / absolute escape must be rejected regardless
+        // of whether the target exists.
+        assert!(confine(".", "../../etc/passwd").is_none());
+        assert!(confine(".", "/etc/passwd").is_none());
+        assert!(confine(".", "a/../../b").is_none());
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════

@@ -196,14 +196,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         "pre-grounding local sync"
     );
     let base_project_scope = build_project_scope(&project);
-    // Phase 5: session-scoped tool runtime so the model can actively
-    // search the index / read local paths / read remote paths@ref
-    // mid-stream instead of being limited to a fixed pre-injected slice.
-    let chat_tool_runtime = crate::agents::orchestrator::ChatToolRuntime {
-        db: state.db.clone(),
-        project: project.clone(),
-        credentials: git_credentials.clone(),
-    };
+    // NOTE (2026-05-18): the in-stream ReAct tool loop is intentionally
+    // NOT wired here. Field tests (TC-1b + TC-6) proved Hermes/OpenClaw
+    // via the gateway ignore our text `ACTION:` protocol entirely (the
+    // Phase 0 U3 risk, now confirmed: they're autonomous agents). So we
+    // pass `None` and rely on backend-driven retrieval — grounding::
+    // assemble does hybrid retrieval AND deterministically pulls any
+    // file path the user names, with zero gateway cooperation. The
+    // tool plumbing stays in the codebase only for the isolated
+    // /agent/react endpoint. (`git_credentials` is still consumed by
+    // the Phase 2a pre-grounding sync above.)
 
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
@@ -356,7 +358,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             shared_notes,
             &secured_context.user_message,
             agent_mode,
-            Some(chat_tool_runtime.clone()),
+            None,
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
         let mut timing: HashMap<String, AgentCallTiming> = HashMap::new();
