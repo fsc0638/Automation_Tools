@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Default maximum time to wait for the next visible streamed token before
@@ -31,7 +32,20 @@ use crate::{
     api::shared_memory::SharedMemoryNote,
     config::Config,
     db::models::{Message, Project},
+    git_ops::manager::GitCredentials,
 };
+
+/// Phase 5 (chat): everything the in-stream ReAct tool loop needs to
+/// actually go read the project on the model's behalf. Threaded from
+/// ws.rs (session-scoped, cloned per turn). `None` ⇒ no tools (debate
+/// modes / callers that don't opt in) and the legacy static-context
+/// streaming path runs unchanged.
+#[derive(Clone)]
+pub struct ChatToolRuntime {
+    pub db: PgPool,
+    pub project: Project,
+    pub credentials: Option<GitCredentials>,
+}
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")]
@@ -1321,6 +1335,7 @@ pub fn run_agent_stream(
     shared_notes: Vec<SharedMemoryNote>,
     user_message: &str,
     mode: AgentMode,
+    tools: Option<ChatToolRuntime>,
 ) -> Pin<Box<dyn Stream<Item = ServerEvent> + Send>> {
     let config = config.clone();
     let project = project.clone();
@@ -1336,6 +1351,197 @@ pub fn run_agent_stream(
     Box::pin(async_stream::stream! {
         let openclaw = OpenClawClient::new(&config);
         let hermes = HermesClient::new(&config);
+
+        // ── Phase 5 (chat): agentic in-stream tool loop ──────────────
+        // When a tool runtime is wired AND this is a single-agent mode,
+        // the model can drive search_index / read_file (local or remote
+        // @ref) / list_tree itself. We stream its turn live, intercept a
+        // complete `ACTION:` line, run the (firewalled) tool, feed the
+        // OBSERVATION back, and keep streaming — bounded by max_iters.
+        // Debate modes and the no-tools case fall through to the legacy
+        // static-context path below, byte-for-byte unchanged.
+        if let Some(rt) = tools.clone() {
+            #[derive(Clone)]
+            enum ToolAgent { OpenClaw, Hermes, Custom(AgentProfileRuntime) }
+            let picked = match &mode {
+                AgentMode::OpenClawOnly => Some(("OpenClaw".to_string(), ToolAgent::OpenClaw)),
+                AgentMode::HermesOnly => Some(("Hermes".to_string(), ToolAgent::Hermes)),
+                AgentMode::Custom(p) => Some((p.name.clone(), ToolAgent::Custom(p.clone()))),
+                _ => None,
+            };
+            if let Some((agent_label, which)) = picked {
+                let cfg = config.clone();
+                let make = move |msgs: Vec<ChatMessage>|
+                    -> Pin<Box<dyn Stream<Item = AgentStreamEvent> + Send>> {
+                    match &which {
+                        ToolAgent::OpenClaw => OpenClawClient::new(&cfg).chat_stream(msgs),
+                        ToolAgent::Hermes => HermesClient::new(&cfg).chat_stream(msgs),
+                        ToolAgent::Custom(p) => GenericAgentClient::new(p.clone()).chat_stream(msgs),
+                    }
+                };
+                // Tell the model it can pull real files (front of context).
+                chat.insert(0, ChatMessage {
+                    role: "system".into(),
+                    content: crate::grounding::tools::chat_tools_protocol(),
+                });
+                let project_root = project.root.clone().unwrap_or_default();
+                let mut response_metadata = None;
+                let mut answered = false;
+                let max_iters = 5;
+
+                for _ in 0..max_iters {
+                    yield ServerEvent::Status {
+                        agent: agent_label.clone(),
+                        message: format!("{agent_label} 正在閱讀專案並思考..."),
+                        round: None,
+                        phase: Some("thinking".into()),
+                        input_tokens: Some(estimate_chat_tokens(&chat)),
+                    };
+                    let mut stream = batch_chunks(make(chat.clone()));
+                    let mut turn = String::new();
+                    let mut pending = String::new();
+                    let mut in_final = false;
+                    let mut action: Option<crate::grounding::tools::ToolCall> = None;
+
+                    loop {
+                        match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                            Ok(Some(AgentStreamEvent::Content(c))) => {
+                                turn.push_str(&c);
+                                if in_final {
+                                    yield ServerEvent::Chunk {
+                                        agent: agent_label.clone(), content: c,
+                                        round: None, phase: None,
+                                    };
+                                    continue;
+                                }
+                                pending.push_str(&c);
+                                while let Some(nl) = pending.find('\n') {
+                                    let line: String = pending.drain(..=nl).collect();
+                                    if let Some(tc) =
+                                        crate::grounding::tools::parse_action(&line)
+                                    {
+                                        action = Some(tc);
+                                        break;
+                                    }
+                                    let t = line.trim_start();
+                                    if let Some(rest) = t.strip_prefix("FINAL:") {
+                                        in_final = true;
+                                        let r = rest.trim_start();
+                                        if !r.is_empty() {
+                                            yield ServerEvent::Chunk {
+                                                agent: agent_label.clone(),
+                                                content: r.to_string(),
+                                                round: None, phase: None,
+                                            };
+                                        }
+                                    } else {
+                                        yield ServerEvent::Chunk {
+                                            agent: agent_label.clone(), content: line,
+                                            round: None, phase: None,
+                                        };
+                                    }
+                                }
+                                if action.is_some() { break; }
+                            }
+                            Ok(Some(AgentStreamEvent::Metadata(m))) => {
+                                response_metadata = Some(m);
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                yield ServerEvent::Error {
+                                    message: format!("{agent_label} stream timed out"),
+                                };
+                                return;
+                            }
+                        }
+                    }
+
+                    if let Some(call) = action {
+                        yield ServerEvent::Status {
+                            agent: agent_label.clone(),
+                            message: crate::grounding::tools::tool_status_msg(&call),
+                            round: None,
+                            phase: Some("tool".into()),
+                            input_tokens: None,
+                        };
+                        let ctx = crate::grounding::tools::ToolCtx {
+                            db: &rt.db,
+                            project: &rt.project,
+                            root: project_root.clone(),
+                            credentials: rt.credentials.clone(),
+                        };
+                        let obs = crate::grounding::tools::run_tool(&ctx, &call).await;
+                        chat.push(ChatMessage { role: "assistant".into(), content: turn });
+                        chat.push(ChatMessage {
+                            role: "user".into(),
+                            content: format!(
+                                "OBSERVATION:\n{obs}\n\n依據以上實際檔案內容繼續。\
+若已足夠回答，用一行 FINAL: 開頭給最終答案並標明依據檔案路徑；\
+若還需要看別的檔，再輸出一個 ACTION:。"
+                            ),
+                        });
+                        continue;
+                    }
+
+                    // Natural end, no action: flush leftover partial line.
+                    if !pending.is_empty() {
+                        let out = if !in_final {
+                            pending
+                                .trim_start()
+                                .strip_prefix("FINAL:")
+                                .map(|r| r.trim_start().to_string())
+                                .unwrap_or_else(|| pending.clone())
+                        } else {
+                            pending.clone()
+                        };
+                        if !out.is_empty() {
+                            yield ServerEvent::Chunk {
+                                agent: agent_label.clone(), content: out,
+                                round: None, phase: None,
+                            };
+                        }
+                    }
+                    answered = true;
+                    break;
+                }
+
+                if !answered {
+                    chat.push(ChatMessage {
+                        role: "user".into(),
+                        content: "已達工具呼叫上限。請直接根據目前已掌握的實際檔案\
+內容回答，不要再呼叫工具。".into(),
+                    });
+                    let mut stream = batch_chunks(make(chat.clone()));
+                    loop {
+                        match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                            Ok(Some(AgentStreamEvent::Content(c))) => {
+                                let c = c
+                                    .strip_prefix("FINAL:")
+                                    .map(|r| r.trim_start().to_string())
+                                    .unwrap_or(c);
+                                yield ServerEvent::Chunk {
+                                    agent: agent_label.clone(), content: c,
+                                    round: None, phase: None,
+                                };
+                            }
+                            Ok(Some(AgentStreamEvent::Metadata(m))) => {
+                                response_metadata = Some(m);
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                yield ServerEvent::Error {
+                                    message: format!("{agent_label} stream timed out"),
+                                };
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                yield done_event(agent_label, None, None, response_metadata);
+                return;
+            }
+        }
 
         match mode {
             AgentMode::OpenClawOnly => {

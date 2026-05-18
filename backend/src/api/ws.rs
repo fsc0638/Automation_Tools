@@ -174,14 +174,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             return;
         }
     };
+    // Resolve git credentials once per session — reused by the Phase 2a
+    // pre-grounding sync AND the Phase 5 in-chat tool runtime (so the
+    // model can read_file at a remote ref through the same auth).
+    let git_credentials =
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await;
     // Phase 2a: refresh the local clone from origin before we snapshot
     // it, so chat grounds on files that track the remote. Best-effort
     // and timeout-bounded — any failure just grounds on the stale copy.
     // Done once per session (snapshot is also session-scoped).
     let freshen = crate::grounding::freshen_local(
         &project,
-        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
-            .await,
+        git_credentials.clone(),
         &crate::grounding::GroundingSource::default(),
     )
     .await;
@@ -191,6 +196,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         "pre-grounding local sync"
     );
     let base_project_scope = build_project_scope(&project);
+    // Phase 5: session-scoped tool runtime so the model can actively
+    // search the index / read local paths / read remote paths@ref
+    // mid-stream instead of being limited to a fixed pre-injected slice.
+    let chat_tool_runtime = crate::agents::orchestrator::ChatToolRuntime {
+        db: state.db.clone(),
+        project: project.clone(),
+        credentials: git_credentials.clone(),
+    };
 
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
@@ -343,6 +356,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             shared_notes,
             &secured_context.user_message,
             agent_mode,
+            Some(chat_tool_runtime.clone()),
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
         let mut timing: HashMap<String, AgentCallTiming> = HashMap::new();

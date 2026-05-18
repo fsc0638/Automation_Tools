@@ -75,6 +75,63 @@ FINAL: <最終答案>\n\
 答案需根據實際讀到的內容，並標明依據的檔案路徑。"
 }
 
+/// ReAct contract for the **streaming chat** path. Same protocol as
+/// `protocol_prompt` but worded for an interactive turn: explore the
+/// real project via tools, then answer. The in-stream interceptor in
+/// run_agent_stream parses `ACTION:` lines live, executes the tool
+/// (firewalled), feeds `OBSERVATION:` back, and keeps streaming.
+pub fn chat_tools_protocol() -> String {
+    "[工具能力] 你不是只能看到預先注入的片段——你可以主動查證這個專案的\
+真實檔案後再回答。需要時就用工具，不要用猜的、也不要叫使用者貼檔。\n\
+\n\
+呼叫工具：輸出獨立一行，格式為\n\
+ACTION: <tool> <json參數>\n\
+然後停住等系統回 OBSERVATION:。可連續多次（最多 5 次）。\n\
+\n\
+可用工具（皆唯讀、限本專案）：\n\
+- search_index {\"query\":\"自然語言或關鍵字\"}  混合語意+字面檢索已索引內容（中文問也行）\n\
+- read_file {\"path\":\"相對路徑\"}  讀本地該檔；或加 {\"ref\":\"分支/commit/tag\"} 直接讀遠端那個版本\n\
+- list_tree {\"path\":\"可選相對目錄\"}  看目錄結構\n\
+\n\
+策略：先 search_index 找線索 → read_file 把關鍵檔讀進來核實 → 再回答。\n\
+能回答時，用一行 FINAL: 開頭給最終答案，並標明依據的實際檔案路徑。"
+        .to_string()
+}
+
+/// Short, human-friendly status line shown to the user while a tool
+/// runs (so the chat shows "讀取 src/auth.rs ..." instead of raw
+/// protocol noise).
+pub fn tool_status_msg(call: &ToolCall) -> String {
+    let arg = |k: &str| {
+        call.args
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    match call.name.as_str() {
+        "search_index" => format!("檢索專案：「{}」…", arg("query")),
+        "read_file" => {
+            let p = arg("path");
+            let r = arg("ref");
+            if r.is_empty() {
+                format!("讀取檔案 {p} …")
+            } else {
+                format!("讀取遠端 {p}@{r} …")
+            }
+        }
+        "list_tree" => {
+            let p = arg("path");
+            if p.is_empty() {
+                "瀏覽專案目錄結構…".to_string()
+            } else {
+                format!("瀏覽目錄 {p} …")
+            }
+        }
+        other => format!("執行工具 {other} …"),
+    }
+}
+
 /// Parse the FIRST `ACTION:` directive from a model turn. Tolerates a
 /// bare line or a ```fenced``` block, and a missing/!JSON arg blob
 /// (treated as `{}`), so a slightly-off model turn still progresses.
