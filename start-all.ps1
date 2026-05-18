@@ -1,17 +1,21 @@
-# start-all.ps1 — 一鍵啟動 Kway Dev 本地環境
+# start-all.ps1 - one-shot launcher for the Kway Dev local environment.
 #
-# 用法：
-#   .\start-all.ps1            # 直接啟動（用現有 backend binary）
-#   .\start-all.ps1 -Build     # 先 cargo build --release 再啟動
-#   .\start-all.ps1 -Stop      # 關掉 backend / frontend
+# ASCII-only on purpose: Windows PowerShell 5.1 parses .ps1 with the
+# system ANSI codepage, so non-ASCII without a BOM corrupts the file and
+# throws "MissingArrayIndexExpression". Keep this script English-only.
 #
-# 三個服務：
-#   1. PostgreSQL (Windows service postgresql-x64-18)
-#   2. Rust backend  → http://localhost:8888  (cmd 包一層繞 WDAC)
-#   3. Next.js front → http://localhost:3000
+# Usage:
+#   .\start-all.ps1            start (use existing backend binary)
+#   .\start-all.ps1 -Build     cargo build --release first, then start
+#   .\start-all.ps1 -Stop      stop backend + frontend
 #
-# Backend binary 在 C:\rust-build\kway-backend\release\ 不是專案 target/，
-# 這是為了繞過 WDAC 封鎖設定的 CARGO_TARGET_DIR。
+# Services:
+#   1. PostgreSQL  (Windows service postgresql-x64-18)
+#   2. Rust backend -> http://localhost:8888  (launched via cmd, WDAC)
+#   3. Next.js dev  -> http://localhost:3000
+#
+# Backend binary lives at C:\rust-build\kway-backend\release\ (the
+# CARGO_TARGET_DIR override used to dodge WDAC), not the project target/.
 
 param(
     [switch]$Build,
@@ -19,72 +23,77 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ProjectRoot = "C:\Users\kicl1\OneDrive\文件\研發組專案\Kway_In-house_Dev_Automation_Tools"
+# Derive the project root from the script's own location so this file
+# stays 100% ASCII (the repo path contains non-ASCII characters; hard-
+# coding it would reintroduce the codepage corruption this rewrite fixes).
+$ProjectRoot = $PSScriptRoot
 $BackendDir  = Join-Path $ProjectRoot "backend"
 $WebDir      = Join-Path $ProjectRoot "web"
 $BackendExe  = "C:\rust-build\kway-backend\release\kway-dev-backend.exe"
 $PgService   = "postgresql-x64-18"
 
-# ── Stop mode ─────────────────────────────────────────────────────────
+# ---- Stop mode -------------------------------------------------------
 if ($Stop) {
-    Write-Host "[stop] 關閉 backend / frontend..." -ForegroundColor Yellow
+    Write-Host "[stop] stopping backend / frontend..." -ForegroundColor Yellow
     Get-Process -Name "kway-dev-backend" -ErrorAction SilentlyContinue |
-        Stop-Process -Force
-    # next dev 跑在 node 底下；只關掉 cwd 在 web/ 的那個比較難判斷，
-    # 這裡用 port 3000 來找。
-    $p = (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue).OwningProcess
-    if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
-    Write-Host "[stop] 完成（PostgreSQL service 保留不動）" -ForegroundColor Green
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    $conn = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
+    if ($conn) {
+        Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "[stop] done (PostgreSQL service left running)" -ForegroundColor Green
     return
 }
 
-# ── 1. PostgreSQL ─────────────────────────────────────────────────────
+# ---- 1. PostgreSQL ---------------------------------------------------
 $svc = Get-Service $PgService -ErrorAction SilentlyContinue
 if ($null -eq $svc) {
-    Write-Host "[db]   找不到服務 $PgService — 請確認 PostgreSQL 18 已安裝" -ForegroundColor Red
-} elseif ($svc.Status -ne "Running") {
-    Write-Host "[db]   啟動 $PgService..." -ForegroundColor Cyan
+    Write-Host "[db] service $PgService not found - is PostgreSQL 18 installed?" -ForegroundColor Red
+}
+elseif ($svc.Status -ne "Running") {
+    Write-Host "[db] starting $PgService..." -ForegroundColor Cyan
     Start-Service $PgService
-    Write-Host "[db]   PostgreSQL 已啟動" -ForegroundColor Green
-} else {
-    Write-Host "[db]   PostgreSQL 已在執行" -ForegroundColor Green
+    Write-Host "[db] PostgreSQL started" -ForegroundColor Green
+}
+else {
+    Write-Host "[db] PostgreSQL already running" -ForegroundColor Green
 }
 
-# ── 2. Backend ────────────────────────────────────────────────────────
+# ---- 2. Backend ------------------------------------------------------
 if ($Build) {
-    Write-Host "[be]   cargo build --release（改過 code 才需要，稍等...）" -ForegroundColor Cyan
+    Write-Host "[be] cargo build --release (only needed after code changes)..." -ForegroundColor Cyan
     Push-Location $BackendDir
     cargo build --release
     Pop-Location
-    Write-Host "[be]   編譯完成" -ForegroundColor Green
+    Write-Host "[be] build complete" -ForegroundColor Green
 }
 
 if (-not (Test-Path $BackendExe)) {
-    Write-Host "[be]   找不到 $BackendExe — 先跑一次 .\start-all.ps1 -Build" -ForegroundColor Red
+    Write-Host "[be] $BackendExe missing - run .\start-all.ps1 -Build first" -ForegroundColor Red
     return
 }
 
-# 已經在跑就先關掉舊的，避免 port 8888 卡住
+# Kill any old instance so port 8888 is free.
 Get-Process -Name "kway-dev-backend" -ErrorAction SilentlyContinue |
-    Stop-Process -Force
+    Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
-Write-Host "[be]   啟動 backend（新視窗，cmd 繞 WDAC）..." -ForegroundColor Cyan
+Write-Host "[be] launching backend (new window, cmd wrapper for WDAC)..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
     "Set-Location '$BackendDir'; cmd /c `"$BackendExe`""
 )
 
-# ── 3. Frontend ───────────────────────────────────────────────────────
-Write-Host "[fe]   啟動 Next.js dev（新視窗）..." -ForegroundColor Cyan
+# ---- 3. Frontend -----------------------------------------------------
+Write-Host "[fe] launching Next.js dev (new window)..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
     "Set-Location '$WebDir'; npm run dev"
 )
 
-# ── 健康檢查 ──────────────────────────────────────────────────────────
+# ---- health check ----------------------------------------------------
 Write-Host ""
-Write-Host "[wait] 等 backend 起來（最多 60 秒）..." -ForegroundColor Cyan
+Write-Host "[wait] waiting up to 60s for backend healthz..." -ForegroundColor Cyan
 $ok = $false
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
@@ -92,15 +101,17 @@ for ($i = 0; $i -lt 60; $i++) {
         $r = Invoke-WebRequest -Uri "http://localhost:8888/healthz" `
              -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
         if ($r.StatusCode -eq 200) { $ok = $true; break }
-    } catch { }
+    }
+    catch { }
 }
 
 Write-Host ""
 if ($ok) {
-    Write-Host "✓ Backend  http://localhost:8888  (healthz OK)" -ForegroundColor Green
-} else {
-    Write-Host "✗ Backend 60 秒內沒回應 — 看新開的 backend 視窗錯誤訊息" -ForegroundColor Red
+    Write-Host "OK  Backend  http://localhost:8888  (healthz 200)" -ForegroundColor Green
 }
-Write-Host "→ Frontend http://localhost:3000  (Next.js 首次編譯需 10-30 秒)" -ForegroundColor Green
+else {
+    Write-Host "XX  Backend not responding in 60s - check the new backend window" -ForegroundColor Red
+}
+Write-Host "->  Frontend http://localhost:3000  (first Next.js compile 10-30s)" -ForegroundColor Green
 Write-Host ""
-Write-Host "關閉：.\start-all.ps1 -Stop" -ForegroundColor DarkGray
+Write-Host "Stop with: .\start-all.ps1 -Stop" -ForegroundColor DarkGray
