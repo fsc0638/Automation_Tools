@@ -22,6 +22,7 @@ mod crypto;
 mod db;
 mod error;
 mod git_ops;
+mod grounding;
 mod security;
 
 use api::{router, AppState};

@@ -27,13 +27,12 @@ use crate::{
             get_project_summary, load_project_history, refresh_conversation_summary,
             refresh_project_summary,
         },
-        project_index::relevant_file_context,
         shared_memory::{truncate_note_bodies, SharedMemoryNote},
         AppState,
     },
     db::models::{AgentProfile, Project},
     error::AppError,
-    security::context_firewall::{secure_agent_context, AgentDataPolicy},
+    security::context_firewall::AgentDataPolicy,
 };
 
 #[derive(Debug, Deserialize)]
@@ -276,26 +275,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                 continue;
             }
         };
-        let mut project_scope = base_project_scope.clone();
-        project_scope.relevant_file_context =
-            relevant_file_context(&state.db, query.project_id, &content)
-                .await
-                .ok()
-                .flatten();
-
         let mode_label = mode_label(&agent_mode);
         let data_policy = AgentDataPolicy::for_mode(&agent_mode);
-        let secured_context = match secure_agent_context(
-            &state.db,
-            user_id,
-            query.project_id,
-            query.conversation_id,
-            mode_label,
-            &data_policy,
-            &project_scope,
-            &history,
-            project_summary.map(|summary| summary.summary),
-            &content,
+        // Phase 1: grounding assembly (scope clone → per-turn lexical
+        // retrieval → context firewall) moved verbatim into the unified
+        // provider. Behaviour is identical to the previous inline block.
+        let secured_context = match crate::grounding::assemble(
+            crate::grounding::GroundingInputs {
+                db: &state.db,
+                user_id,
+                project_id: query.project_id,
+                conversation_id: query.conversation_id,
+                mode_label,
+                data_policy: &data_policy,
+                base_scope: &base_project_scope,
+                history: &history,
+                project_summary: project_summary.map(|summary| summary.summary),
+                query: &content,
+            },
         )
         .await
         {
@@ -487,7 +484,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             .await;
         }
 
-        let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;
+        // Phase 1: the per-turn lexical overlay now lives inside the
+        // grounding provider. refresh_project_summary only reads
+        // id/name/root (see build_summary_prompt), so the session-level
+        // base_project_scope is byte-identical here to the old clone.
+        let _ = refresh_project_summary(&state.db, &state.config, &base_project_scope).await;
         // Per-conversation summary is a UI nice-to-have; ignore failures so
         // they never bubble back to the user (the chat itself already
         // succeeded by this point).

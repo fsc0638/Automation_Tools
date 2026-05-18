@@ -39,7 +39,20 @@ grounding::assemble(
 
 ## 階段路線（依相依性 + 風險 + 價值排序）
 
-### Phase 0 — 解三個 BLOCKING 未知（spike，0.5–1 天）
+### Phase 0 — 結果（2026-05-18 spike 完成）
+
+| 未知 | 答案 | 對策 |
+|---|---|---|
+| U1 gateway embeddings | ❌ Hermes 404 / OpenClaw 500，皆不可用 | Phase 3 改本地 `fastembed-rs`（內建 ONNX，零網路） |
+| U2 pgvector @ PG18 | ❌ `extension "vector" is not available` | Phase 3 改 `float4[]` 欄 + Rust cosine，不用 pgvector |
+| U3 gateway tool calling | ❌ 不支援 client-side tool_calls；Hermes/OpenClaw 是自主 agent，跑自己沙箱的工具，忽略我們的 `tools` | Phase 5 改 ReAct 文字協定（model 輸出 ACTION:，後端攔截執行餵回） |
+
+**最大啟示**：Hermes/OpenClaw 碰不到我們的資料，只能靠後端把內容當文字
+預先注入 → Phase 1–4 方向正確且更重要；Phase 3/5 做法調整如上，四軸精神不變。
+
+---
+
+### Phase 0 — 解三個 BLOCKING 未知（spike，0.5–1 天）— 原始描述
 
 動工前必須先確認，否則 Phase 3/5 會做一半卡住：
 
