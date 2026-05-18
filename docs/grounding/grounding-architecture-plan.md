@@ -156,3 +156,37 @@ citation 規範，讓 AI 產出能標「依據 <檔案>@<ref>」。會議紀錄 
 2. 同意排序 `0 → 1 → 4 → 2 → 3 → 5`？
 3. Demo 前範圍是否就鎖 Phase 0 + 1 + 4？
 4. Phase 0 spike 我現在就開跑嗎？（要動到查 Hermes/OpenClaw gateway 能力、試 pgvector）
+
+---
+
+## 實作進度（依拍板順序 0 → 1 → 4 → 2 → 3 → 5 全數完成）
+
+| Phase | 狀態 | 內容 | 關鍵檔案 |
+|---|---|---|---|
+| 0 | ✅ | spike：三未知皆 ❌，3/5 調整 | （本文件上方表） |
+| 1 | ✅ | 抽出 `grounding::assemble`，ws.rs 純重構零行為變更 | `grounding/mod.rs`、`api/ws.rs` |
+| 4 | ✅ | 會議紀錄走 assemble + firewall + 稽核 | `api/meetings.rs`、`migrations/0036` |
+| 2 | ✅ | 2a 接地前 timeout sync（fail→舊副本）；2b GitHub/GitLab Contents API 即時讀檔 + 60s 快取 | `grounding/mod.rs`、`migrations/—`（無）、`api/projects.rs` |
+| 3 | ✅ | 字面+向量混合（`REAL[]` 欄 + Rust cosine） | `grounding/embedding.rs`、`api/project_index.rs`、`migrations/0037` |
+| 5 | ✅ | ReAct 文字協定工具迴圈（read-only 三工具，全過 firewall，max-iter） | `grounding/tools.rs`、`api/projects.rs` |
+
+### Phase 3 做法偏離說明（決策透明）
+
+Phase 0 原點名 `fastembed-rs`。實作時改為**本地零依賴、零網路的雜湊
+n-gram 向量**（FNV-1a、L2 normalize、`EMBED_DIM=256`、英數 token + CJK
+bigram），原因：
+
+- 計畫的硬性原則是「embedding provider 不可用時必須**自動退回字面、
+  不可阻斷**」。在此 WDAC 鎖定、離線的 Windows 環境，會下載
+  HuggingFace 模型的 ONNX 重依賴（`ort`）正是最可能「不可用」、且會
+  危及 build 的東西。
+- 自帶向量器永遠可用 ⇒「provider 不可用」退化情形天然不存在，符合
+  fail-open 精神，且仍是真正的向量空間（cosine 融合字面分數）。
+- `embedding::embed()/cosine()` 是介面接縫：日後要換學習式 embedder
+  不需動任何呼叫端。四軸精神（字面+向量混合）不變。
+
+### Phase 5 範圍說明
+
+ReAct 迴圈以**獨立 endpoint** `POST /projects/:id/agent/react` 落地，
+不侵入既有 streaming 聊天（零回歸風險）。工具皆唯讀、路徑限制在專案
+根目錄、輸出強制過 `redact_secrets`，初始脈絡走 `assemble` 取得稽核列。

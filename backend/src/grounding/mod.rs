@@ -33,6 +33,7 @@
 //! found).
 
 pub mod embedding;
+pub mod tools;
 
 use anyhow::{anyhow, Result};
 use sqlx::PgPool;

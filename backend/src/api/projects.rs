@@ -65,6 +65,7 @@ pub fn routes() -> Router<AppState> {
         .route("/projects/:id/git/checkout", post(switch_git_branch))
         .route("/projects/:id/git/sync", post(sync_git_repo))
         .route("/projects/:id/git/remote-file", get(get_remote_file))
+        .route("/projects/:id/agent/react", post(react_agent))
         .route("/git/remote-branches", post(get_remote_branches))
 }
 
@@ -365,6 +366,179 @@ async fn switch_git_branch(
     let _ = rebuild_project_index(&state.db, updated.id, &root).await;
 
     Ok(Json(updated))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReactRequest {
+    pub query: String,
+    pub max_iters: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReactResponse {
+    pub answer: String,
+    pub iterations: u32,
+    pub steps: Vec<crate::grounding::tools::ToolStep>,
+}
+
+/// Get-or-create the single scratch conversation that anchors a
+/// (project, user) ReAct session — needed because the grounding
+/// provider's firewall audit row FK-references conversations(id).
+async fn ensure_react_conversation(
+    state: &AppState,
+    project_id: Uuid,
+    user_id: Uuid,
+) -> AppResult<Uuid> {
+    if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM conversations
+         WHERE project_id = $1 AND user_id = $2 AND title = '[react]'
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    {
+        return Ok(existing);
+    }
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO conversations (project_id, user_id, title)
+         VALUES ($1, $2, '[react]') RETURNING id",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(id)
+}
+
+/// Phase 5 — ReAct tool-calling loop. The model is given a read-only
+/// tool set (search_index / read_file / list_tree); it emits
+/// `ACTION:` text, the backend executes the tool THROUGH the grounding
+/// provider + firewall, feeds the redacted `OBSERVATION:` back, and
+/// repeats up to a bounded number of iterations. Initial project
+/// context is grounded + firewalled + audited via grounding::assemble.
+async fn react_agent(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ReactRequest>,
+) -> AppResult<Json<ReactResponse>> {
+    let query = req.query.trim().to_string();
+    if query.is_empty() {
+        return Err(AppError::BadRequest("query is required".into()));
+    }
+    let project = find_project(&state, id, auth_user.id).await?;
+    let root = project_root_path(&project);
+    let credentials =
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await;
+
+    // Best-effort pre-grounding sync (Phase 2a) so tools see fresh files.
+    let _ = crate::grounding::freshen_local(
+        &project,
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await,
+        &crate::grounding::GroundingSource::default(),
+    )
+    .await;
+
+    // Initial grounded + firewalled + AUDITED context.
+    let conversation_id =
+        ensure_react_conversation(&state, project.id, auth_user.id).await?;
+    let base_scope = crate::agents::orchestrator::build_project_scope(&project);
+    let policy = crate::security::context_firewall::AgentDataPolicy::managed_default();
+    let secured = crate::grounding::assemble(crate::grounding::GroundingInputs {
+        db: &state.db,
+        user_id: auth_user.id,
+        project_id: project.id,
+        conversation_id,
+        mode_label: "react",
+        data_policy: &policy,
+        base_scope: &base_scope,
+        history: &[],
+        project_summary: None,
+        query: &query,
+    })
+    .await
+    .map_err(|e| AppError::Agent(e.to_string()))?;
+
+    let max_iters = req.max_iters.unwrap_or(4).clamp(1, 6);
+    let ctx = crate::grounding::tools::ToolCtx {
+        db: &state.db,
+        project: &project,
+        root,
+        credentials,
+    };
+
+    let mut messages = vec![
+        crate::agents::openclaw::ChatMessage {
+            role: "system".into(),
+            content: format!(
+                "{}\n\n===== 已接地的專案脈絡（已過防火牆遮密）=====\n{}",
+                crate::grounding::tools::protocol_prompt(),
+                secured
+                    .project_scope
+                    .relevant_file_context
+                    .as_deref()
+                    .unwrap_or("(無索引脈絡)")
+            ),
+        },
+        crate::agents::openclaw::ChatMessage {
+            role: "user".into(),
+            content: secured.user_message.clone(),
+        },
+    ];
+
+    let hermes = crate::agents::hermes::HermesClient::new(&state.config);
+    let mut steps: Vec<crate::grounding::tools::ToolStep> = Vec::new();
+    let mut answer = String::new();
+    let mut iterations = 0u32;
+
+    for _ in 0..max_iters {
+        iterations += 1;
+        let turn = hermes
+            .chat(messages.clone())
+            .await
+            .map_err(|e| AppError::Agent(e.to_string()))?;
+
+        match crate::grounding::tools::parse_action(&turn) {
+            Some(call) => {
+                let observation = crate::grounding::tools::run_tool(&ctx, &call).await;
+                steps.push(crate::grounding::tools::ToolStep {
+                    action: call.name.clone(),
+                    args: call.args.clone(),
+                    observation_chars: observation.chars().count(),
+                });
+                messages.push(crate::agents::openclaw::ChatMessage {
+                    role: "assistant".into(),
+                    content: turn,
+                });
+                messages.push(crate::agents::openclaw::ChatMessage {
+                    role: "user".into(),
+                    content: format!(
+                        "OBSERVATION:\n{observation}\n\n依據以上觀察繼續。\
+若已能回答請輸出 FINAL: <答案>（標明依據檔案），否則再呼叫一個工具。"
+                    ),
+                });
+            }
+            None => {
+                answer = crate::grounding::tools::strip_final(&turn);
+                break;
+            }
+        }
+    }
+
+    if answer.is_empty() {
+        answer =
+            "(已達最大工具迭代次數，未能產生最終答案；可提高 max_iters 或縮小問題)".into();
+    }
+
+    Ok(Json(ReactResponse {
+        answer,
+        iterations,
+        steps,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
