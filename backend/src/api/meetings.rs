@@ -843,6 +843,21 @@ async fn ground_meeting_body(
             .bind(project_id)
             .fetch_one(&state.db)
             .await?;
+    // Phase 2a: refresh the local clone from origin before snapshotting
+    // so the minutes are grounded on code that tracks the remote.
+    // Best-effort + timeout-bounded; failure ⇒ ground on stale copy.
+    let freshen = crate::grounding::freshen_local(
+        &project,
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await,
+        &crate::grounding::GroundingSource::default(),
+    )
+    .await;
+    tracing::info!(
+        meeting_id = %meeting.id,
+        freshen = freshen.as_str(),
+        "pre-grounding local sync (meeting minutes)"
+    );
     let base_scope = crate::agents::orchestrator::build_project_scope(&project);
     let conversation_id =
         ensure_meeting_grounding_conversation(state, meeting, project_id, user_id).await?;

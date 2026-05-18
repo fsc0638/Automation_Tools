@@ -64,6 +64,7 @@ pub fn routes() -> Router<AppState> {
         .route("/projects/:id/git/branches", get(get_git_branches))
         .route("/projects/:id/git/checkout", post(switch_git_branch))
         .route("/projects/:id/git/sync", post(sync_git_repo))
+        .route("/projects/:id/git/remote-file", get(get_remote_file))
         .route("/git/remote-branches", post(get_remote_branches))
 }
 
@@ -364,6 +365,47 @@ async fn switch_git_branch(
     let _ = rebuild_project_index(&state.db, updated.id, &root).await;
 
     Ok(Json(updated))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoteFileQuery {
+    pub path: String,
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
+}
+
+/// Phase 2b — live remote single-file read (GitHub/GitLab Contents
+/// API). Reads `path` at `ref` (defaults to the project's default
+/// branch / HEAD) straight from the remote, bypassing the local clone.
+/// This is the testable surface of the `RemoteLive` grounding source.
+async fn get_remote_file(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<RemoteFileQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let project = find_project(&state, id, auth_user.id).await?;
+    require_git_project(&project)?;
+    let credentials =
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await;
+    let git_ref = q
+        .git_ref
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(project.default_branch.as_deref())
+        .unwrap_or("HEAD")
+        .to_string();
+    let content =
+        crate::grounding::remote_file(&project, credentials.as_ref(), &q.path, &git_ref)
+            .await
+            .map_err(|e| AppError::Git(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "path": q.path,
+        "ref": git_ref,
+        "bytes": content.len(),
+        "content": content,
+    })))
 }
 
 async fn sync_git_repo(

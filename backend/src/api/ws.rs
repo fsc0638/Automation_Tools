@@ -174,6 +174,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             return;
         }
     };
+    // Phase 2a: refresh the local clone from origin before we snapshot
+    // it, so chat grounds on files that track the remote. Best-effort
+    // and timeout-bounded — any failure just grounds on the stale copy.
+    // Done once per session (snapshot is also session-scoped).
+    let freshen = crate::grounding::freshen_local(
+        &project,
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await,
+        &crate::grounding::GroundingSource::default(),
+    )
+    .await;
+    tracing::info!(
+        project_id = %project.id,
+        freshen = freshen.as_str(),
+        "pre-grounding local sync"
+    );
     let base_project_scope = build_project_scope(&project);
 
     while let Some(Ok(msg)) = receiver.next().await {
