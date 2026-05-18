@@ -23,5 +23,11 @@ Thumbs.db
 # Data
 backend/data/
 
+# fastembed model cache — pinned to C:\rust-build via FASTEMBED_CACHE_DIR.
+# Safety net so the ~465MB ONNX model never lands in the repo / OneDrive
+# even if the default cache path is ever hit.
+backend/.fastembed_cache/
+.fastembed_cache/
+
 # Logs
 backend/backend.log

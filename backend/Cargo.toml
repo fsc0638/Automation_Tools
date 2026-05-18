@@ -39,3 +39,8 @@ zip = "2"
 metrics = "0.23"
 metrics-exporter-prometheus = { version = "0.15", default-features = false }
 regex = "1"
+# Phase 3 (cross-lingual semantic retrieval). Local ONNX embedder so a
+# Chinese question can match English/Python code. Heavy native dep
+# (bundled onnxruntime via `ort`); usage is lazy + fail-open so init
+# failure silently falls back to lexical retrieval and never blocks.
+fastembed = "4"

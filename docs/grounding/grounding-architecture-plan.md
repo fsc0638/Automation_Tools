@@ -167,23 +167,31 @@ citation 規範，讓 AI 產出能標「依據 <檔案>@<ref>」。會議紀錄 
 | 1 | ✅ | 抽出 `grounding::assemble`，ws.rs 純重構零行為變更 | `grounding/mod.rs`、`api/ws.rs` |
 | 4 | ✅ | 會議紀錄走 assemble + firewall + 稽核 | `api/meetings.rs`、`migrations/0036` |
 | 2 | ✅ | 2a 接地前 timeout sync（fail→舊副本）；2b GitHub/GitLab Contents API 即時讀檔 + 60s 快取 | `grounding/mod.rs`、`migrations/—`（無）、`api/projects.rs` |
-| 3 | ✅ | 字面+向量混合（`REAL[]` 欄 + Rust cosine） | `grounding/embedding.rs`、`api/project_index.rs`、`migrations/0037` |
+| 3 | ✅ | 字面+向量混合（`REAL[]` 欄 + Rust cosine）；向量器 v2 = `fastembed` 多語模型（跨中英語意） | `grounding/embedding.rs`、`api/project_index.rs`、`migrations/0037`、`Cargo.toml` |
 | 5 | ✅ | ReAct 文字協定工具迴圈（read-only 三工具，全過 firewall，max-iter） | `grounding/tools.rs`、`api/projects.rs` |
 
-### Phase 3 做法偏離說明（決策透明）
+### Phase 3 做法演進（決策透明，含一次回頭）
 
-Phase 0 原點名 `fastembed-rs`。實作時改為**本地零依賴、零網路的雜湊
-n-gram 向量**（FNV-1a、L2 normalize、`EMBED_DIM=256`、英數 token + CJK
-bigram），原因：
+**v1（已淘汰）**：為閃避 WDAC/離線環境的 ONNX 重依賴，先用本地零依賴
+雜湊 n-gram 向量（FNV-1a、`EMBED_DIM=256`、英數 token + CJK bigram）。
 
-- 計畫的硬性原則是「embedding provider 不可用時必須**自動退回字面、
-  不可阻斷**」。在此 WDAC 鎖定、離線的 Windows 環境，會下載
-  HuggingFace 模型的 ONNX 重依賴（`ort`）正是最可能「不可用」、且會
-  危及 build 的東西。
-- 自帶向量器永遠可用 ⇒「provider 不可用」退化情形天然不存在，符合
-  fail-open 精神，且仍是真正的向量空間（cosine 融合字面分數）。
-- `embedding::embed()/cosine()` 是介面接縫：日後要換學習式 embedder
-  不需動任何呼叫端。四軸精神（字面+向量混合）不變。
+**實測打臉（2026-05-18）**：使用者測 Phase 1 時，對 AgentK 專案（英文/
+Python）用**中文**問「這專案登入流程怎麼寫的」，`relevant_file_context`
+回空 → AI 只拿到檔案樹、無內容 → 回「請你貼檔案給我」。根因：中文查詢
+與英文程式碼**既無共同 token 也無共同字元 n-gram**，雜湊向量（與純字面
+一樣）跨語言完全比不到。
+
+**v2（現行，使用者 2026-05-18 拍板）**：接受重依賴，改用 `fastembed`
+（ONNX，模型 `paraphrase-multilingual-MiniLM-L12-v2`，384 維）做**真正
+跨語言語意檢索**。Cargo 加 `fastembed = "4"`（`ort` 2.0.0-rc.9）；
+`cargo check --release` 通過。
+
+fail-open 原則**不變且更重要**：模型初始化 lazy 且容錯——ONNX runtime
+或模型檔取得失敗（離線首跑 / WDAC 擋 native lib）時 `embed` 回 `None`，
+`relevant_file_context` 透明退回純字面，永不阻斷或 panic。
+`embedding::embed()/cosine()` 介面接縫不變，故僅換 `embedding.rs` 內部，
+呼叫端零改動。換模型導致維度變動（256→384）⇒ 舊向量 cosine 自動視為
+0（不汙染排序），**需重新索引**才有新向量。
 
 ### Phase 5 範圍說明
 
