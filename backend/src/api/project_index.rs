@@ -1,8 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+use crate::db::models::Project;
 
 const MAX_INDEX_FILE_BYTES: u64 = 1_000_000;
 const MAX_INDEX_FILES: usize = 2_000;
@@ -64,21 +66,98 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "Dockerfile",
 ];
 
-pub async fn rebuild_project_index(db: &PgPool, project_id: Uuid, root: &str) -> Result<usize> {
-    let root_path = Path::new(root);
-    if !root_path.exists() {
-        return Err(anyhow!("project root does not exist: {}", root));
-    }
+/// Slugify a source label so it can safely namespace stored file paths
+/// (only used when a workspace has >1 source, to avoid (project_id,
+/// path) collisions between sources that share a relative path).
+fn slug(label: &str) -> String {
+    let s: String = label
+        .trim()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() { "src".into() } else { s }
+}
 
+/// Mirror of projects::project_root_path (kept local to avoid a cross-
+/// module pub). Legacy single-source fallback when a project has no
+/// project_sources rows yet.
+fn legacy_root(p: &Project) -> String {
+    if p.source_type == "git" || p.source_type == "upload" {
+        p.local_path.clone().unwrap_or_else(|| p.source_path.clone())
+    } else {
+        p.source_path.clone()
+    }
+}
+
+/// Full reindex of an entire workspace across ALL its sources
+/// (migration 0040). Deletes the project's index once, then walks every
+/// project_sources root. Single-source workspaces keep byte-identical
+/// stored paths (no prefix); multi-source workspaces namespace each
+/// source's paths by its slugged label so identical relative paths
+/// across sources don't collide. Falls back to the legacy single
+/// source column when the project has no project_sources rows.
+pub async fn rebuild_project_index_all(db: &PgPool, project: &Project) -> Result<usize> {
+    let sources: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT kind, source_path, local_path, label
+           FROM project_sources WHERE project_id = $1
+          ORDER BY created_at",
+    )
+    .bind(project.id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let roots: Vec<(String, String)> = if sources.is_empty() {
+        let r = legacy_root(project);
+        if r.trim().is_empty() { vec![] } else { vec![(String::new(), r)] }
+    } else {
+        sources
+            .into_iter()
+            .filter_map(|(kind, sp, lp, label)| {
+                let root = if kind == "git" {
+                    lp.filter(|s| !s.trim().is_empty()).unwrap_or(sp)
+                } else {
+                    sp
+                };
+                (!root.trim().is_empty()).then_some((label, root))
+            })
+            .collect()
+    };
+
+    // Delete the whole project's index ONCE, then re-add every source.
     sqlx::query("DELETE FROM project_file_chunks WHERE project_id = $1")
-        .bind(project_id)
+        .bind(project.id)
         .execute(db)
         .await?;
     sqlx::query("DELETE FROM project_files WHERE project_id = $1")
-        .bind(project_id)
+        .bind(project.id)
         .execute(db)
         .await?;
 
+    let multi = roots.len() > 1;
+    let mut total = 0usize;
+    for (label, root) in roots {
+        let root_path = Path::new(&root);
+        if !root_path.exists() {
+            continue; // a missing source must not abort the others
+        }
+        let prefix = if multi { format!("{}/", slug(&label)) } else { String::new() };
+        total += index_one_root(db, project.id, root_path, &prefix).await?;
+    }
+    Ok(total)
+}
+
+/// Walk one root and insert its files/chunks. Does NOT delete (callers
+/// own the delete so multi-source can clear once then add many).
+/// `path_prefix` is prepended to every stored path (empty for single
+/// source, "<slug>/" when namespacing multiple sources).
+async fn index_one_root(
+    db: &PgPool,
+    project_id: Uuid,
+    root_path: &Path,
+    path_prefix: &str,
+) -> Result<usize> {
     let mut files = Vec::new();
     collect_indexable_files(root_path, root_path, &mut files)?;
     files.truncate(MAX_INDEX_FILES);
@@ -96,11 +175,13 @@ pub async fn rebuild_project_index(db: &PgPool, project_id: Uuid, root: &str) ->
             Ok(c) if !c.trim().is_empty() => c,
             _ => continue,
         };
-        let rel = file
-            .strip_prefix(root_path)
-            .unwrap_or(&file)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = format!(
+            "{path_prefix}{}",
+            file.strip_prefix(root_path)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
         let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
         let language = detect_language(&rel);
 

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use zip::ZipArchive;
 
 use crate::{
-    api::{auth::AuthUser, project_index::rebuild_project_index, AppState},
+    api::{auth::AuthUser, project_index::rebuild_project_index_all, AppState},
     db::models::{GitIdentity, Project},
     error::{AppError, AppResult},
     git_ops::manager::{
@@ -188,8 +188,7 @@ async fn create_project(
     // an admin/general workspace that was given a local folder path
     // (the user wants AI answers grounded on that folder's content).
     if is_code || !project.source_path.trim().is_empty() {
-        let root = project_root_path(&project);
-        let _ = rebuild_project_index(&state.db, project.id, &root).await;
+        let _ = rebuild_project_index_all(&state.db, &project).await;
     }
 
     Ok((StatusCode::CREATED, Json(project)))
@@ -269,7 +268,7 @@ async fn upload_project(
     .await?;
     grant_project_owner(&state, project.id, auth_user.id).await?;
 
-    let _ = rebuild_project_index(&state.db, project.id, &upload_dir).await;
+    let _ = rebuild_project_index_all(&state.db, &project).await;
 
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -373,8 +372,7 @@ async fn reindex_project(
             "skipped": "non-code workspace has no folder to index"
         })));
     }
-    let root = project_root_path(&project);
-    let indexed = rebuild_project_index(&state.db, project.id, &root)
+    let indexed = rebuild_project_index_all(&state.db, &project)
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(serde_json::json!({ "indexed_files": indexed })))
@@ -436,7 +434,7 @@ async fn switch_git_branch(
     .fetch_one(&state.db)
     .await?;
 
-    let _ = rebuild_project_index(&state.db, updated.id, &root).await;
+    let _ = rebuild_project_index_all(&state.db, &updated).await;
 
     Ok(Json(updated))
 }
@@ -679,7 +677,7 @@ async fn sync_git_repo(
     let result = sync_current_branch(&root, credentials.as_ref())
         .map_err(|e| AppError::Git(e.to_string()))?;
 
-    let _ = rebuild_project_index(&state.db, project.id, &root).await;
+    let _ = rebuild_project_index_all(&state.db, &project).await;
 
     let status = match result {
         SyncResult::AlreadyUpToDate => "up-to-date",
