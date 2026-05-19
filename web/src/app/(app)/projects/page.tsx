@@ -119,12 +119,13 @@ export default function ProjectsPage() {
     setCreating(true);
     try {
       if (form.kind !== "code") {
-        // 行政庶務工作區：無 repo，只送名稱/描述/kind，後端跳過 clone/index。
+        // 行政工作區：無 git/clone。可選填一個本機資料夾路徑，
+        // 後端會索引它，讓 AI 以該資料夾內容為回答依據。
         await projectsApi.create({
           name: form.name,
           description: form.description || undefined,
           source_type: "local",
-          source_path: "",
+          source_path: form.source_path.trim(),
           kind: form.kind,
         });
       } else if (form.source_type === "upload") {
@@ -253,10 +254,10 @@ export default function ProjectsPage() {
         </div>
 
         <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <SummaryCard label="Total workspaces" value={String(projectList.length)} helper="All AI-enabled projects" />
-          <SummaryCard label="Git connected" value={String(gitProjects)} helper="Repositories with branch context" tone="blue" />
-          <SummaryCard label="Local folders" value={String(localProjects)} helper="On-disk workspaces without remote sync" />
-          <SummaryCard label="Git profiles" value={String(identityList.length)} helper={latestUpdate ? `Latest activity ${formatDate(latestUpdate)}` : "No activity yet"} tone="violet" />
+          <SummaryCard label={t("projects.statTotal")} value={String(projectList.length)} helper={t("projects.statTotalHelp")} />
+          <SummaryCard label={t("projects.statGit")} value={String(gitProjects)} helper={t("projects.statGitHelp")} tone="blue" />
+          <SummaryCard label={t("projects.statLocal")} value={String(localProjects)} helper={t("projects.statLocalHelp")} />
+          <SummaryCard label={t("projects.statProfiles")} value={String(identityList.length)} helper={latestUpdate ? `${t("projects.statProfilesHelp")}${formatDate(latestUpdate)}` : t("projects.statNoActivity")} tone="violet" />
         </div>
       </section>
 
@@ -345,8 +346,8 @@ export default function ProjectsPage() {
       {showCreate && (
         <Card className="rounded-[24px] p-6 shadow-sm">
           <div className="mb-4">
-            <h2 className="type-section-title text-[1.35rem]">Create Project Workspace</h2>
-            <p className="type-body-muted mt-2">Connect a local folder or a Git repository and make it available to the AI workspace.</p>
+            <h2 className="type-section-title text-[1.35rem]">{t("projects.createTitle")}</h2>
+            <p className="type-body-muted mt-2">{t("projects.createSubtitle")}</p>
           </div>
           <form onSubmit={handleCreate} className="flex flex-col gap-5">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -371,6 +372,16 @@ export default function ProjectsPage() {
                 </button>
               ))}
             </div>
+
+            {form.kind !== "code" && (
+              <div className="flex flex-col gap-1.5">
+                <Input id="adminpath" label={`${t("projects.folderPath")} ${t("common.optional")}`}
+                  placeholder="C:/path/to/folder"
+                  value={form.source_path}
+                  onChange={(e) => setForm((current) => ({ ...current, source_path: e.target.value }))} />
+                <p className="text-xs text-[#94A3B8]">{t("projects.adminPathHint")}</p>
+              </div>
+            )}
 
             {form.kind === "code" && (<>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">

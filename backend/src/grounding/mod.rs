@@ -86,16 +86,19 @@ pub struct GroundingInputs<'a> {
 pub async fn assemble(input: GroundingInputs<'_>) -> Result<SecuredAgentContext> {
     let mut scope = input.base_scope.clone();
 
-    // Phase 5 — resource short-circuit. Non-code workspaces
-    // (admin/general 行政庶務) have no repo, no index, no chunks. Skip
-    // the whole retrieval path: that avoids a wasted per-turn query
-    // embedding (ONNX inference) + an 800-row chunk scan that can only
-    // return nothing. The firewall/audit below still runs, so meeting
-    // AI on an admin workspace is still redacted + audited. Unknown
-    // project ⇒ treat as code (no behaviour change for any caller that
-    // doesn't pass `project`).
-    let is_code = input.project.map(|p| p.kind == "code").unwrap_or(true);
-    if is_code {
+    // Phase 5 — resource short-circuit. Skip the whole retrieval path
+    // (a wasted per-turn ONNX query embedding + 800-row chunk scan)
+    // ONLY when the workspace genuinely has no files: a non-code
+    // workspace with no local folder. A code workspace, OR an
+    // admin/general workspace that was given a folder path, IS
+    // grounded (user wants AI answers based on that folder's content).
+    // Firewall/audit below always runs. Unknown project ⇒ ground (no
+    // behaviour change for callers that don't pass `project`).
+    let should_ground = input
+        .project
+        .map(|p| p.kind == "code" || !p.source_path.trim().is_empty())
+        .unwrap_or(true);
+    if should_ground {
         // 1. Per-turn hybrid retrieval overlaid on the session snapshot.
         let mut ctx = relevant_file_context(input.db, input.project_id, input.query)
             .await

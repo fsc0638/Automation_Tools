@@ -1289,9 +1289,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     {activeConv && <StatusPill className={modeStyle(activeConv.mode)}>{modeLabel(activeConv.mode, agentProfiles, t)}</StatusPill>}
                     {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">{t("chat.streaming")}</StatusPill>}
                   </div>
-                  <p className="mt-1 text-xs text-[#64748B]">
-                    {activeConv ? t("chat.chooseStrategy") : t("convList.emptyDesc")}
-                  </p>
+                  {!activeConv && (
+                    <p className="mt-1 text-xs text-[#64748B]">{t("convList.emptyDesc")}</p>
+                  )}
                 </div>
 
                 {activeConv && (
@@ -1362,6 +1362,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   </div>
                 )}
 
+                {/* Model is locked once a conversation exists — it was
+                    chosen at creation. The picker only shows when there
+                    is no active conversation (starting a new one). */}
+                {!activeConv && (
                 <div className="flex flex-wrap items-center gap-2">
                   {(["openclaw", "hermes", "debate"] as AgentMode[]).map((candidate) => (
                     <button
@@ -1427,6 +1431,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     </button>
                   )}
                 </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2 xl:max-w-[360px] xl:justify-end">

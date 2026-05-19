@@ -184,8 +184,10 @@ async fn create_project(
     .await?;
     grant_project_owner(&state, project.id, auth_user.id).await?;
 
-    // Non-code workspaces have no files to index — skip entirely.
-    if is_code {
+    // Index when there are files to index: code workspaces always, OR
+    // an admin/general workspace that was given a local folder path
+    // (the user wants AI answers grounded on that folder's content).
+    if is_code || !project.source_path.trim().is_empty() {
         let root = project_root_path(&project);
         let _ = rebuild_project_index(&state.db, project.id, &root).await;
     }
@@ -362,12 +364,13 @@ async fn reindex_project(
 ) -> AppResult<Json<serde_json::Value>> {
     require_project_role(&state, id, auth_user.id, "editor").await?;
     let project = find_project(&state, id, auth_user.id).await?;
-    // Non-code workspaces (admin/general) have no repo/files — nothing
-    // to index. Return cleanly instead of failing on a missing root.
-    if project.kind != "code" {
+    // Skip only when there is genuinely nothing to index: a non-code
+    // workspace WITHOUT a local folder. Admin/general WITH a folder
+    // path is indexable (user wants AI grounded on that folder).
+    if project.kind != "code" && project.source_path.trim().is_empty() {
         return Ok(Json(serde_json::json!({
             "indexed_files": 0,
-            "skipped": "non-code workspace has no files to index"
+            "skipped": "non-code workspace has no folder to index"
         })));
     }
     let root = project_root_path(&project);
