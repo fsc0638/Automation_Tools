@@ -26,6 +26,20 @@ pub struct Project {
     pub local_path: Option<String>, // cloned path for git repos
     pub default_branch: Option<String>,
     pub git_identity_id: Option<Uuid>,
+    /// Workspace kind (migration 0038): "code" (repo-backed, status
+    /// quo) | "admin" | "general" (行政庶務 / personal — no repo).
+    /// Backend behaviour is binary on `kind == "code"`; admin/general
+    /// are UI-only categories. NOT NULL DEFAULT 'code' so every legacy
+    /// row and every `SELECT *` / `RETURNING *` path is unaffected.
+    /// `sqlx(default)` guards the rare explicit-column query.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub kind: String,
+    /// Soft "淡化/封存" marker (migration 0038). NULL = active. A
+    /// state, not a type — deliberately separate from `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub archived_at: Option<DateTime<Utc>>,
     /// Effective ACL role for the requesting user. Populated by list/get
     /// endpoints that join user_project_role(); NULL on INSERT…RETURNING paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
