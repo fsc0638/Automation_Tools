@@ -184,9 +184,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
     // it, so chat grounds on files that track the remote. Best-effort
     // and timeout-bounded — any failure just grounds on the stale copy.
     // Done once per session (snapshot is also session-scoped).
-    let freshen = crate::grounding::freshen_local(
+    let freshen = crate::grounding::freshen_all(
+        &state.db,
+        &state.cipher,
         &project,
-        git_credentials.clone(),
         &crate::grounding::GroundingSource::default(),
     )
     .await;

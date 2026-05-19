@@ -849,9 +849,10 @@ async fn ground_meeting_body(
     let git_creds =
         crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
             .await;
-    let freshen = crate::grounding::freshen_local(
+    let freshen = crate::grounding::freshen_all(
+        &state.db,
+        &state.cipher,
         &project,
-        git_creds.clone(),
         &crate::grounding::GroundingSource::default(),
     )
     .await;

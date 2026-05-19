@@ -523,7 +523,18 @@ pub async fn resolve_project_git_credentials(
     cipher: &TokenCipher,
     project: &Project,
 ) -> Option<GitCredentials> {
-    let identity_id = project.git_identity_id?;
+    resolve_identity_credentials(db, cipher, project.git_identity_id).await
+}
+
+/// Decrypt a specific git_identity's token into [`GitCredentials`].
+/// Used per-source by the multi-source freshen (each source can carry
+/// its own identity). `None` when there is no identity / decrypt fails.
+pub async fn resolve_identity_credentials(
+    db: &PgPool,
+    cipher: &TokenCipher,
+    identity_id: Option<Uuid>,
+) -> Option<GitCredentials> {
+    let identity_id = identity_id?;
     let identity: GitIdentity =
         sqlx::query_as("SELECT * FROM git_identities WHERE id = $1")
             .bind(identity_id)
@@ -536,6 +547,79 @@ pub async fn resolve_project_git_credentials(
         username: identity.username,
         access_token,
     })
+}
+
+/// MS-2c. Multi-source pre-grounding sync: fetch+ff EVERY git source of
+/// a workspace (each with its own identity), bounded per source. Falls
+/// back to the legacy single-clone `freshen_local` when the workspace
+/// has no project_sources git rows. Best-effort and for logging only —
+/// any failure just means we ground on the existing on-disk copies.
+pub async fn freshen_all(
+    db: &PgPool,
+    cipher: &TokenCipher,
+    project: &Project,
+    source: &GroundingSource,
+) -> FreshenOutcome {
+    if *source == GroundingSource::LocalAsIs {
+        return FreshenOutcome::Skipped;
+    }
+
+    let git_sources: Vec<(Option<String>, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT local_path, source_path, git_identity_id
+           FROM project_sources
+          WHERE project_id = $1 AND kind = 'git'",
+    )
+    .bind(project.id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    if git_sources.is_empty() {
+        // Legacy single-source workspace — unchanged behaviour.
+        let creds = resolve_project_git_credentials(db, cipher, project).await;
+        return freshen_local(project, creds, source).await;
+    }
+
+    // Rank outcomes so the aggregate log line surfaces the most
+    // actionable state across all sources.
+    fn rank(o: FreshenOutcome) -> u8 {
+        match o {
+            FreshenOutcome::FastForwarded => 5,
+            FreshenOutcome::TimedOut => 4,
+            FreshenOutcome::Failed => 3,
+            FreshenOutcome::NoRemoteBranch => 2,
+            FreshenOutcome::UpToDate => 1,
+            _ => 0,
+        }
+    }
+    let mut worst = FreshenOutcome::NotGit;
+    for (local_path, source_path, identity_id) in git_sources {
+        let root = local_path
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(source_path);
+        if root.trim().is_empty() {
+            continue;
+        }
+        let creds = resolve_identity_credentials(db, cipher, identity_id).await;
+        let task =
+            tokio::task::spawn_blocking(move || sync_current_branch(&root, creds.as_ref()));
+        let outcome = match tokio::time::timeout(
+            std::time::Duration::from_secs(FRESHEN_TIMEOUT_SECS),
+            task,
+        )
+        .await
+        {
+            Ok(Ok(Ok(SyncResult::AlreadyUpToDate))) => FreshenOutcome::UpToDate,
+            Ok(Ok(Ok(SyncResult::FastForwarded))) => FreshenOutcome::FastForwarded,
+            Ok(Ok(Ok(SyncResult::NoRemoteBranch))) => FreshenOutcome::NoRemoteBranch,
+            Ok(Ok(Err(_))) | Ok(Err(_)) => FreshenOutcome::Failed,
+            Err(_) => FreshenOutcome::TimedOut,
+        };
+        if rank(outcome) >= rank(worst) {
+            worst = outcome;
+        }
+    }
+    worst
 }
 
 /// Phase 2a. Refresh the local clone from origin before grounding.
