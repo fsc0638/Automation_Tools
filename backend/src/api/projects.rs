@@ -28,6 +28,11 @@ pub struct CreateProjectRequest {
     pub source_path: String,
     pub git_identity_id: Option<Uuid>,
     pub default_branch: Option<String>,
+    /// Workspace kind (Phase 2). Omitted ⇒ "code" (back-compat: old
+    /// clients keep creating repo-backed projects exactly as before).
+    /// "admin"/"general" = 行政庶務 work area: no repo, no clone, no
+    /// index — just todos/meetings/notes.
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,18 +98,40 @@ async fn create_project(
     if req.name.trim().is_empty() {
         return Err(AppError::BadRequest("Project name is required".into()));
     }
-    if req.source_type != "local" && req.source_type != "git" && req.source_type != "upload" {
-        return Err(AppError::BadRequest(
-            "source_type must be 'local', 'git', or 'upload'".into(),
-        ));
-    }
-    if req.source_type == "upload" {
-        return Err(AppError::BadRequest(
-            "Use /projects/upload with a zip file for upload projects".into(),
-        ));
-    }
 
-    let identity = if req.source_type == "git" {
+    // Phase 2: workspace kind. Default "code" keeps every existing
+    // client/path byte-identical. admin/general are non-repo work
+    // areas (行政庶務) — backend treats this as binary on is_code.
+    let kind = req
+        .kind
+        .as_deref()
+        .map(|k| k.trim().to_ascii_lowercase())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| "code".into());
+    if !matches!(kind.as_str(), "code" | "admin" | "general") {
+        return Err(AppError::BadRequest(
+            "kind must be 'code', 'admin', or 'general'".into(),
+        ));
+    }
+    let is_code = kind == "code";
+
+    if is_code {
+        if req.source_type != "local" && req.source_type != "git" && req.source_type != "upload" {
+            return Err(AppError::BadRequest(
+                "source_type must be 'local', 'git', or 'upload'".into(),
+            ));
+        }
+        if req.source_type == "upload" {
+            return Err(AppError::BadRequest(
+                "Use /projects/upload with a zip file for upload projects".into(),
+            ));
+        }
+    }
+    // Non-code workspaces have no repo: force a neutral source_type and
+    // ignore git fields entirely (clone/index are skipped below).
+    let effective_source_type: &str = if is_code { &req.source_type } else { "local" };
+
+    let identity = if is_code && req.source_type == "git" {
         match req.git_identity_id {
             Some(id) => Some(find_git_identity(&state, id, auth_user.id).await?),
             None => None,
@@ -118,7 +145,7 @@ async fn create_project(
     };
     let (organization_id, workspace_id) = ensure_personal_workspace(&state, auth_user.id).await?;
 
-    let local_path = if req.source_type == "git" {
+    let local_path = if is_code && req.source_type == "git" {
         let clone_dir = build_clone_dir(
             &state.config.project_data_root,
             &req.source_path,
@@ -137,8 +164,8 @@ async fn create_project(
     };
 
     let project: Project = sqlx::query_as(
-        "INSERT INTO projects (user_id, organization_id, workspace_id, name, description, source_type, source_path, local_path, default_branch, git_identity_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "INSERT INTO projects (user_id, organization_id, workspace_id, name, description, source_type, source_path, local_path, default_branch, git_identity_id, kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING *",
     )
     .bind(auth_user.id)
@@ -146,17 +173,21 @@ async fn create_project(
     .bind(workspace_id)
     .bind(req.name.trim())
     .bind(&req.description)
-    .bind(&req.source_type)
+    .bind(effective_source_type)
     .bind(&req.source_path)
     .bind(&local_path)
     .bind(req.default_branch.as_deref().unwrap_or("main"))
-    .bind(req.git_identity_id)
+    .bind(if is_code { req.git_identity_id } else { None })
+    .bind(&kind)
     .fetch_one(&state.db)
     .await?;
     grant_project_owner(&state, project.id, auth_user.id).await?;
 
-    let root = project_root_path(&project);
-    let _ = rebuild_project_index(&state.db, project.id, &root).await;
+    // Non-code workspaces have no files to index — skip entirely.
+    if is_code {
+        let root = project_root_path(&project);
+        let _ = rebuild_project_index(&state.db, project.id, &root).await;
+    }
 
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -300,6 +331,14 @@ async fn reindex_project(
 ) -> AppResult<Json<serde_json::Value>> {
     require_project_role(&state, id, auth_user.id, "editor").await?;
     let project = find_project(&state, id, auth_user.id).await?;
+    // Non-code workspaces (admin/general) have no repo/files — nothing
+    // to index. Return cleanly instead of failing on a missing root.
+    if project.kind != "code" {
+        return Ok(Json(serde_json::json!({
+            "indexed_files": 0,
+            "skipped": "non-code workspace has no files to index"
+        })));
+    }
     let root = project_root_path(&project);
     let indexed = rebuild_project_index(&state.db, project.id, &root)
         .await
