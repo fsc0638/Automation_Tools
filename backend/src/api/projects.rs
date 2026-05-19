@@ -62,6 +62,7 @@ pub fn routes() -> Router<AppState> {
             post(upload_project).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route("/projects/:id", get(get_project).delete(delete_project))
+        .route("/projects/:id/archive", post(set_archived))
         .route("/projects/:id/files", get(get_file_tree))
         .route("/projects/:id/files/content", get(get_file_content))
         .route("/projects/:id/index", post(reindex_project))
@@ -291,6 +292,36 @@ async fn delete_project(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArchiveRequest {
+    pub archived: bool,
+}
+
+/// Phase 4 — soft 封存/取消封存 (sets/clears projects.archived_at).
+/// Non-destructive "淡化" toggle: data, todos, meetings all stay; the
+/// workspace just renders faded and can be filtered out. Editor role
+/// (it's a state change, not a delete).
+async fn set_archived(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ArchiveRequest>,
+) -> AppResult<Json<Project>> {
+    require_project_role(&state, id, auth_user.id, "editor").await?;
+    let project: Project = sqlx::query_as(
+        "UPDATE projects
+            SET archived_at = CASE WHEN $2 THEN NOW() ELSE NULL END,
+                updated_at = NOW()
+          WHERE id = $1
+          RETURNING *",
+    )
+    .bind(id)
+    .bind(req.archived)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(project))
 }
 
 async fn get_file_tree(

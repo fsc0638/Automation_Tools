@@ -84,35 +84,47 @@ pub struct GroundingInputs<'a> {
 /// Equivalent to the old ws.rs inline block; returns the same
 /// [`SecuredAgentContext`] the caller already consumed.
 pub async fn assemble(input: GroundingInputs<'_>) -> Result<SecuredAgentContext> {
-    // 1. Per-turn hybrid retrieval overlaid on the session snapshot.
     let mut scope = input.base_scope.clone();
-    let mut ctx = relevant_file_context(input.db, input.project_id, input.query)
-        .await
-        .ok()
-        .flatten();
 
-    // 1b. Backend-driven explicit-path fetch. Field tests proved the
-    //     gateway ignores client tool protocols, so instead of asking
-    //     the model to "call read_file", the BACKEND deterministically
-    //     reads any file path the user literally named in the question
-    //     (e.g. "看 backend/src/api/auth.rs 怎麼寫") and injects its
-    //     real content. Confined to the project root; goes through the
-    //     same firewall/redaction/audit below (it's folded into
-    //     relevant_file_context). No gateway cooperation required.
-    if let Some(block) = read_named_files(
-        scope.root.as_deref(),
-        input.project,
-        input.credentials,
-        input.query,
-    )
-    .await
-    {
-        ctx = Some(match ctx {
-            Some(existing) => format!("{block}\n\n{existing}"),
-            None => block,
-        });
+    // Phase 5 — resource short-circuit. Non-code workspaces
+    // (admin/general 行政庶務) have no repo, no index, no chunks. Skip
+    // the whole retrieval path: that avoids a wasted per-turn query
+    // embedding (ONNX inference) + an 800-row chunk scan that can only
+    // return nothing. The firewall/audit below still runs, so meeting
+    // AI on an admin workspace is still redacted + audited. Unknown
+    // project ⇒ treat as code (no behaviour change for any caller that
+    // doesn't pass `project`).
+    let is_code = input.project.map(|p| p.kind == "code").unwrap_or(true);
+    if is_code {
+        // 1. Per-turn hybrid retrieval overlaid on the session snapshot.
+        let mut ctx = relevant_file_context(input.db, input.project_id, input.query)
+            .await
+            .ok()
+            .flatten();
+
+        // 1b. Backend-driven explicit-path fetch. Field tests proved the
+        //     gateway ignores client tool protocols, so instead of asking
+        //     the model to "call read_file", the BACKEND deterministically
+        //     reads any file path the user literally named in the question
+        //     (e.g. "看 backend/src/api/auth.rs 怎麼寫") and injects its
+        //     real content. Confined to the project root; goes through the
+        //     same firewall/redaction/audit below (it's folded into
+        //     relevant_file_context). No gateway cooperation required.
+        if let Some(block) = read_named_files(
+            scope.root.as_deref(),
+            input.project,
+            input.credentials,
+            input.query,
+        )
+        .await
+        {
+            ctx = Some(match ctx {
+                Some(existing) => format!("{block}\n\n{existing}"),
+                None => block,
+            });
+        }
+        scope.relevant_file_context = ctx;
     }
-    scope.relevant_file_context = ctx;
 
     // 2. DLP context firewall (classification gate + secret redaction +
     //    audit row). Unchanged from before — just relocated.

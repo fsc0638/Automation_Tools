@@ -127,6 +127,12 @@ export const projects = {
   list: () => request<Project[]>("/projects"),
   create: (data: CreateProjectInput) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(data) }),
+  /** Phase 4: soft 封存/取消封存 (sets/clears archived_at). */
+  archive: (id: string, archived: boolean) =>
+    request<Project>(`/projects/${id}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ archived }),
+    }),
   upload: async (data: { name: string; description?: string; file: File }) => {
     const token = getToken();
     const form = new FormData();

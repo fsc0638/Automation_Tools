@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import {
+  Archive,
+  ArchiveRestore,
   Clock,
   FolderOpen,
   GitBranch,
@@ -189,6 +191,17 @@ export default function ProjectsPage() {
     await projectsApi.delete(id);
     await load();
     pushToast({ tone: "warning", title: "Project deleted", description: "The workspace has been removed from your dashboard." });
+  }
+
+  async function handleArchive(id: string, archived: boolean, e: MouseEvent) {
+    e.stopPropagation();
+    await projectsApi.archive(id, archived);
+    await load();
+    pushToast({
+      tone: archived ? "warning" : "success",
+      title: archived ? "已封存" : "已取消封存",
+      description: archived ? "工作區已淡化，資料與待辦皆保留。" : "工作區已恢復為使用中。",
+    });
   }
 
   async function handleDeleteIdentity(id: string) {
@@ -556,12 +569,21 @@ export default function ProjectsPage() {
                       <p className="mt-2 line-clamp-2 text-sm text-[#64748B]">{project.description || project.source_path}</p>
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => void handleDelete(project.id, e)}
-                    className="opacity-0 text-[#94A3B8] transition group-hover:opacity-100 hover:text-[#C8102E]"
-                  >
-                    <Trash2 size={15} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      title={project.archived_at ? "取消封存" : "封存（淡化，不刪除）"}
+                      onClick={(e) => void handleArchive(project.id, !project.archived_at, e)}
+                      className="opacity-0 text-[#94A3B8] transition group-hover:opacity-100 hover:text-[#0050A0]"
+                    >
+                      {project.archived_at ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+                    </button>
+                    <button
+                      onClick={(e) => void handleDelete(project.id, e)}
+                      className="opacity-0 text-[#94A3B8] transition group-hover:opacity-100 hover:text-[#C8102E]"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-5 grid gap-3 md:grid-cols-2">
