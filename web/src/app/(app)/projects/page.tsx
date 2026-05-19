@@ -73,6 +73,9 @@ export default function ProjectsPage() {
     default_branch: string;
     label: string;
   }>({ kind: "local", source_path: "", git_identity_id: "", default_branch: "main", label: "" });
+  const [srcBranches, setSrcBranches] = useState<string[]>([]);
+  const [srcBranchBusy, setSrcBranchBusy] = useState(false);
+  const [srcBranchErr, setSrcBranchErr] = useState("");
 
   useEffect(() => { void load(); }, []);
 
@@ -223,10 +226,38 @@ export default function ProjectsPage() {
     setSourcesProject(project);
     setSourcesError("");
     setSrcForm({ kind: "local", source_path: "", git_identity_id: "", default_branch: "main", label: "" });
+    setSrcBranches([]);
+    setSrcBranchErr("");
     try {
       setSourcesList(await projectsApi.listSources(project.id));
     } catch {
       setSourcesList([]);
+    }
+  }
+
+  async function fetchSrcBranches() {
+    if (srcForm.kind !== "git" || !srcForm.source_path.trim()) return;
+    setSrcBranchBusy(true);
+    setSrcBranchErr("");
+    try {
+      const result = await projectsApi.remoteBranches(
+        srcForm.source_path.trim(),
+        srcForm.git_identity_id || undefined,
+      );
+      setSrcBranches(result.branches);
+      if (result.branches.length === 0) {
+        setSrcBranchErr("找不到分支：倉庫可能是私有的，或 URL／Git 帳號(Token) 不正確。");
+      } else {
+        setSrcForm((c) => ({
+          ...c,
+          default_branch: result.branches.includes(c.default_branch) ? c.default_branch : result.branches[0],
+        }));
+      }
+    } catch (err) {
+      setSrcBranches([]);
+      setSrcBranchErr(err instanceof Error ? err.message : "連線失敗，請確認 URL 與 Git 帳號");
+    } finally {
+      setSrcBranchBusy(false);
     }
   }
 
@@ -632,7 +663,11 @@ export default function ProjectsPage() {
             <Input id="srcpath" label={srcForm.kind === "local" ? "資料夾路徑" : "Git URL"}
               placeholder={srcForm.kind === "local" ? "C:/path/to/folder" : "https://github.com/org/repo.git"}
               value={srcForm.source_path}
-              onChange={(e) => setSrcForm((c) => ({ ...c, source_path: e.target.value }))} required />
+              onChange={(e) => {
+                setSrcForm((c) => ({ ...c, source_path: e.target.value }));
+                setSrcBranches([]);
+                setSrcBranchErr("");
+              }} required />
             <Input id="srclabel" label={`標籤 ${t("common.optional")}`} placeholder="例：docs / repo2"
               value={srcForm.label}
               onChange={(e) => setSrcForm((c) => ({ ...c, label: e.target.value }))} />
@@ -641,7 +676,11 @@ export default function ProjectsPage() {
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium text-[#1A1A2E]">{t("projects.gitProfile")}</label>
                   <select value={srcForm.git_identity_id}
-                    onChange={(e) => setSrcForm((c) => ({ ...c, git_identity_id: e.target.value }))}
+                    onChange={(e) => {
+                      setSrcForm((c) => ({ ...c, git_identity_id: e.target.value }));
+                      setSrcBranches([]);
+                      setSrcBranchErr("");
+                    }}
                     className="h-11 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white">
                     <option value="">{t("projects.noProfile")}</option>
                     {identityList.map((idn) => (
@@ -649,9 +688,31 @@ export default function ProjectsPage() {
                     ))}
                   </select>
                 </div>
-                <Input id="srcbranch" label={t("projects.branch")} placeholder="main"
-                  value={srcForm.default_branch}
-                  onChange={(e) => setSrcForm((c) => ({ ...c, default_branch: e.target.value }))} />
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium text-[#1A1A2E]">{t("projects.branch")}</label>
+                  <div className="flex gap-2">
+                    {srcBranches.length > 0 ? (
+                      <select value={srcForm.default_branch}
+                        onChange={(e) => setSrcForm((c) => ({ ...c, default_branch: e.target.value }))}
+                        className="h-11 flex-1 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white">
+                        {srcBranches.map((b) => (<option key={b} value={b}>{b}</option>))}
+                      </select>
+                    ) : (
+                      <input value={srcForm.default_branch} placeholder="main"
+                        onChange={(e) => setSrcForm((c) => ({ ...c, default_branch: e.target.value }))}
+                        className="h-11 flex-1 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white" />
+                    )}
+                    <Button type="button" variant="secondary"
+                      loading={srcBranchBusy}
+                      disabled={!srcForm.source_path.trim()}
+                      onClick={() => void fetchSrcBranches()}>
+                      測試連線 / 取得分支
+                    </Button>
+                  </div>
+                  {srcBranchErr && (
+                    <p className="text-xs text-[#C8102E]">{srcBranchErr}</p>
+                  )}
+                </div>
               </div>
             )}
             {sourcesError && (

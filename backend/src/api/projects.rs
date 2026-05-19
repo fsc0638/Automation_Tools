@@ -210,7 +210,13 @@ async fn create_project(
     // an admin/general workspace that was given a local folder path
     // (the user wants AI answers grounded on that folder's content).
     if is_code || !project.source_path.trim().is_empty() {
-        let _ = rebuild_project_index_all(&state.db, &project).await;
+        // Background — a large repo/folder embeds many chunks; don't
+        // make workspace creation hang on it.
+        let db = state.db.clone();
+        let proj = project.clone();
+        tokio::spawn(async move {
+            let _ = rebuild_project_index_all(&db, &proj).await;
+        });
     }
 
     Ok((StatusCode::CREATED, Json(project)))
@@ -290,7 +296,13 @@ async fn upload_project(
     .await?;
     grant_project_owner(&state, project.id, auth_user.id).await?;
 
-    let _ = rebuild_project_index_all(&state.db, &project).await;
+    {
+        let db = state.db.clone();
+        let proj = project.clone();
+        tokio::spawn(async move {
+            let _ = rebuild_project_index_all(&db, &proj).await;
+        });
+    }
 
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -455,8 +467,17 @@ async fn add_source(
     .fetch_one(&state.db)
     .await?;
 
-    // Reindex the whole workspace so the new source is grounded now.
-    let _ = rebuild_project_index_all(&state.db, &project).await;
+    // Reindex in the BACKGROUND. Indexing a large folder embeds every
+    // chunk through the local ONNX model — doing it inline made the
+    // request hang ("一直在載入中"). The source row is already saved;
+    // grounding picks it up as soon as the background reindex finishes.
+    {
+        let db = state.db.clone();
+        let proj = project.clone();
+        tokio::spawn(async move {
+            let _ = rebuild_project_index_all(&db, &proj).await;
+        });
+    }
 
     Ok((StatusCode::CREATED, Json(source)))
 }
@@ -476,7 +497,14 @@ async fn delete_source(
         .bind(id)
         .execute(&state.db)
         .await?;
-    let _ = rebuild_project_index_all(&state.db, &project).await;
+    // Background reindex (same reasoning as add_source).
+    {
+        let db = state.db.clone();
+        let proj = project.clone();
+        tokio::spawn(async move {
+            let _ = rebuild_project_index_all(&db, &proj).await;
+        });
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
