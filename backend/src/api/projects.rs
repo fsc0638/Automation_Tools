@@ -2,7 +2,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use zip::ZipArchive;
 
 use crate::{
     api::{auth::AuthUser, project_index::rebuild_project_index_all, AppState},
-    db::models::{GitIdentity, Project},
+    db::models::{GitIdentity, Project, ProjectSource},
     error::{AppError, AppResult},
     git_ops::manager::{
         checkout_branch, clone_repository, git_status, list_branches, list_files,
@@ -72,6 +72,8 @@ pub fn routes() -> Router<AppState> {
         .route("/projects/:id/git/sync", post(sync_git_repo))
         .route("/projects/:id/git/remote-file", get(get_remote_file))
         .route("/projects/:id/agent/react", post(react_agent))
+        .route("/projects/:id/sources", get(list_sources).post(add_source))
+        .route("/projects/:id/sources/:source_id", delete(delete_source))
         .route("/git/remote-branches", post(get_remote_branches))
 }
 
@@ -183,6 +185,26 @@ async fn create_project(
     .fetch_one(&state.db)
     .await?;
     grant_project_owner(&state, project.id, auth_user.id).await?;
+
+    // MS-2: register this initial source as the workspace's first
+    // project_sources row (canonical multi-source list). Only when it
+    // actually has a path — a name-only admin workspace has no source.
+    if !project.source_path.trim().is_empty() {
+        let _ = sqlx::query(
+            "INSERT INTO project_sources
+                (project_id, kind, source_path, local_path, git_identity_id, default_branch, label)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(project.id)
+        .bind(&project.source_type)
+        .bind(&project.source_path)
+        .bind(&project.local_path)
+        .bind(project.git_identity_id)
+        .bind(project.default_branch.as_deref())
+        .bind(project.name.trim())
+        .execute(&state.db)
+        .await;
+    }
 
     // Index when there are files to index: code workspaces always, OR
     // an admin/general workspace that was given a local folder path
@@ -323,6 +345,139 @@ async fn set_archived(
     .fetch_one(&state.db)
     .await?;
     Ok(Json(project))
+}
+
+// ── MS-2b: multi-source CRUD ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct NewSourceRequest {
+    /// "local" | "git"
+    pub kind: String,
+    pub source_path: String,
+    pub git_identity_id: Option<Uuid>,
+    pub default_branch: Option<String>,
+    pub label: Option<String>,
+}
+
+/// List every source attached to a workspace.
+async fn list_sources(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Vec<ProjectSource>>> {
+    // viewer access is enough to read the list.
+    find_project(&state, id, auth_user.id).await?;
+    let sources: Vec<ProjectSource> = sqlx::query_as(
+        "SELECT * FROM project_sources WHERE project_id = $1 ORDER BY created_at",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(sources))
+}
+
+/// Add a folder or Git repo to a workspace. Git sources are cloned
+/// into the project data root; then the whole workspace is reindexed
+/// so the new source's files become AI-grounded immediately.
+async fn add_source(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<NewSourceRequest>,
+) -> AppResult<(StatusCode, Json<ProjectSource>)> {
+    require_project_role(&state, id, auth_user.id, "editor").await?;
+    let project = find_project(&state, id, auth_user.id).await?;
+
+    let kind = req.kind.trim().to_ascii_lowercase();
+    if kind != "local" && kind != "git" {
+        return Err(AppError::BadRequest(
+            "source kind must be 'local' or 'git'".into(),
+        ));
+    }
+    if req.source_path.trim().is_empty() {
+        return Err(AppError::BadRequest("source_path is required".into()));
+    }
+
+    let local_path = if kind == "git" {
+        let identity = match req.git_identity_id {
+            Some(iid) => Some(find_git_identity(&state, iid, auth_user.id).await?),
+            None => None,
+        };
+        let credentials = match identity.as_ref() {
+            Some(idn) => Some(identity_credentials(idn, &state.cipher)?),
+            None => None,
+        };
+        let clone_dir = build_clone_dir(
+            &state.config.project_data_root,
+            req.source_path.trim(),
+            Uuid::new_v4(),
+        );
+        clone_repository(
+            req.source_path.trim(),
+            &clone_dir,
+            credentials.as_ref(),
+            req.default_branch.as_deref(),
+        )
+        .map_err(|e| AppError::Git(e.to_string()))?;
+        Some(clone_dir)
+    } else {
+        None
+    };
+
+    let label = req
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            req.source_path
+                .trim()
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("source")
+                .to_string()
+        });
+
+    let source: ProjectSource = sqlx::query_as(
+        "INSERT INTO project_sources
+            (project_id, kind, source_path, local_path, git_identity_id, default_branch, label)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *",
+    )
+    .bind(id)
+    .bind(&kind)
+    .bind(req.source_path.trim())
+    .bind(&local_path)
+    .bind(req.git_identity_id)
+    .bind(req.default_branch.as_deref())
+    .bind(&label)
+    .fetch_one(&state.db)
+    .await?;
+
+    // Reindex the whole workspace so the new source is grounded now.
+    let _ = rebuild_project_index_all(&state.db, &project).await;
+
+    Ok((StatusCode::CREATED, Json(source)))
+}
+
+/// Detach a source from a workspace (row removed; any on-disk clone is
+/// intentionally left in place). The workspace is reindexed so the
+/// removed source's content stops being AI-grounded.
+async fn delete_source(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path((id, source_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    require_project_role(&state, id, auth_user.id, "editor").await?;
+    let project = find_project(&state, id, auth_user.id).await?;
+    sqlx::query("DELETE FROM project_sources WHERE id = $1 AND project_id = $2")
+        .bind(source_id)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    let _ = rebuild_project_index_all(&state.db, &project).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_file_tree(
