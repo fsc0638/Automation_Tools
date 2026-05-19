@@ -133,6 +133,16 @@ export const projects = {
       method: "POST",
       body: JSON.stringify({ archived }),
     }),
+  /** MS-2/3: multi-source — a workspace may aggregate many folders/repos. */
+  listSources: (id: string) =>
+    request<ProjectSource[]>(`/projects/${id}/sources`),
+  addSource: (id: string, data: NewSourceInput) =>
+    request<ProjectSource>(`/projects/${id}/sources`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  removeSource: (id: string, sourceId: string) =>
+    request<void>(`/projects/${id}/sources/${sourceId}`, { method: "DELETE" }),
   upload: async (data: { name: string; description?: string; file: File }) => {
     const token = getToken();
     const form = new FormData();
@@ -875,6 +885,27 @@ export interface Project {
   effective_role?: ProjectRole | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProjectSource {
+  id: string;
+  project_id: string;
+  kind: string; // "local" | "git" | "upload"
+  source_path: string;
+  local_path?: string | null;
+  git_identity_id?: string | null;
+  default_branch?: string | null;
+  label: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewSourceInput {
+  kind: "local" | "git";
+  source_path: string;
+  git_identity_id?: string;
+  default_branch?: string;
+  label?: string;
 }
 
 export type OrgRole = "owner" | "admin" | "member" | "viewer";

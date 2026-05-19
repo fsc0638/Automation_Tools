@@ -8,13 +8,14 @@ import {
   FolderOpen,
   GitBranch,
   KeyRound,
+  Layers,
   Plus,
   Search,
   Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
-import { gitIdentities, projects as projectsApi, type GitIdentity, type Project, type WorkspaceKind } from "@/lib/api";
+import { gitIdentities, projects as projectsApi, type GitIdentity, type Project, type ProjectSource, type WorkspaceKind } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
@@ -60,6 +61,18 @@ export default function ProjectsPage() {
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState<"all" | "git" | "local">("all");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  // MS-3: multi-source manager modal state
+  const [sourcesProject, setSourcesProject] = useState<Project | null>(null);
+  const [sourcesList, setSourcesList] = useState<ProjectSource[]>([]);
+  const [sourcesBusy, setSourcesBusy] = useState(false);
+  const [sourcesError, setSourcesError] = useState("");
+  const [srcForm, setSrcForm] = useState<{
+    kind: "local" | "git";
+    source_path: string;
+    git_identity_id: string;
+    default_branch: string;
+    label: string;
+  }>({ kind: "local", source_path: "", git_identity_id: "", default_branch: "main", label: "" });
 
   useEffect(() => { void load(); }, []);
 
@@ -203,6 +216,58 @@ export default function ProjectsPage() {
       title: archived ? "已封存" : "已取消封存",
       description: archived ? "工作區已淡化，資料與待辦皆保留。" : "工作區已恢復為使用中。",
     });
+  }
+
+  async function openSources(project: Project, e: MouseEvent) {
+    e.stopPropagation();
+    setSourcesProject(project);
+    setSourcesError("");
+    setSrcForm({ kind: "local", source_path: "", git_identity_id: "", default_branch: "main", label: "" });
+    try {
+      setSourcesList(await projectsApi.listSources(project.id));
+    } catch {
+      setSourcesList([]);
+    }
+  }
+
+  async function addSrc(e: FormEvent) {
+    e.preventDefault();
+    if (!sourcesProject) return;
+    setSourcesError("");
+    setSourcesBusy(true);
+    try {
+      await projectsApi.addSource(sourcesProject.id, {
+        kind: srcForm.kind,
+        source_path: srcForm.source_path.trim(),
+        git_identity_id: srcForm.kind === "git" && srcForm.git_identity_id ? srcForm.git_identity_id : undefined,
+        default_branch: srcForm.kind === "git" ? srcForm.default_branch || "main" : undefined,
+        label: srcForm.label.trim() || undefined,
+      });
+      setSourcesList(await projectsApi.listSources(sourcesProject.id));
+      setSrcForm({ kind: "local", source_path: "", git_identity_id: "", default_branch: "main", label: "" });
+      await load();
+      pushToast({ tone: "success", title: "已新增來源", description: "工作區已重新索引，AI 將以此來源內容為依據。" });
+    } catch (err) {
+      setSourcesError(err instanceof Error ? err.message : "新增來源失敗");
+    } finally {
+      setSourcesBusy(false);
+    }
+  }
+
+  async function removeSrc(sourceId: string) {
+    if (!sourcesProject) return;
+    if (!confirm("移除這個來源？（已 clone 的檔案會保留在磁碟，僅停止被 AI 引用）")) return;
+    setSourcesBusy(true);
+    try {
+      await projectsApi.removeSource(sourcesProject.id, sourceId);
+      setSourcesList(await projectsApi.listSources(sourcesProject.id));
+      await load();
+      pushToast({ tone: "warning", title: "已移除來源", description: "工作區已重新索引。" });
+    } catch (err) {
+      setSourcesError(err instanceof Error ? err.message : "移除來源失敗");
+    } finally {
+      setSourcesBusy(false);
+    }
   }
 
   async function handleDeleteIdentity(id: string) {
@@ -514,6 +579,91 @@ export default function ProjectsPage() {
         </Card>
       )}
 
+      {sourcesProject && (
+        <Card className="rounded-[24px] p-6 shadow-sm">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="type-section-title text-[1.35rem]">管理來源 — {sourcesProject.name}</h2>
+              <p className="type-body-muted mt-2">一個工作區可掛多個本機資料夾與多個 Git 倉庫；新增/移除後會自動重新索引，AI 以全部來源內容為依據。</p>
+            </div>
+            <Button variant="secondary" onClick={() => setSourcesProject(null)}>{t("common.cancel")}</Button>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            {sourcesList.length === 0 ? (
+              <p className="text-sm text-[#94A3B8]">尚無來源。</p>
+            ) : (
+              sourcesList.map((s) => (
+                <div key={s.id} className="flex items-center justify-between gap-3 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Badge tone={s.kind === "git" ? "blue" : "default"}>{s.kind}</Badge>
+                      <span className="truncate text-sm font-semibold text-[#1A1A2E]">{s.label}</span>
+                    </div>
+                    <div className="mt-1 truncate text-xs text-[#64748B]">{s.source_path}</div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={sourcesBusy}
+                    onClick={() => void removeSrc(s.id)}
+                    className="text-[#94A3B8] transition hover:text-[#C8102E] disabled:opacity-40"
+                    title="移除來源"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          <form onSubmit={addSrc} className="mt-5 flex flex-col gap-4 border-t border-[#E2E8F0] pt-5">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {(["local", "git"] as const).map((k) => (
+                <button key={k} type="button"
+                  onClick={() => setSrcForm((c) => ({ ...c, kind: k }))}
+                  className={srcForm.kind === k
+                    ? "rounded-2xl border border-[#BFDBFE] bg-[#EFF6FF] p-4 text-left"
+                    : "rounded-2xl border border-[#E2E8F0] bg-white p-4 text-left hover:border-[#94A3B8]"}>
+                  <div className="text-sm font-semibold text-[#1A1A2E]">{k === "local" ? "本機資料夾" : "Git 倉庫"}</div>
+                  <div className="mt-1 text-xs text-[#64748B]">{k === "local" ? "指向一個本機資料夾" : "clone 一個遠端倉庫進來"}</div>
+                </button>
+              ))}
+            </div>
+            <Input id="srcpath" label={srcForm.kind === "local" ? "資料夾路徑" : "Git URL"}
+              placeholder={srcForm.kind === "local" ? "C:/path/to/folder" : "https://github.com/org/repo.git"}
+              value={srcForm.source_path}
+              onChange={(e) => setSrcForm((c) => ({ ...c, source_path: e.target.value }))} required />
+            <Input id="srclabel" label={`標籤 ${t("common.optional")}`} placeholder="例：docs / repo2"
+              value={srcForm.label}
+              onChange={(e) => setSrcForm((c) => ({ ...c, label: e.target.value }))} />
+            {srcForm.kind === "git" && (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium text-[#1A1A2E]">{t("projects.gitProfile")}</label>
+                  <select value={srcForm.git_identity_id}
+                    onChange={(e) => setSrcForm((c) => ({ ...c, git_identity_id: e.target.value }))}
+                    className="h-11 rounded-xl border border-[#E2E8F0] px-3 text-sm text-[#1A1A2E] bg-white">
+                    <option value="">{t("projects.noProfile")}</option>
+                    {identityList.map((idn) => (
+                      <option key={idn.id} value={idn.id}>{idn.name} · {idn.username}</option>
+                    ))}
+                  </select>
+                </div>
+                <Input id="srcbranch" label={t("projects.branch")} placeholder="main"
+                  value={srcForm.default_branch}
+                  onChange={(e) => setSrcForm((c) => ({ ...c, default_branch: e.target.value }))} />
+              </div>
+            )}
+            {sourcesError && (
+              <InlineBanner tone="error" title="來源操作失敗" description={sourcesError} />
+            )}
+            <div className="flex gap-3">
+              <Button type="submit" loading={sourcesBusy}>新增來源</Button>
+            </div>
+          </form>
+        </Card>
+      )}
+
       {loading ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {Array.from({ length: 4 }).map((_, index) => (
@@ -585,6 +735,13 @@ export default function ProjectsPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
+                    <button
+                      title="管理來源（資料夾 / Git）"
+                      onClick={(e) => void openSources(project, e)}
+                      className="opacity-0 text-[#94A3B8] transition group-hover:opacity-100 hover:text-[#0050A0]"
+                    >
+                      <Layers size={15} />
+                    </button>
                     <button
                       title={project.archived_at ? "取消封存" : "封存（淡化，不刪除）"}
                       onClick={(e) => void handleArchive(project.id, !project.archived_at, e)}
