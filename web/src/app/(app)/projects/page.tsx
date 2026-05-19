@@ -562,8 +562,12 @@ export default function ProjectsPage() {
             return (
               <Card
                 key={project.id}
-                className={`group rounded-[24px] border border-[#E2E8F0] p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-[#BFDBFE] hover:shadow-md${project.archived_at ? " opacity-60" : ""}`}
-                onClick={() => router.push(`/projects/${project.id}`)}
+                className={
+                  project.archived_at
+                    ? "group rounded-[24px] border border-[#E2E8F0] p-5 shadow-sm opacity-60 cursor-default"
+                    : "group rounded-[24px] border border-[#E2E8F0] p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-[#BFDBFE] hover:shadow-md cursor-pointer"
+                }
+                onClick={project.archived_at ? undefined : () => router.push(`/projects/${project.id}`)}
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex min-w-0 items-start gap-3">
