@@ -49,6 +49,25 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One source inside a multi-source workspace (migration 0040). A
+/// workspace may aggregate many local folders and many Git repos; each
+/// is a `project_sources` row. The legacy single columns on `projects`
+/// remain the "primary" source for back-compat.
+#[allow(dead_code)] // consumed by the multi-source indexer/freshen (MS-2)
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct ProjectSource {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub kind: String, // "local" | "git" | "upload"
+    pub source_path: String,
+    pub local_path: Option<String>,
+    pub git_identity_id: Option<Uuid>,
+    pub default_branch: Option<String>,
+    pub label: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct Organization {
     pub id: Uuid,
