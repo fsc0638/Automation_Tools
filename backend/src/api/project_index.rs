@@ -203,8 +203,16 @@ async fn index_one_root(
             // Embed path + content so file-name tokens contribute to
             // the vector too. NULL when nothing embeddable — retrieval
             // transparently falls back to lexical for that row.
-            let embedding =
-                crate::grounding::embedding::embed(&format!("{rel}\n{chunk}"));
+            // ONNX inference is CPU-heavy and synchronous. Run it on
+            // the blocking pool so a big (multi-source) reindex never
+            // starves tokio workers / the live chat stream.
+            let embed_input = format!("{rel}\n{chunk}");
+            let embedding = tokio::task::spawn_blocking(move || {
+                crate::grounding::embedding::embed(&embed_input)
+            })
+            .await
+            .ok()
+            .flatten();
             sqlx::query(
                 "INSERT INTO project_file_chunks (project_file_id, project_id, path, chunk_index, content, embedding, indexed_at)
                  VALUES ($1, $2, $3, $4, $5, $6, NOW())",

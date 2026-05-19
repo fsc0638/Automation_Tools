@@ -86,18 +86,28 @@ pub struct GroundingInputs<'a> {
 pub async fn assemble(input: GroundingInputs<'_>) -> Result<SecuredAgentContext> {
     let mut scope = input.base_scope.clone();
 
-    // Phase 5 — resource short-circuit. Skip the whole retrieval path
-    // (a wasted per-turn ONNX query embedding + 800-row chunk scan)
-    // ONLY when the workspace genuinely has no files: a non-code
-    // workspace with no local folder. A code workspace, OR an
-    // admin/general workspace that was given a folder path, IS
-    // grounded (user wants AI answers based on that folder's content).
-    // Firewall/audit below always runs. Unknown project ⇒ ground (no
-    // behaviour change for callers that don't pass `project`).
-    let should_ground = input
-        .project
-        .map(|p| p.kind == "code" || !p.source_path.trim().is_empty())
-        .unwrap_or(true);
+    // Phase 5 — resource short-circuit, keyed on "does this workspace
+    // actually have any indexed content?" rather than the legacy
+    // projects.source_path column. This is correct for multi-source:
+    // an admin/general workspace whose folders/repos were added via
+    // project_sources HAS chunks (once indexed) and must be grounded,
+    // even though projects.source_path is still empty. A genuinely
+    // empty workspace has no chunks → skip the wasted per-turn ONNX
+    // query embedding + 800-row scan. Named-file fetch still runs for
+    // code / legacy-path projects (user may name a file pre-index).
+    // Cheap EXISTS on an indexed column; unknown project ⇒ ground.
+    let has_index: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM project_file_chunks WHERE project_id = $1)",
+    )
+    .bind(input.project_id)
+    .fetch_one(input.db)
+    .await
+    .unwrap_or(false);
+    let should_ground = has_index
+        || input
+            .project
+            .map(|p| p.kind == "code" || !p.source_path.trim().is_empty())
+            .unwrap_or(true);
     if should_ground {
         // 1. Per-turn hybrid retrieval overlaid on the session snapshot.
         let mut ctx = relevant_file_context(input.db, input.project_id, input.query)
