@@ -835,6 +835,8 @@ export interface UserInfo {
   display_name: string;
 }
 
+export type WorkspaceKind = "code" | "admin" | "general";
+
 export interface CreateProjectInput {
   name: string;
   description?: string;
@@ -842,6 +844,8 @@ export interface CreateProjectInput {
   source_path: string;
   git_identity_id?: string;
   default_branch?: string;
+  /** Phase 2/3: omit ⇒ "code" (repo-backed). admin/general = 行政庶務. */
+  kind?: WorkspaceKind;
 }
 
 export interface Project {
@@ -856,6 +860,11 @@ export interface Project {
   local_path?: string;
   default_branch?: string;
   git_identity_id?: string;
+  /** Workspace kind (migration 0038). "code" = repo-backed (default);
+   *  "admin"/"general" = 行政庶務 work area with no repo. */
+  kind?: WorkspaceKind;
+  /** Soft archive marker; null/absent = active. */
+  archived_at?: string | null;
   /** Effective ACL role for the current user. Populated by list/get endpoints. */
   effective_role?: ProjectRole | null;
   created_at: string;

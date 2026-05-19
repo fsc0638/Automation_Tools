@@ -12,7 +12,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { gitIdentities, projects as projectsApi, type GitIdentity, type Project } from "@/lib/api";
+import { gitIdentities, projects as projectsApi, type GitIdentity, type Project, type WorkspaceKind } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, InlineBanner, SectionEmpty, SkeletonBlock } from "@/components/ui/card";
@@ -27,6 +27,7 @@ const emptyProjectForm = {
   source_path: "",
   git_identity_id: "",
   default_branch: "main",
+  kind: "code" as WorkspaceKind,
 };
 
 const emptyIdentityForm = {
@@ -115,7 +116,16 @@ export default function ProjectsPage() {
     setError("");
     setCreating(true);
     try {
-      if (form.source_type === "upload") {
+      if (form.kind !== "code") {
+        // 行政庶務工作區：無 repo，只送名稱/描述/kind，後端跳過 clone/index。
+        await projectsApi.create({
+          name: form.name,
+          description: form.description || undefined,
+          source_type: "local",
+          source_path: "",
+          kind: form.kind,
+        });
+      } else if (form.source_type === "upload") {
         if (!uploadFile) throw new Error("Please choose a zip file to upload");
         await projectsApi.upload({
           name: form.name,
@@ -130,6 +140,7 @@ export default function ProjectsPage() {
           source_path: form.source_path,
           git_identity_id: form.source_type === "git" && form.git_identity_id ? form.git_identity_id : undefined,
           default_branch: form.source_type === "git" ? form.default_branch || "main" : undefined,
+          kind: "code",
         });
       }
       setShowCreate(false);
@@ -332,6 +343,23 @@ export default function ProjectsPage() {
                 onChange={(e) => setForm((current) => ({ ...current, description: e.target.value }))} />
             </div>
 
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {([
+                { v: "code", label: "程式碼工作區", hint: "Git 倉庫 / 本機資料夾，含索引與 AI 接地" },
+                { v: "admin", label: "行政工作區", hint: "行政庶務 / 個人事務；無倉庫，只管待辦與會議" },
+              ] as { v: WorkspaceKind; label: string; hint: string }[]).map(({ v, label, hint }) => (
+                <button key={v} type="button"
+                  onClick={() => setForm((current) => ({ ...current, kind: v }))}
+                  className={form.kind === v
+                    ? "rounded-2xl border border-[#BFDBFE] bg-[#EFF6FF] p-4 text-left"
+                    : "rounded-2xl border border-[#E2E8F0] bg-white p-4 text-left hover:border-[#94A3B8]"}>
+                  <div className="text-sm font-semibold text-[#1A1A2E]">{label}</div>
+                  <div className="mt-1 text-xs text-[#64748B]">{hint}</div>
+                </button>
+              ))}
+            </div>
+
+            {form.kind === "code" && (<>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               {[
                 { value: "local", label: t("projects.sourceLocal"), hint: t("projects.sourceLocalHint"), icon: FolderOpen },
@@ -444,6 +472,7 @@ export default function ProjectsPage() {
                 </div>
               </div>
             )}
+            </>)}
 
             {error && (
               <InlineBanner
@@ -509,7 +538,7 @@ export default function ProjectsPage() {
             return (
               <Card
                 key={project.id}
-                className="group rounded-[24px] border border-[#E2E8F0] p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-[#BFDBFE] hover:shadow-md"
+                className={`group rounded-[24px] border border-[#E2E8F0] p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-[#BFDBFE] hover:shadow-md${project.archived_at ? " opacity-60" : ""}`}
                 onClick={() => router.push(`/projects/${project.id}`)}
               >
                 <div className="flex items-start justify-between gap-4">
@@ -520,8 +549,9 @@ export default function ProjectsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="truncate text-base font-semibold text-[#1A1A2E] group-hover:text-[#0050A0]">{project.name}</h3>
-                        <Badge>{project.source_type}</Badge>
+                        <Badge>{project.kind && project.kind !== "code" ? "行政" : project.source_type}</Badge>
                         {project.source_type === "git" && project.default_branch && <Badge tone="blue">{project.default_branch}</Badge>}
+                        {project.archived_at && <Badge>已封存</Badge>}
                       </div>
                       <p className="mt-2 line-clamp-2 text-sm text-[#64748B]">{project.description || project.source_path}</p>
                     </div>
