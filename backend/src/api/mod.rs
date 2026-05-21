@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::crypto::TokenCipher;
+use crate::security::session_keys::SessionKeyStore;
 use axum::{extract::State, http::StatusCode, middleware, response::Json, routing::get, Router};
 use kway_dev_backend::portal_sync::SyncLock;
 use serde::Serialize;
@@ -51,7 +52,14 @@ pub enum MeetingEvent {
 pub struct AppState {
     pub db: PgPool,
     pub config: Arc<Config>,
+    /// System KEK: used for git-token/agent-key encryption (Phase 1) and
+    /// as the admin recovery wrapping KEK (Phase 2+).
+    /// Source: GIT_TOKEN_ENCRYPTION_KEY env var (or JWT_SECRET fallback).
     pub cipher: Arc<TokenCipher>,
+    /// Per-user User KEK session store (Phase 2+).
+    /// Populated on login via `vault_crypto::derive_user_kek`; cleared on
+    /// logout or TTL expiry.  Keys live only in RAM — never persisted.
+    pub session_keys: Arc<SessionKeyStore>,
     /// Shared mutex so the background scheduler and the /meetings/sync
     /// endpoint never run a portal scrape concurrently — Playwright owns
     /// the output/ directory and concurrent runs would corrupt it.

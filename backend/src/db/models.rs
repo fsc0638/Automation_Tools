@@ -177,6 +177,40 @@ pub struct ConversationSummary {
     pub updated_at: DateTime<Utc>,
 }
 
+// ── Vault models (Phase 1 / Option B: User KEK + System Recovery) ────
+
+/// Metadata row for a user's credential vault entry.
+/// The actual secret lives in `vault_ciphertexts` with
+/// `object_type = "vault_secret"` and `object_id = VaultSecret.id`.
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct VaultSecret {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub label: String,
+    pub secret_type: String,
+    pub username: Option<String>,
+    pub url: Option<String>,
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One row in the immutable `vault_audit_log` table.
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct VaultAuditEntry {
+    pub id: Uuid,
+    pub actor_id: Option<Uuid>,
+    pub object_type: String,
+    pub object_id: Uuid,
+    pub operation: String,
+    /// `"user"` = normal User KEK path.
+    /// `"system_recovery"` = admin used System KEK (high-visibility event).
+    pub kek_path: String,
+    pub reason: String,
+    pub ip_addr: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 #[allow(dead_code)]
 pub struct RefreshToken {

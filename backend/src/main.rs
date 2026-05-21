@@ -25,6 +25,8 @@ mod git_ops;
 mod grounding;
 mod security;
 
+use security::session_keys::SessionKeyStore;
+
 use api::{router, AppState};
 use crypto::TokenCipher;
 use sqlx::PgPool;
@@ -85,10 +87,32 @@ async fn main() -> anyhow::Result<()> {
     // RecvError::Lagged on the WS side and refetch.
     let (meeting_events_tx, _) = tokio::sync::broadcast::channel(256);
 
+    // User KEK session store.  Starts empty; populated on login.
+    // Phase 1: present but unused (all vault ops use System KEK only).
+    // Phase 2: auth.rs will insert/remove KEKs here on login/logout.
+    let session_keys = Arc::new(SessionKeyStore::new());
+
+    // Background session cleanup: evict expired User KEKs every 30 minutes.
+    // This frees RAM for long-abandoned sessions and triggers key zeroization.
+    {
+        let sk = session_keys.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                sk.cleanup_expired();
+                tracing::debug!("session_keys: cleanup ran, active={}", sk.active_count());
+            }
+        });
+    }
+
     let state = AppState {
         db: db.clone(),
         config: config.clone(),
         cipher,
+        session_keys,
         portal_sync_lock: portal_sync_lock.clone(),
         meeting_events: meeting_events_tx,
     };
