@@ -435,6 +435,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                             // we use to label history turns. Strip it before persisting
                             // so chat UI doesn't show the prefix to the user.
                             let content = strip_role_prefix(&content);
+
+                            // ── Vault echo guard (Layer 3) ─────────────────────
+                            // Last-resort scrub: if the user pasted a plaintext
+                            // vault secret into the chat and the model echoed it
+                            // back, redact it before it reaches the messages table.
+                            // Layer 1 (system prompt instruction) and Layer 2
+                            // (context_firewall redaction) should prevent this;
+                            // this guard is the safety net if both are bypassed.
+                            let (content, echo_scrubbed) =
+                                crate::security::redaction::scrub_vault_echo(&content);
+                            if echo_scrubbed {
+                                tracing::warn!(
+                                    conversation_id = %query.conversation_id,
+                                    "vault echo guard: secret pattern scrubbed from AI \
+                                     response before persist — check context_firewall config"
+                                );
+                            }
+
                             let role = agent_role(agent);
                             let display_name = display_agent_name(agent, *round, phase.as_deref());
                             let saved_id: Option<(Uuid,)> = sqlx::query_as(
