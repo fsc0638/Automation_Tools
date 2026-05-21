@@ -9,6 +9,11 @@ pub struct User {
     pub email: String,
     pub password_hash: String,
     pub display_name: String,
+    /// Per-user Argon2id salt for User KEK derivation (migration 0042).
+    /// Never sent to the client; zeroized implicitly when the struct drops.
+    #[serde(skip_serializing)]
+    #[sqlx(default)]
+    pub kek_salt: Vec<u8>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

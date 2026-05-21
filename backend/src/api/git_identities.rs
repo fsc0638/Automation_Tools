@@ -119,10 +119,23 @@ async fn create_identity(
         }
     }
 
-    let encrypted_token = state
-        .cipher
-        .encrypt(req.access_token.trim())
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("token encryption failed: {}", e)))?;
+    // Encrypt with User KEK if a session is active (Phase 2+ path: the token
+    // becomes session-gated and requires a login to decrypt).  Fall back to
+    // the System KEK when no session exists so that the rare path of
+    // create-identity immediately after registration on a fresh server start
+    // still works; identity_credentials will decrypt it via the System KEK
+    // fallback until the user re-creates the identity.
+    let encrypted_token = match state.session_keys.get_cipher(auth_user.id) {
+        Some(user_kek) => user_kek.encrypt(req.access_token.trim()),
+        None => {
+            tracing::debug!(
+                user_id = %auth_user.id,
+                "create_identity: no User KEK in session — encrypting with System KEK"
+            );
+            state.cipher.encrypt(req.access_token.trim())
+        }
+    }
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("token encryption failed: {}", e)))?;
 
     let identity: GitIdentity = sqlx::query_as(
         "INSERT INTO git_identities (user_id, name, provider, username, access_token)

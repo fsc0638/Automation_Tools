@@ -27,6 +27,7 @@ pub mod shared_memory;
 pub mod sprints;
 pub mod tasks;
 pub mod user_views;
+pub mod vault;
 pub mod ws;
 
 /// AgentK-aligned in-process pub/sub. Meeting CRUD handlers send a
@@ -103,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state.clone());
 
     let protected = Router::new()
+        .merge(auth::protected_routes())
         .merge(projects::routes())
         .merge(agent_profiles::routes())
         .merge(git_identities::routes())
@@ -117,6 +119,7 @@ pub fn router(state: AppState) -> Router {
         .merge(meetings::routes())
         .merge(portal_directory::routes())
         .merge(user_views::routes())
+        .merge(vault::routes())
         .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),

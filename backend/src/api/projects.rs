@@ -6,7 +6,7 @@ use axum::{
     Extension, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Cursor, path::Path as FsPath};
+use std::{fs, io::Cursor, path::Path as FsPath, sync::Arc};
 use uuid::Uuid;
 use zip::ZipArchive;
 
@@ -18,6 +18,7 @@ use crate::{
         checkout_branch, clone_repository, git_status, list_branches, list_files,
         list_remote_branches, read_file_content, sync_current_branch, GitCredentials, SyncResult,
     },
+    security::vault_service::VaultService,
 };
 
 #[derive(Debug, Deserialize)]
@@ -143,7 +144,7 @@ async fn create_project(
         None
     };
     let credentials = match identity.as_ref() {
-        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        Some(id) => Some(identity_credentials(id, &state, auth_user.id)?),
         None => None,
     };
     let (organization_id, workspace_id) = ensure_personal_workspace(&state, auth_user.id).await?;
@@ -296,6 +297,36 @@ async fn upload_project(
     .await?;
     grant_project_owner(&state, project.id, auth_user.id).await?;
 
+    // ── Vault-seal the raw zip bytes (encrypted backup at DB level) ──────
+    // Best-effort: a vault failure must not block the project creation; the
+    // extracted files on disk (protected by macOS FileVault at OS level) are
+    // the primary working copy for the AI pipeline.
+    match state.session_keys.get_cipher(auth_user.id) {
+        Some(user_kek) => {
+            let vsvc = VaultService::for_user(
+                &state.db,
+                Arc::new(user_kek),
+                auth_user.id,
+                state.cipher.clone(),
+                auth_user.id,
+                None,
+            );
+            if let Err(e) = vsvc.seal("vault_file", project.id, &zip_bytes).await {
+                tracing::warn!(
+                    project_id = %project.id,
+                    "upload_project: vault seal failed (best-effort — project still created): {}",
+                    e
+                );
+            }
+        }
+        None => {
+            tracing::warn!(
+                project_id = %project.id,
+                "upload_project: no User KEK in session — vault seal skipped"
+            );
+        }
+    }
+
     {
         let db = state.db.clone();
         let proj = project.clone();
@@ -416,7 +447,7 @@ async fn add_source(
             None => None,
         };
         let credentials = match identity.as_ref() {
-            Some(idn) => Some(identity_credentials(idn, &state.cipher)?),
+            Some(idn) => Some(identity_credentials(idn, &state, auth_user.id)?),
             None => None,
         };
         let clone_dir = build_clone_dir(
@@ -601,7 +632,7 @@ async fn switch_git_branch(
         None => None,
     };
     let credentials = match identity.as_ref() {
-        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        Some(id) => Some(identity_credentials(id, &state, auth_user.id)?),
         None => None,
     };
 
@@ -853,7 +884,7 @@ async fn sync_git_repo(
         None => None,
     };
     let credentials = match identity.as_ref() {
-        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        Some(id) => Some(identity_credentials(id, &state, auth_user.id)?),
         None => None,
     };
 
@@ -881,7 +912,7 @@ async fn get_remote_branches(
         None => None,
     };
     let credentials = match identity.as_ref() {
-        Some(id) => Some(identity_credentials(id, &state.cipher)?),
+        Some(id) => Some(identity_credentials(id, &state, auth_user.id)?),
         None => None,
     };
 
@@ -1010,13 +1041,47 @@ async fn find_git_identity(state: &AppState, id: Uuid, user_id: Uuid) -> AppResu
     identity.ok_or_else(|| AppError::NotFound("Git identity not found".into()))
 }
 
+/// Decrypt a git identity's access token.
+///
+/// **Key-selection policy (Phase 2+):**
+/// 1. Try the User KEK (session-keyed, login-gated) — succeeds for tokens
+///    created after Phase 2.
+/// 2. On failure (or no session), fall back to the System KEK — handles
+///    tokens created before Phase 2 or after a server restart before re-login.
+///
+/// Once all tokens have been re-created through the Phase 2 code path, the
+/// System KEK fallback can be removed to make git operations fully
+/// session-gated without exception.
 fn identity_credentials(
     identity: &GitIdentity,
-    cipher: &crate::crypto::TokenCipher,
+    state: &AppState,
+    user_id: Uuid,
 ) -> AppResult<GitCredentials> {
-    let access_token = cipher
-        .decrypt(&identity.access_token)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("token decrypt failed: {}", e)))?;
+    let access_token = if let Some(user_kek) = state.session_keys.get_cipher(user_id) {
+        match user_kek.decrypt(&identity.access_token) {
+            Ok(tok) => tok,
+            Err(_) => {
+                // Pre-Phase-2 row: token was wrapped with System KEK.
+                tracing::debug!(
+                    identity_id = %identity.id,
+                    "git token: User KEK decrypt failed — falling back to System KEK \
+                     (pre-Phase-2 token; re-create the identity to upgrade)"
+                );
+                state
+                    .cipher
+                    .decrypt(&identity.access_token)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("token decrypt failed: {}", e)))?
+            }
+        }
+    } else {
+        // No User KEK in session (server restart / session expired).
+        // Fall back to System KEK so existing operations don't break mid-session.
+        state
+            .cipher
+            .decrypt(&identity.access_token)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("token decrypt failed: {}", e)))?
+    };
+
     Ok(GitCredentials {
         username: identity.username.clone(),
         access_token,
