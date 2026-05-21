@@ -419,7 +419,7 @@ async fn re_wrap_deks_and_update_password(
 
     // Lock all matching rows for the duration of the transaction.
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT dek_id, wrapped_dek
+        "SELECT object_id, wrapped_dek
          FROM vault_key_wrappings
          WHERE kek_alias = $1
          FOR UPDATE",
@@ -428,19 +428,19 @@ async fn re_wrap_deks_and_update_password(
     .fetch_all(&mut *tx)
     .await?;
 
-    for (dek_id, wrapped_dek) in rows {
+    for (object_id, wrapped_dek) in rows {
         let dek = unwrap_dek(&old_cipher, &wrapped_dek)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap unwrap dek_id={}: {}", dek_id, e)))?;
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap unwrap object_id={}: {}", object_id, e)))?;
         let new_wrapped = wrap_dek(&new_cipher, &dek)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap wrap dek_id={}: {}", dek_id, e)))?;
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap wrap object_id={}: {}", object_id, e)))?;
 
         sqlx::query(
             "UPDATE vault_key_wrappings
              SET wrapped_dek = $1
-             WHERE dek_id = $2 AND kek_alias = $3",
+             WHERE object_id = $2 AND kek_alias = $3",
         )
         .bind(&new_wrapped)
-        .bind(dek_id)
+        .bind(object_id)
         .bind(&alias)
         .execute(&mut *tx)
         .await?;
