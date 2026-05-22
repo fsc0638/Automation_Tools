@@ -18,7 +18,7 @@ use crate::{
         generic::AgentProfileRuntime,
         orchestrator::{
             build_project_scope, run_agent_stream, strip_role_prefix, AgentMode,
-            DebateParticipant, ServerEvent,
+            DebateParticipant, ServerEvent, VaultSummary,
         },
     },
     api::{
@@ -248,6 +248,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
         .await
         .unwrap_or_default();
         let shared_notes = truncate_note_bodies(shared_notes);
+        // Fetch user vault summaries (metadata only) for agent context injection.
+        // Queried per-turn so mid-session vault changes are reflected immediately.
+        // Failures collapse to an empty slice — vault context is best-effort and
+        // must never block the chat.
+        let vault_summaries: Vec<VaultSummary> = sqlx::query_as(
+            "SELECT id, label, secret_type, ai_description
+             FROM vault_secrets
+             WHERE user_id = $1
+             ORDER BY updated_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
         // Fetch the conversation title for the cost-events snapshot (mig 0023).
         // We grab it per-message rather than once at session start so a
         // rename mid-session is reflected in subsequent rows. Failure
@@ -359,6 +373,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             &secured_context.history,
             secured_context.project_summary.clone(),
             shared_notes,
+            vault_summaries,
             &secured_context.user_message,
             agent_mode,
             None,

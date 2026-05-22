@@ -54,6 +54,11 @@ pub struct ToolCtx<'a> {
     /// Project root on disk (already access-checked by the caller).
     pub root: String,
     pub credentials: Option<GitCredentials>,
+    /// Authenticated user — required by vault_reveal for ownership check.
+    pub user_id: uuid::Uuid,
+    /// User KEK cipher from the in-RAM session store.
+    /// None → vault_reveal declines gracefully.
+    pub vault_cipher: Option<std::sync::Arc<crate::crypto::TokenCipher>>,
 }
 
 /// The ReAct contract handed to the model as the system prompt.
@@ -67,6 +72,7 @@ ACTION: <tool> <json-參數>\n\
 可用工具：\n\
 - search_index {\"query\":\"關鍵字或自然語言\"}  — 混合檢索專案已索引內容\n\
 - read_file {\"path\":\"相對路徑\",\"ref\":\"可選 git ref\"}  — 讀單一檔案（給 ref 則直接讀遠端該版本）\n\
+- vault_reveal {\"id\":\"<secret-uuid>\"}  — 取得 Vault 中某個憑證的明文值（僅在任務明確需要時使用）\n\
 - list_tree {\"path\":\"可選相對目錄\"}  — 列出目錄結構\n\
 \n\
 系統會執行該工具，並以 OBSERVATION: 回傳結果。你可再呼叫工具或回答。\n\
@@ -92,8 +98,10 @@ ACTION: <tool> <json參數>\n\
 - search_index {\"query\":\"自然語言或關鍵字\"}  混合語意+字面檢索已索引內容（中文問也行）\n\
 - read_file {\"path\":\"相對路徑\"}  讀本地該檔；或加 {\"ref\":\"分支/commit/tag\"} 直接讀遠端那個版本\n\
 - list_tree {\"path\":\"可選相對目錄\"}  看目錄結構\n\
+- vault_reveal {\"id\":\"<secret-uuid>\"}  從使用者 Vault 取得指定憑證的明文值（僅在任務明確需要時使用）\n\
 \n\
 策略：先 search_index 找線索 → read_file 把關鍵檔讀進來核實 → 再回答。\n\
+如需要憑證才能完成任務（例如 git clone 私有 repo），依 Vault 清單挑對應 id 並呼叫 vault_reveal。\n\
 能回答時，用一行 FINAL: 開頭給最終答案，並標明依據的實際檔案路徑。"
         .to_string()
 }
@@ -111,6 +119,7 @@ pub fn tool_status_msg(call: &ToolCall) -> String {
     };
     match call.name.as_str() {
         "search_index" => format!("檢索專案：「{}」…", arg("query")),
+        "vault_reveal" => format!("讀取 Vault 憑證 {}…", &arg("id")[..8.min(arg("id").len())]),
         "read_file" => {
             let p = arg("path");
             let r = arg("ref");
@@ -287,7 +296,59 @@ pub async fn run_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
                 },
             }
         }
-        other => format!("(unknown tool '{other}'; valid: search_index, read_file, list_tree)"),
+        "vault_reveal" => {
+            // Retrieve a vault secret by ID for agent use.
+            // Ownership is enforced; cipher must be present (active session).
+            // Result bypasses redact_secrets so the value reaches the model,
+            // but the vault echo guard in ws.rs prevents it appearing verbatim
+            // in the final streamed reply.
+            let id_str = call
+                .args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let id = match id_str.parse::<uuid::Uuid>() {
+                Ok(v) => v,
+                Err(_) => return "(vault_reveal: invalid UUID for 'id')".to_string(),
+            };
+            let Some(ref cipher) = ctx.vault_cipher else {
+                return "(vault_reveal: no active vault session — log in again)".to_string();
+            };
+            // Ownership check.
+            let owner: Option<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT user_id FROM vault_secrets WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_optional(ctx.db)
+            .await
+            .unwrap_or(None);
+            match owner {
+                None => return "(vault_reveal: secret not found)".to_string(),
+                Some(uid) if uid != ctx.user_id => {
+                    return "(vault_reveal: forbidden — not your secret)".to_string();
+                }
+                _ => {}
+            }
+            // Decrypt via vault service (User KEK path).
+            let vsvc = crate::security::vault_service::VaultService::for_user(
+                ctx.db,
+                cipher.clone(),
+                ctx.user_id,
+                cipher.clone(), // system cipher not needed for User KEK path
+                ctx.user_id,
+                None,
+            );
+            match vsvc.open("vault_secret", id, "agent_tool").await {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    // Returned directly — NOT through redact_secrets.
+                    Ok(v) => return v.chars().take(MAX_TOOL_OUTPUT_CHARS).collect(),
+                    Err(_) => return "(vault_reveal: decrypted value is not UTF-8)".to_string(),
+                },
+                Err(e) => return format!("(vault_reveal: decrypt failed: {e})"),
+            }
+        }
+        other => format!("(unknown tool '{other}'; valid: search_index, read_file, list_tree, vault_reveal)"),
     };
 
     // INVARIANT: tool output cannot bypass secret redaction.

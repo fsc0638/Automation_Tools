@@ -834,11 +834,14 @@ async fn react_agent(
     .map_err(|e| AppError::Agent(e.to_string()))?;
 
     let max_iters = req.max_iters.unwrap_or(4).clamp(1, 6);
+    let vault_cipher = state.session_keys.get_cipher(auth_user.id).map(std::sync::Arc::new);
     let ctx = crate::grounding::tools::ToolCtx {
         db: &state.db,
         project: &project,
         root,
         credentials,
+        user_id: auth_user.id,
+        vault_cipher,
     };
 
     let mut messages = vec![

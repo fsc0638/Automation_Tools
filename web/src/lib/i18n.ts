@@ -867,6 +867,11 @@ const zhTW: Dict = {
   "vault.confirmNewPassword": "確認新密碼",
   "vault.passwordChanged": "密碼已變更，Vault 金鑰已重新包裝。",
   "vault.passwordMismatch": "兩次輸入的密碼不一致。",
+  "vault.aiDescription": "AI 使用說明",
+  "vault.aiDescriptionPlaceholder": "告訴 AI 何時應使用此憑證。例：「clone 任何 Kway 私有 repo 時使用此 PAT」",
+  "vault.aiDescriptionHint": "此說明以明文儲存，讓 AI Agent 自動判斷何時及如何使用此憑證。請勿填入敏感資料。",
+  "vault.updated": "密鑰資訊已更新",
+  "vault.editAiHint": "編輯 AI 說明",
 };
 
 const zhCN: Dict = {

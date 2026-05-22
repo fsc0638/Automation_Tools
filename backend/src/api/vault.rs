@@ -16,7 +16,7 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post, put},
     Extension, Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -43,11 +43,28 @@ pub struct CreateSecretRequest {
     pub url: Option<String>,
     /// Unencrypted note visible in the metadata listing (don't put secrets here).
     pub note: Option<String>,
+    /// AI-readable description: tell the agent what this secret is for and when
+    /// to use it.  Stored in plaintext — never put sensitive data here.
+    /// Example: "Use this PAT when cloning or pushing to any private Kway repo."
+    #[serde(default)]
+    pub ai_description: String,
     /// The actual secret value — encrypted before being written to the DB.
     pub secret_value: String,
 }
 
-/// Metadata returned by list / create.  Never includes the plaintext value.
+/// Metadata-only update (label, description, username, url, note).
+/// Does NOT change the encrypted secret value.
+#[derive(Debug, Deserialize)]
+pub struct UpdateSecretRequest {
+    pub label: Option<String>,
+    pub username: Option<String>,
+    pub url: Option<String>,
+    pub note: Option<String>,
+    /// AI-readable description — the key field for agent auto-selection.
+    pub ai_description: Option<String>,
+}
+
+/// Metadata returned by list / create / update.  Never includes the plaintext value.
 #[derive(Debug, Serialize, FromRow)]
 pub struct SecretMetadata {
     pub id: Uuid,
@@ -56,6 +73,8 @@ pub struct SecretMetadata {
     pub username: Option<String>,
     pub url: Option<String>,
     pub note: Option<String>,
+    /// AI-readable description for agent context injection.
+    pub ai_description: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -73,7 +92,7 @@ pub fn routes() -> Router<AppState> {
         .route("/vault/secrets", get(list_secrets).post(create_secret))
         .route(
             "/vault/secrets/:id",
-            delete(delete_secret),
+            put(update_secret).delete(delete_secret),
         )
         .route("/vault/secrets/:id/reveal", post(reveal_secret))
 }
@@ -92,7 +111,7 @@ async fn list_secrets(
     require_kek(&state, auth_user.id)?;
 
     let rows: Vec<SecretMetadata> = sqlx::query_as(
-        "SELECT id, label, secret_type, username, url, note, created_at, updated_at
+        "SELECT id, label, secret_type, username, url, note, ai_description, created_at, updated_at
          FROM vault_secrets
          WHERE user_id = $1
          ORDER BY created_at DESC",
@@ -124,9 +143,9 @@ async fn create_secret(
 
     // Insert the metadata row first to obtain the stable `id` used as object_id.
     let meta: SecretMetadata = sqlx::query_as(
-        "INSERT INTO vault_secrets (user_id, label, secret_type, username, url, note)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, label, secret_type, username, url, note, created_at, updated_at",
+        "INSERT INTO vault_secrets (user_id, label, secret_type, username, url, note, ai_description)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, label, secret_type, username, url, note, ai_description, created_at, updated_at",
     )
     .bind(auth_user.id)
     .bind(req.label.trim())
@@ -134,6 +153,7 @@ async fn create_secret(
     .bind(req.username.as_deref())
     .bind(req.url.as_deref())
     .bind(req.note.as_deref())
+    .bind(req.ai_description.trim())
     .fetch_one(&state.db)
     .await?;
 
@@ -156,6 +176,56 @@ async fn create_secret(
             .await;
         return Err(AppError::Internal(anyhow::anyhow!("vault seal failed: {}", e)));
     }
+
+    Ok(Json(meta))
+}
+
+/// `PUT /api/vault/secrets/:id`
+///
+/// Update vault secret metadata (label, username, url, note, ai_description).
+/// Does NOT change the encrypted secret value — use delete + re-create for that.
+async fn update_secret(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateSecretRequest>,
+) -> AppResult<Json<SecretMetadata>> {
+    // Ownership check.
+    let owner: Option<Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM vault_secrets WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+
+    match owner {
+        None => return Err(AppError::NotFound("Secret not found".into())),
+        Some(uid) if uid != auth_user.id => {
+            return Err(AppError::Forbidden("Not your secret".into()));
+        }
+        _ => {}
+    }
+
+    require_kek(&state, auth_user.id)?;
+
+    let meta: SecretMetadata = sqlx::query_as(
+        "UPDATE vault_secrets
+         SET label          = COALESCE($2, label),
+             username       = COALESCE($3, username),
+             url            = COALESCE($4, url),
+             note           = COALESCE($5, note),
+             ai_description = COALESCE($6, ai_description),
+             updated_at     = NOW()
+         WHERE id = $1
+         RETURNING id, label, secret_type, username, url, note, ai_description, created_at, updated_at",
+    )
+    .bind(id)
+    .bind(req.label.as_deref())
+    .bind(req.username.as_deref())
+    .bind(req.url.as_deref())
+    .bind(req.note.as_deref())
+    .bind(req.ai_description.as_deref())
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(meta))
 }

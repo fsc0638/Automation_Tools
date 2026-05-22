@@ -1553,6 +1553,8 @@ export interface VaultSecret {
   username: string | null;
   url: string | null;
   note: string | null;
+  /** User-written hint for AI agents — stored in plaintext, never put sensitive data here. */
+  ai_description: string;
   created_at: string;
   updated_at: string;
 }
@@ -1569,10 +1571,26 @@ export const vault = {
     username?: string;
     url?: string;
     note?: string;
+    ai_description?: string;
     secret_value: string;
   }) =>
     request<VaultSecret>("/vault/secrets", {
       method: "POST",
+      body: JSON.stringify(data),
+    }),
+  /** Update metadata (label, username, url, note, ai_description). Does NOT change the secret value. */
+  update: (
+    id: string,
+    data: {
+      label?: string;
+      username?: string;
+      url?: string;
+      note?: string;
+      ai_description?: string;
+    },
+  ) =>
+    request<VaultSecret>(`/vault/secrets/${id}`, {
+      method: "PUT",
       body: JSON.stringify(data),
     }),
   reveal: (id: string) =>

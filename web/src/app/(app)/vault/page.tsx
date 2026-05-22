@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Eye, EyeOff, KeyRound, Lock, Plus, Trash2 } from "lucide-react";
+import { Bot, Eye, EyeOff, KeyRound, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { auth as authApi, vault as vaultApi, type VaultSecret } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,6 +31,7 @@ const EMPTY_FORM = {
   username: "",
   url: "",
   note: "",
+  ai_description: "",
   secret_value: "",
 };
 
@@ -62,6 +63,11 @@ export default function VaultPage() {
   const [revealState, setRevealState] = useState<RevealState | null>(null);
   const [revealing, setRevealing] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Inline AI description edit ─────────────────────────────────────────
+  const [editAiTarget, setEditAiTarget] = useState<string | null>(null);
+  const [editAiValue, setEditAiValue] = useState("");
+  const [savingAi, setSavingAi] = useState(false);
 
   // ── Change password ────────────────────────────────────────────────────
   const [showChangePw, setShowChangePw] = useState(false);
@@ -146,6 +152,7 @@ export default function VaultPage() {
         username: form.username.trim() || undefined,
         url: form.url.trim() || undefined,
         note: form.note.trim() || undefined,
+        ai_description: form.ai_description.trim() || undefined,
         secret_value: form.secret_value,
       });
       setSecrets((prev) => [created, ...prev]);
@@ -162,6 +169,21 @@ export default function VaultPage() {
       }
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleSaveAiDescription(id: string) {
+    setSavingAi(true);
+    try {
+      const updated = await vaultApi.update(id, { ai_description: editAiValue.trim() });
+      setSecrets((prev) => prev.map((s) => (s.id === id ? updated : s)));
+      setEditAiTarget(null);
+      pushToast({ title: t("vault.updated"), tone: "success" });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      pushToast({ title: t("common.error"), description: msg, tone: "error" });
+    } finally {
+      setSavingAi(false);
     }
   }
 
@@ -413,6 +435,21 @@ export default function VaultPage() {
                 />
               </div>
 
+              <div>
+                <label className="mb-1 flex items-center gap-1.5 text-[13px] font-medium text-[#374151]">
+                  <Bot size={13} className="text-[#3A7ECC]" />
+                  {t("vault.aiDescription")}
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder={t("vault.aiDescriptionPlaceholder")}
+                  value={form.ai_description}
+                  onChange={(e) => setForm((f) => ({ ...f, ai_description: e.target.value }))}
+                  className="w-full resize-none rounded-lg border border-[#E2E8F0] bg-white px-3 py-2 text-[13px] text-[#0F172A] placeholder-[#94A3B8] focus:border-[#3A7ECC] focus:outline-none focus:ring-1 focus:ring-[#3A7ECC]"
+                />
+                <p className="mt-1 text-[12px] text-[#94A3B8]">{t("vault.aiDescriptionHint")}</p>
+              </div>
+
               {createError && <p className="text-[13px] text-red-600">{createError}</p>}
 
               <div className="flex gap-2">
@@ -484,6 +521,43 @@ export default function VaultPage() {
                         {secret.note && <span className="italic">{secret.note}</span>}
                         <span>{formatDate(secret.created_at)}</span>
                       </div>
+
+                      {/* AI description — inline editable */}
+                      {editAiTarget === secret.id ? (
+                        <div className="mt-2 flex items-start gap-2">
+                          <textarea
+                            rows={2}
+                            autoFocus
+                            className="flex-1 resize-none rounded-lg border border-[#3A7ECC] bg-white px-2 py-1.5 text-[12px] text-[#0F172A] focus:outline-none focus:ring-1 focus:ring-[#3A7ECC]"
+                            value={editAiValue}
+                            onChange={(e) => setEditAiValue(e.target.value)}
+                          />
+                          <div className="flex flex-col gap-1">
+                            <Button size="sm" loading={savingAi} onClick={() => void handleSaveAiDescription(secret.id)}>
+                              {t("common.save")}
+                            </Button>
+                            <Button size="sm" variant="secondary" onClick={() => setEditAiTarget(null)}>
+                              {t("common.cancel")}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-1.5 flex items-start gap-1.5">
+                          <Bot size={12} className="mt-0.5 flex-shrink-0 text-[#3A7ECC]" />
+                          <span
+                            className={`flex-1 text-[12px] ${secret.ai_description ? "text-[#475569]" : "text-[#CBD5E1]"}`}
+                          >
+                            {secret.ai_description || t("vault.editAiHint")}
+                          </span>
+                          <button
+                            onClick={() => { setEditAiTarget(secret.id); setEditAiValue(secret.ai_description ?? ""); }}
+                            className="flex-shrink-0 text-[#CBD5E1] hover:text-[#3A7ECC]"
+                            title={t("vault.editAiHint")}
+                          >
+                            <Pencil size={11} />
+                          </button>
+                        </div>
+                      )}
 
                       {/* Revealed value — visible only for REVEAL_TTL_S seconds */}
                       {isRevealed && revealState && (

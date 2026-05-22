@@ -45,6 +45,58 @@ pub struct ChatToolRuntime {
     pub db: PgPool,
     pub project: Project,
     pub credentials: Option<GitCredentials>,
+    /// Authenticated user — required by vault_reveal for ownership enforcement.
+    pub user_id: uuid::Uuid,
+    /// User KEK cipher from the in-RAM session store.
+    /// None → vault_reveal declines gracefully (session expired / no vault session).
+    pub vault_cipher: Option<std::sync::Arc<crate::crypto::TokenCipher>>,
+}
+
+// ── Vault context injection ────────────────────────────────────────────────────
+
+/// Lightweight vault summary injected into every agent system prompt.
+/// Contains metadata only — the plaintext value is never included here.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct VaultSummary {
+    pub id: uuid::Uuid,
+    pub label: String,
+    pub secret_type: String,
+    /// User-written AI description — tells the agent when/why to use this secret.
+    pub ai_description: String,
+}
+
+fn vault_context_message(secrets: &[VaultSummary]) -> ChatMessage {
+    if secrets.is_empty() {
+        return ChatMessage {
+            role: "system".into(),
+            content: "User Vault: no credentials configured.".into(),
+        };
+    }
+    let body = secrets
+        .iter()
+        .map(|s| {
+            let desc = if s.ai_description.trim().is_empty() {
+                "(no description set)".to_string()
+            } else {
+                s.ai_description.clone()
+            };
+            format!(
+                "- id={} | type={} | label=\"{}\" | usage_hint=\"{}\"",
+                s.id, s.secret_type, s.label, desc
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ChatMessage {
+        role: "system".into(),
+        content: format!(
+            "User Vault — available credentials (metadata only; values are encrypted at rest):\n\
+             {body}\n\n\
+             To retrieve the actual plaintext value call the vault_reveal tool with the secret id. \
+             Only reveal when the current user request explicitly requires the credential. \
+             Never echo or forward the revealed value verbatim in your reply.",
+        ),
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -379,6 +431,7 @@ fn messages_to_chat(
     history: &[Message],
     project_summary: Option<&str>,
     shared_notes: &[SharedMemoryNote],
+    vault_summaries: &[VaultSummary],
 ) -> Vec<ChatMessage> {
     let mut messages = vec![project_scope_message(project)];
     if let Some(summary) = project_summary.filter(|s| !s.trim().is_empty()) {
@@ -387,6 +440,9 @@ fn messages_to_chat(
     if !shared_notes.is_empty() {
         messages.push(shared_memory_message(shared_notes));
     }
+    // Always inject vault context so the agent knows which credentials are
+    // available, regardless of mode (chat, debate, etc.).
+    messages.push(vault_context_message(vault_summaries));
     messages.extend(history.iter().map(|m| {
         let role = if m.role == "user" {
             "user"
@@ -1200,7 +1256,7 @@ pub async fn run_agent_turn(
     let openclaw = OpenClawClient::new(config);
     let hermes = HermesClient::new(config);
 
-    let mut chat = messages_to_chat(project, history, project_summary, shared_notes);
+    let mut chat = messages_to_chat(project, history, project_summary, shared_notes, &[]);
     chat.push(ChatMessage {
         role: "user".into(),
         content: user_message.into(),
@@ -1333,6 +1389,7 @@ pub fn run_agent_stream(
     history: &[Message],
     project_summary: Option<String>,
     shared_notes: Vec<SharedMemoryNote>,
+    vault_summaries: Vec<VaultSummary>,
     user_message: &str,
     mode: AgentMode,
     tools: Option<ChatToolRuntime>,
@@ -1342,7 +1399,7 @@ pub fn run_agent_stream(
     let chunk_timeout = stream_chunk_timeout(&config);
     let history_owned: Vec<Message> = history.to_vec();
     let current_topic = user_message.to_string();
-    let mut chat = messages_to_chat(&project, history, project_summary.as_deref(), &shared_notes);
+    let mut chat = messages_to_chat(&project, history, project_summary.as_deref(), &shared_notes, &vault_summaries);
     chat.push(ChatMessage {
         role: "user".into(),
         content: current_topic.clone(),
@@ -1469,6 +1526,8 @@ pub fn run_agent_stream(
                             project: &rt.project,
                             root: project_root.clone(),
                             credentials: rt.credentials.clone(),
+                            user_id: rt.user_id,
+                            vault_cipher: rt.vault_cipher.clone(),
                         };
                         let obs = crate::grounding::tools::run_tool(&ctx, &call).await;
                         chat.push(ChatMessage { role: "assistant".into(), content: turn });
@@ -1976,7 +2035,7 @@ mod tests {
         }];
         let notes = vec![fixture_note("Decision", "Prefer PATCH over PUT.")];
 
-        let messages = messages_to_chat(&fixture_project(), &history, Some("summary"), &notes);
+        let messages = messages_to_chat(&fixture_project(), &history, Some("summary"), &notes, &[]);
 
         assert_eq!(messages[0].role, "system");
         assert!(messages[0].content.contains("Project isolation boundary"));
