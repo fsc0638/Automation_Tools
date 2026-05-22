@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Bot, CalendarDays, FolderOpen, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Target, UserCog } from "lucide-react";
+import { BarChart3, Bot, CalendarDays, FolderOpen, Lock, LogOut, Map as MapIcon, NotebookPen, Search, ShieldCheck, Target, UserCog } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { auth } from "@/lib/api";
@@ -28,6 +28,7 @@ export function Sidebar() {
     // until i18n keys land. Slot it at the end so existing muscle memory
     // for the top entries stays intact.
     { href: "/access", label: "Access", description: "Organizations, workspaces, and sharing", icon: ShieldCheck },
+    { href: "/vault", label: t("sidebar.vault"), description: t("sidebar.vaultDesc"), icon: Lock },
   ];
 
   function handleLogout() {

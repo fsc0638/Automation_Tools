@@ -14,13 +14,14 @@ use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
     agents::{hermes::HermesClient, openclaw::ChatMessage},
     api::{auth::AuthUser, AppState, MeetingEvent},
     error::{AppError, AppResult},
+    security::vault_service::VaultService,
 };
 
 /// Best-effort event publish — failure (no subscribers) is normal and
@@ -1621,7 +1622,12 @@ async fn upload_file(
         .to_string();
 
     let file_id = Uuid::new_v4();
+    // Per-user directory: <root>/users/<uploader_id>/meetings/<meeting_id>/
+    // This provides OS-level isolation so one user's meeting attachments
+    // are not readable by another user even at the filesystem layer.
     let dir: PathBuf = PathBuf::from(&state.config.project_data_root)
+        .join("users")
+        .join(auth_user.id.to_string())
         .join("meetings")
         .join(id.to_string());
     fs::create_dir_all(&dir).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
@@ -1648,6 +1654,40 @@ async fn upload_file(
     .bind(transcript_meta)
     .fetch_one(&state.db)
     .await?;
+
+    // ── Vault-seal the raw file bytes (encrypted backup) ─────────────────
+    // Best-effort: a vault failure must not block the upload; the on-disk
+    // copy is the primary working file.  object_type = "meeting_file" uses
+    // the meeting_files.id (file_id) as the envelope key so the seal can
+    // be looked up or recovered by admins via vault_admin CLI.
+    match state.session_keys.get_cipher(auth_user.id) {
+        Some(user_kek) => {
+            let vsvc = VaultService::for_user(
+                &state.db,
+                Arc::new(user_kek),
+                auth_user.id,
+                state.cipher.clone(),
+                auth_user.id,
+                None,
+            );
+            if let Err(e) = vsvc.seal("meeting_file", file_id, &bytes).await {
+                tracing::warn!(
+                    file_id = %file_id,
+                    meeting_id = %id,
+                    "upload_file: vault seal failed (best-effort — file still saved): {}",
+                    e
+                );
+            }
+        }
+        None => {
+            tracing::warn!(
+                file_id = %file_id,
+                meeting_id = %id,
+                "upload_file: no User KEK in session — vault seal skipped"
+            );
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(row)))
 }
 

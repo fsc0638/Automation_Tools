@@ -100,6 +100,11 @@ export const auth = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    request<void>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   logout: () => {
     const refreshToken = getRefreshToken();
     clearSession();
@@ -1538,3 +1543,40 @@ export interface MetricsSummary {
     satisfaction_rate: number;
   }>;
 }
+
+// ── Vault ─────────────────────────────────────────────────────────────────
+
+export interface VaultSecret {
+  id: string;
+  label: string;
+  secret_type: string | null;
+  username: string | null;
+  url: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VaultRevealResponse {
+  secret_value: string;
+}
+
+export const vault = {
+  list: () => request<VaultSecret[]>("/vault/secrets"),
+  create: (data: {
+    label: string;
+    secret_type?: string;
+    username?: string;
+    url?: string;
+    note?: string;
+    secret_value: string;
+  }) =>
+    request<VaultSecret>("/vault/secrets", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  reveal: (id: string) =>
+    request<VaultRevealResponse>(`/vault/secrets/${id}/reveal`, { method: "POST" }),
+  delete: (id: string) =>
+    request<void>(`/vault/secrets/${id}`, { method: "DELETE" }),
+};

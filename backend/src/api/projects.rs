@@ -8,7 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Cursor, path::Path as FsPath, sync::Arc};
 use uuid::Uuid;
-use zip::ZipArchive;
+use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
 use crate::{
     api::{auth::AuthUser, project_index::rebuild_project_index_all, AppState},
@@ -152,6 +152,7 @@ async fn create_project(
     let local_path = if is_code && req.source_type == "git" {
         let clone_dir = build_clone_dir(
             &state.config.project_data_root,
+            auth_user.id,
             &req.source_path,
             Uuid::new_v4(),
         );
@@ -186,6 +187,48 @@ async fn create_project(
     .fetch_one(&state.db)
     .await?;
     grant_project_owner(&state, project.id, auth_user.id).await?;
+
+    // ── Vault-seal the git clone as an encrypted backup ──────────────────
+    // Best-effort: a large or failed zip must never block project creation.
+    // Repos > 100 MB uncompressed are skipped — they rely on OS FileVault
+    // (macOS FileVault / BitLocker) as the disk-level protection layer.
+    if let Some(clone_dir) = &local_path {
+        match state.session_keys.get_cipher(auth_user.id) {
+            Some(user_kek) => {
+                let dir_path = std::path::Path::new(clone_dir);
+                match zip_dir_bytes(dir_path, 100 * 1024 * 1024) {
+                    Ok(zip_bytes) => {
+                        let vsvc = VaultService::for_user(
+                            &state.db,
+                            Arc::new(user_kek),
+                            auth_user.id,
+                            state.cipher.clone(),
+                            auth_user.id,
+                            None,
+                        );
+                        if let Err(e) = vsvc.seal("vault_file", project.id, &zip_bytes).await {
+                            tracing::warn!(
+                                project_id = %project.id,
+                                "create_project: vault seal failed (best-effort): {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            project_id = %project.id,
+                            "create_project: git repo vault seal skipped: {e}"
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    project_id = %project.id,
+                    "create_project: no User KEK in session — git vault seal skipped"
+                );
+            }
+        }
+    }
 
     // MS-2: register this initial source as the workspace's first
     // project_sources row (canonical multi-source list). Only when it
@@ -278,7 +321,7 @@ async fn upload_project(
     let (organization_id, workspace_id) = ensure_personal_workspace(&state, auth_user.id).await?;
 
     let upload_id = Uuid::new_v4();
-    let upload_dir = build_upload_dir(&state.config.project_data_root, &name, upload_id);
+    let upload_dir = build_upload_dir(&state.config.project_data_root, auth_user.id, &name, upload_id);
     fs::create_dir_all(&upload_dir).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     extract_zip_project(&zip_bytes, &upload_dir)?;
 
@@ -452,6 +495,7 @@ async fn add_source(
         };
         let clone_dir = build_clone_dir(
             &state.config.project_data_root,
+            auth_user.id,
             req.source_path.trim(),
             Uuid::new_v4(),
         );
@@ -497,6 +541,45 @@ async fn add_source(
     .bind(&label)
     .fetch_one(&state.db)
     .await?;
+
+    // ── Vault-seal the git clone (add_source path) ───────────────────────
+    if let Some(clone_dir) = &local_path {
+        match state.session_keys.get_cipher(auth_user.id) {
+            Some(user_kek) => {
+                let dir_path = std::path::Path::new(clone_dir);
+                match zip_dir_bytes(dir_path, 100 * 1024 * 1024) {
+                    Ok(zip_bytes) => {
+                        let vsvc = VaultService::for_user(
+                            &state.db,
+                            Arc::new(user_kek),
+                            auth_user.id,
+                            state.cipher.clone(),
+                            auth_user.id,
+                            None,
+                        );
+                        if let Err(e) = vsvc.seal("vault_file", source.id, &zip_bytes).await {
+                            tracing::warn!(
+                                source_id = %source.id,
+                                "add_source: vault seal failed (best-effort): {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            "add_source: git repo vault seal skipped: {e}"
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    source_id = %source.id,
+                    "add_source: no User KEK in session — git vault seal skipped"
+                );
+            }
+        }
+    }
 
     // Reindex in the BACKGROUND. Indexing a large folder embeds every
     // chunk through the local ONNX model — doing it inline made the
@@ -1108,26 +1191,30 @@ fn project_root_path(project: &Project) -> String {
     }
 }
 
-/// Build the on-disk clone directory: `<root>/<repo-slug>-<short>`.
-/// Slug is derived from the URL's last segment, sanitised; short is 8 hex
-/// chars from the supplied UUID. Existing projects keep whatever path was
-/// stored at create time, so old clones remain accessible after upgrades.
-fn build_clone_dir(root: &str, source_url: &str, clone_id: Uuid) -> String {
+/// Build the on-disk clone directory:
+///   `<root>/users/<user_id>/<repo-slug>-<short>`
+///
+/// Each user gets their own subdirectory so that OS-level `chmod 700`
+/// on the per-user directory prevents cross-user filesystem reads even
+/// if the kway-svc process account is somehow compromised.
+/// Existing projects keep whatever path was stored at create time, so
+/// old clones remain accessible after upgrading.
+fn build_clone_dir(root: &str, user_id: Uuid, source_url: &str, clone_id: Uuid) -> String {
     let slug = repo_slug_from_url(source_url);
     let mut short = clone_id.to_string();
     short.retain(|c| c != '-');
     let short = short.chars().take(8).collect::<String>();
     let root = root.trim_end_matches(['/', '\\']);
-    format!("{}/{}-{}", root, slug, short)
+    format!("{}/users/{}/{}-{}", root, user_id, slug, short)
 }
 
-fn build_upload_dir(root: &str, name: &str, upload_id: Uuid) -> String {
+fn build_upload_dir(root: &str, user_id: Uuid, name: &str, upload_id: Uuid) -> String {
     let mut short = upload_id.to_string();
     short.retain(|c| c != '-');
     let short = short.chars().take(8).collect::<String>();
     let slug = safe_slug(name);
     let root = root.trim_end_matches(['/', '\\']);
-    format!("{}/upload-{}-{}", root, slug, short)
+    format!("{}/users/{}/upload-{}-{}", root, user_id, slug, short)
 }
 
 fn safe_slug(input: &str) -> String {
@@ -1204,4 +1291,85 @@ fn repo_slug_from_url(source_url: &str) -> String {
     } else {
         trimmed
     }
+}
+
+// ── Vault helpers: zip a directory into memory ────────────────────────────────
+
+/// Recursively compute total uncompressed bytes under `dir`.
+fn dir_bytes_recursive(dir: &std::path::Path) -> anyhow::Result<u64> {
+    let mut total = 0u64;
+    if dir.is_dir() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_symlink() {
+                // Skip symlinks to avoid loops.
+            } else if path.is_dir() {
+                total += dir_bytes_recursive(&path)?;
+            } else if path.is_file() {
+                total += fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Recursively add files under `dir` into an open `ZipWriter`.
+/// `base` is the root that paths are computed relative to.
+fn add_dir_to_zip<W: std::io::Write + std::io::Seek>(
+    zip: &mut ZipWriter<W>,
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    opts: SimpleFileOptions,
+) -> anyhow::Result<()> {
+    use std::io::Read;
+    let mut entries: Vec<_> = fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
+    // Stable sort so zip contents are deterministic.
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_symlink() {
+            continue; // skip to prevent traversal loops
+        }
+        let rel = path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if rel.is_empty() {
+            continue;
+        }
+        if path.is_dir() {
+            zip.add_directory(&rel, opts)?;
+            add_dir_to_zip(zip, base, &path, opts)?;
+        } else if path.is_file() {
+            zip.start_file(&rel, opts)?;
+            let mut f = fs::File::open(&path)?;
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf)?;
+            std::io::Write::write_all(zip, &buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Zip `dir` into an in-memory `Vec<u8>`.
+/// Returns `Err` if the uncompressed directory exceeds `limit_bytes`.
+/// This is used for best-effort vault sealing of git clones.
+fn zip_dir_bytes(dir: &std::path::Path, limit_bytes: u64) -> anyhow::Result<Vec<u8>> {
+    let total = dir_bytes_recursive(dir)?;
+    if total > limit_bytes {
+        anyhow::bail!(
+            "repo too large for vault seal ({} MB uncompressed, limit {} MB) — \
+             relying on OS-level FileVault/BitLocker for disk protection",
+            total / 1_048_576,
+            limit_bytes / 1_048_576,
+        );
+    }
+    let cursor = std::io::Cursor::new(Vec::<u8>::new());
+    let mut zip = ZipWriter::new(cursor);
+    let opts = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    add_dir_to_zip(&mut zip, dir, dir, opts)?;
+    let inner = zip.finish()?;
+    Ok(inner.into_inner())
 }

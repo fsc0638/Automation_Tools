@@ -11,10 +11,17 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::{
     api::AppState,
+    crypto::TokenCipher,
     db::models::User,
     error::{AppError, AppResult},
+    security::{
+        dmg_manager,
+        vault_service::VaultService,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,6 +81,94 @@ pub struct UserInfo {
 struct ChangePasswordRequest {
     current_password: String,
     new_password: String,
+}
+
+// ── DMG helpers ───────────────────────────────────────────────────────────────
+
+/// After a successful login or registration, ensure the user's encrypted
+/// disk image is mounted at `<project_data_root>/users/<user_id>/`.
+///
+/// First call: generates a random 32-byte passphrase, seals it in the
+/// vault, creates the sparse image, then mounts it.
+/// Subsequent calls: retrieves the passphrase from vault, mounts (idempotent).
+///
+/// Best-effort: errors are logged with `warn!` but never fail the login.
+/// The user can still access the platform; only on-disk data is unencrypted.
+async fn dmg_on_login(state: &AppState, user_id: Uuid, user_kek: [u8; 32]) {
+    let Some(ref dmg_root) = state.config.dmg_root else {
+        return; // DMG encryption not configured — skip silently
+    };
+
+    let vsvc = VaultService::for_user(
+        &state.db,
+        Arc::new(TokenCipher::from_raw_key(&user_kek)),
+        user_id,
+        state.cipher.clone(),
+        user_id,
+        None,
+    );
+
+    // Retrieve or create the DMG passphrase.
+    let raw_key: Vec<u8> = if vsvc.exists("user_dmg_key", user_id).await {
+        match vsvc.open("user_dmg_key", user_id, "dmg_mount").await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(user_id = %user_id, "dmg_on_login: vault open error: {e:#}");
+                return;
+            }
+        }
+    } else {
+        // First login — generate and seal the passphrase.
+        use rand::RngCore;
+        let mut key = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        if let Err(e) = vsvc.seal("user_dmg_key", user_id, &key).await {
+            tracing::warn!(user_id = %user_id, "dmg_on_login: vault seal error: {e:#}");
+            return;
+        }
+        key
+    };
+
+    // Capture values for the blocking thread.
+    let dmg_root2 = dmg_root.clone();
+    let data_root2 = state.config.project_data_root.clone();
+    let size_mb = state.config.dmg_size_mb;
+    let image_exists = dmg_manager::image_exists(&dmg_root2, user_id);
+
+    let result = tokio::task::spawn_blocking(move || {
+        if !image_exists {
+            dmg_manager::create(&dmg_root2, size_mb, user_id, &raw_key)?;
+            tracing::info!(user_id = %user_id, "dmg: created new encrypted image");
+        }
+        dmg_manager::mount(&dmg_root2, &data_root2, user_id, &raw_key)?;
+        tracing::info!(user_id = %user_id, "dmg: mounted at users/{user_id}/");
+        anyhow::Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(user_id = %user_id, "dmg_on_login: hdiutil error: {e:#}"),
+        Err(e) => tracing::warn!(user_id = %user_id, "dmg_on_login: task panic: {e}"),
+    }
+}
+
+/// On logout, detach the user's encrypted disk image.
+/// Best-effort — never fails the logout.
+async fn dmg_on_logout(state: &AppState, user_id: Uuid) {
+    let Some(_) = state.config.dmg_root else {
+        return;
+    };
+
+    let data_root = state.config.project_data_root.clone();
+    let result = tokio::task::spawn_blocking(move || dmg_manager::unmount(&data_root, user_id))
+        .await;
+
+    match result {
+        Ok(Ok(())) => tracing::info!(user_id = %user_id, "dmg: unmounted"),
+        Ok(Err(e)) => tracing::warn!(user_id = %user_id, "dmg_on_logout: {e:#}"),
+        Err(e) => tracing::warn!(user_id = %user_id, "dmg_on_logout: task panic: {e}"),
+    }
 }
 
 // ── Route builders ────────────────────────────────────────────────────────────
@@ -193,6 +288,8 @@ async fn register(
     .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
 
     state.session_keys.insert(user.id, kek);
+    // Provision and mount the per-user encrypted disk image (macOS, best-effort).
+    dmg_on_login(&state, user.id, kek).await;
 
     let access =
         generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
@@ -247,6 +344,8 @@ async fn login(
 
     if let Some(kek) = maybe_kek {
         state.session_keys.insert(user.id, kek);
+        // Mount the per-user encrypted disk image (macOS, best-effort).
+        dmg_on_login(&state, user.id, kek).await;
     }
 
     let access =
@@ -326,6 +425,8 @@ async fn logout(
     .unwrap_or(None);
 
     if let Some((user_id,)) = row {
+        // Detach the encrypted disk image before evicting the KEK (best-effort).
+        dmg_on_logout(&state, user_id).await;
         // Zeroizes the 32-byte KEK in RAM via SessionEntry::Drop.
         state.session_keys.remove(user_id);
     }
