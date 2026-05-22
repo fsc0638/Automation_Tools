@@ -1487,16 +1487,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             onScroll={handleMessagesScroll}
             className="relative flex-1 overflow-auto px-4 py-7 sm:px-6"
           >
-            {!activeConv ? (
-              <div className="flex h-full items-center justify-center">
-                <SectionEmpty
-                  className="w-full max-w-lg bg-white px-6 py-12 shadow-sm"
-                  title="Create a conversation to start"
-                  description="Use OpenClaw, Hermes, or Debate Mode with the same project context and repository state."
-                  action={<Button onClick={newConv}><Plus size={14} /> New Conversation</Button>}
-                />
-              </div>
-            ) : (
+            {!activeConv ? null : (
               <div className="mx-auto w-full max-w-[72rem] space-y-6">
                 {streaming && (
                   <div className="max-w-[56rem] rounded-3xl border border-[#DBEAFE] bg-[linear-gradient(180deg,#FFFFFF_0%,#F8FBFF_42%,#EFF6FF_100%)] px-5 py-4 shadow-[0_16px_40px_rgba(59,130,246,0.08)]">
