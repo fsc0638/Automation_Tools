@@ -41,7 +41,10 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - project_data:/app/data
+      # Bind mount so the Mac Mini host can see (and back up) project files.
+      # Dev: leave PROJECT_DATA_HOST_PATH unset → uses ./data beside docker-compose.yml
+      # Mac Mini: set PROJECT_DATA_HOST_PATH=/Users/kwayrdc/kway-project-data in .env
+      - ${PROJECT_DATA_HOST_PATH:-./data}:/app/data
 
   web:
     build:
@@ -57,4 +60,6 @@ services:
 
 volumes:
   postgres_data:
-  project_data:
+  # project_data named volume removed — replaced with bind mount above.
+  # On first run after this change, copy existing data out of the old volume:
+  #   docker run --rm -v kway-project-data:/src -v $(pwd)/data:/dst alpine cp -a /src/. /dst/
