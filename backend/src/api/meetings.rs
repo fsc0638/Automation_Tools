@@ -848,11 +848,11 @@ async fn ground_meeting_body(
     // so the minutes are grounded on code that tracks the remote.
     // Best-effort + timeout-bounded; failure ⇒ ground on stale copy.
     let git_creds =
-        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+        crate::grounding::resolve_project_git_credentials(&state.db, state.session_keys.get_cipher(user_id).as_ref(), &project)
             .await;
     let freshen = crate::grounding::freshen_all(
         &state.db,
-        &state.cipher,
+        state.session_keys.get_cipher(user_id).as_ref(),
         &project,
         &crate::grounding::GroundingSource::default(),
     )

@@ -27,6 +27,7 @@ use crate::{
             get_project_summary, load_project_history, refresh_conversation_summary,
             refresh_project_summary,
         },
+        device_sync::DeviceSyncEvent,
         shared_memory::{truncate_note_bodies, SharedMemoryNote},
         AppState,
     },
@@ -57,11 +58,94 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ws/chat", get(ws_handler))
         .route("/ws/meetings", get(meetings_ws_handler))
+        .route("/ws/device-sync", get(device_sync_ws_handler))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MeetingsWsQuery {
     pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceSyncWsQuery {
+    pub token: String,
+    pub device_id: Option<Uuid>,
+}
+
+async fn device_sync_ws_handler(
+    ws: WebSocketUpgrade,
+    Query(query): Query<DeviceSyncWsQuery>,
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let claims = verify_token(&query.token, &state.config.jwt_secret)?;
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
+
+    if let Some(device_id) = query.device_id {
+        let exists: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM user_devices WHERE id = $1 AND owner_user_id = $2",
+        )
+        .bind(device_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?;
+        if exists.is_none() {
+            return Err(AppError::NotFound("Device not found".into()));
+        }
+    }
+
+    Ok(ws.on_upgrade(move |socket| handle_device_sync_socket(socket, state, user_id, query.device_id)))
+}
+
+async fn handle_device_sync_socket(
+    socket: WebSocket,
+    state: AppState,
+    user_id: Uuid,
+    device_id: Option<Uuid>,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.device_sync_events.subscribe();
+    tracing::debug!(%user_id, ?device_id, "device sync ws subscribed");
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Ok(DeviceSyncEvent::Published { owner_user_id, event }) => {
+                    if owner_user_id != user_id {
+                        continue;
+                    }
+                    if let Some(device_id) = device_id {
+                        if event.target_device_id.is_some() && event.target_device_id != Some(device_id) {
+                            continue;
+                        }
+                    }
+                    let payload = match serde_json::to_string(&event) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!("device sync ws: serialize failed: {e:?}");
+                            continue;
+                        }
+                    };
+                    if sender.send(WsMessage::Text(payload)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {
+                    let _ = sender
+                        .send(WsMessage::Text("{\"type\":\"resync\"}".into()))
+                        .await;
+                }
+                Err(RecvError::Closed) => break,
+            },
+            client_msg = receiver.next() => match client_msg {
+                Some(Ok(WsMessage::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                _ => continue,
+            }
+        }
+    }
+    tracing::debug!(%user_id, ?device_id, "device sync ws disconnected");
 }
 
 /// AgentK-aligned meeting lifecycle realtime. Clients open one WS per
@@ -178,7 +262,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
     // pre-grounding sync AND the Phase 5 in-chat tool runtime (so the
     // model can read_file at a remote ref through the same auth).
     let git_credentials =
-        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+        crate::grounding::resolve_project_git_credentials(&state.db, state.session_keys.get_cipher(user_id).as_ref(), &project)
             .await;
     // Phase 2a: refresh the local clone from origin before we snapshot
     // it, so chat grounds on files that track the remote. Best-effort
@@ -186,7 +270,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
     // Done once per session (snapshot is also session-scoped).
     let freshen = crate::grounding::freshen_all(
         &state.db,
-        &state.cipher,
+        state.session_keys.get_cipher(user_id).as_ref(),
         &project,
         &crate::grounding::GroundingSource::default(),
     )

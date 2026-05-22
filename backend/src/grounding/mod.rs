@@ -530,10 +530,10 @@ const FRESHEN_TIMEOUT_SECS: u64 = 12;
 /// every grounding caller resolves credentials identically.
 pub async fn resolve_project_git_credentials(
     db: &PgPool,
-    cipher: &TokenCipher,
+    user_kek: Option<&TokenCipher>,
     project: &Project,
 ) -> Option<GitCredentials> {
-    resolve_identity_credentials(db, cipher, project.git_identity_id).await
+    resolve_identity_credentials(db, user_kek, project.git_identity_id).await
 }
 
 /// Decrypt a specific git_identity's token into [`GitCredentials`].
@@ -541,10 +541,11 @@ pub async fn resolve_project_git_credentials(
 /// its own identity). `None` when there is no identity / decrypt fails.
 pub async fn resolve_identity_credentials(
     db: &PgPool,
-    cipher: &TokenCipher,
+    user_kek: Option<&TokenCipher>,
     identity_id: Option<Uuid>,
 ) -> Option<GitCredentials> {
     let identity_id = identity_id?;
+    let user_kek = user_kek?;
     let identity: GitIdentity =
         sqlx::query_as("SELECT * FROM git_identities WHERE id = $1")
             .bind(identity_id)
@@ -552,7 +553,7 @@ pub async fn resolve_identity_credentials(
             .await
             .ok()
             .flatten()?;
-    let access_token = cipher.decrypt(&identity.access_token).ok()?;
+    let access_token = user_kek.decrypt(&identity.access_token).ok()?;
     Some(GitCredentials {
         username: identity.username,
         access_token,
@@ -566,7 +567,7 @@ pub async fn resolve_identity_credentials(
 /// any failure just means we ground on the existing on-disk copies.
 pub async fn freshen_all(
     db: &PgPool,
-    cipher: &TokenCipher,
+    user_kek: Option<&TokenCipher>,
     project: &Project,
     source: &GroundingSource,
 ) -> FreshenOutcome {
@@ -586,7 +587,7 @@ pub async fn freshen_all(
 
     if git_sources.is_empty() {
         // Legacy single-source workspace — unchanged behaviour.
-        let creds = resolve_project_git_credentials(db, cipher, project).await;
+        let creds = resolve_project_git_credentials(db, user_kek, project).await;
         return freshen_local(project, creds, source).await;
     }
 
@@ -610,7 +611,7 @@ pub async fn freshen_all(
         if root.trim().is_empty() {
             continue;
         }
-        let creds = resolve_identity_credentials(db, cipher, identity_id).await;
+        let creds = resolve_identity_credentials(db, user_kek, identity_id).await;
         let task =
             tokio::task::spawn_blocking(move || sync_current_branch(&root, creds.as_ref()));
         let outcome = match tokio::time::timeout(

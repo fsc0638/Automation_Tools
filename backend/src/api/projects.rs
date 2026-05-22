@@ -14,6 +14,7 @@ use crate::{
     api::{auth::AuthUser, project_index::rebuild_project_index_all, AppState},
     db::models::{GitIdentity, Project, ProjectSource},
     error::{AppError, AppResult},
+    file_registry::{audit_file_access, register_workspace_file, RegisterWorkspaceFile},
     git_ops::manager::{
         checkout_branch, clone_repository, git_status, list_branches, list_files,
         list_remote_branches, read_file_content, sync_current_branch, GitCredentials, SyncResult,
@@ -230,6 +231,20 @@ async fn create_project(
         }
     }
 
+    if let Some(clone_dir) = &local_path {
+        register_project_storage_file(
+            &state,
+            &project,
+            auth_user.id,
+            "git",
+            repo_slug_from_url(&req.source_path),
+            clone_dir.clone(),
+            dir_bytes_recursive(std::path::Path::new(clone_dir)).ok().map(|n| n as i64),
+            "git_clone",
+        )
+        .await;
+    }
+
     // MS-2: register this initial source as the workspace's first
     // project_sources row (canonical multi-source list). Only when it
     // actually has a path — a name-only admin workspace has no source.
@@ -369,6 +384,18 @@ async fn upload_project(
             );
         }
     }
+
+    register_project_storage_file(
+        &state,
+        &project,
+        auth_user.id,
+        "upload",
+        name.clone(),
+        upload_dir.clone(),
+        Some(zip_bytes.len() as i64),
+        "upload",
+    )
+    .await;
 
     {
         let db = state.db.clone();
@@ -799,13 +826,13 @@ async fn react_agent(
     let project = find_project(&state, id, auth_user.id).await?;
     let root = project_root_path(&project);
     let credentials =
-        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+        crate::grounding::resolve_project_git_credentials(&state.db, state.session_keys.get_cipher(auth_user.id).as_ref(), &project)
             .await;
 
     // Best-effort pre-grounding sync (Phase 2a) so tools see fresh files.
     let _ = crate::grounding::freshen_local(
         &project,
-        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+        crate::grounding::resolve_project_git_credentials(&state.db, state.session_keys.get_cipher(auth_user.id).as_ref(), &project)
             .await,
         &crate::grounding::GroundingSource::default(),
     )
@@ -934,7 +961,7 @@ async fn get_remote_file(
     let project = find_project(&state, id, auth_user.id).await?;
     require_git_project(&project)?;
     let credentials =
-        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+        crate::grounding::resolve_project_git_credentials(&state.db, state.session_keys.get_cipher(auth_user.id).as_ref(), &project)
             .await;
     let git_ref = q
         .git_ref
@@ -1129,44 +1156,26 @@ async fn find_git_identity(state: &AppState, id: Uuid, user_id: Uuid) -> AppResu
 
 /// Decrypt a git identity's access token.
 ///
-/// **Key-selection policy (Phase 2+):**
-/// 1. Try the User KEK (session-keyed, login-gated) — succeeds for tokens
-///    created after Phase 2.
-/// 2. On failure (or no session), fall back to the System KEK — handles
-///    tokens created before Phase 2 or after a server restart before re-login.
-///
-/// Once all tokens have been re-created through the Phase 2 code path, the
-/// System KEK fallback can be removed to make git operations fully
-/// session-gated without exception.
+/// Strict User KEK gate (PR5): normal API paths may decrypt git credentials
+/// only with the active in-RAM User KEK. System KEK is reserved for explicit
+/// admin recovery tooling and must not be a silent fallback for git/file ops.
 fn identity_credentials(
     identity: &GitIdentity,
     state: &AppState,
     user_id: Uuid,
 ) -> AppResult<GitCredentials> {
-    let access_token = if let Some(user_kek) = state.session_keys.get_cipher(user_id) {
-        match user_kek.decrypt(&identity.access_token) {
-            Ok(tok) => tok,
-            Err(_) => {
-                // Pre-Phase-2 row: token was wrapped with System KEK.
-                tracing::debug!(
-                    identity_id = %identity.id,
-                    "git token: User KEK decrypt failed — falling back to System KEK \
-                     (pre-Phase-2 token; re-create the identity to upgrade)"
-                );
-                state
-                    .cipher
-                    .decrypt(&identity.access_token)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("token decrypt failed: {}", e)))?
-            }
-        }
-    } else {
-        // No User KEK in session (server restart / session expired).
-        // Fall back to System KEK so existing operations don't break mid-session.
-        state
-            .cipher
-            .decrypt(&identity.access_token)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("token decrypt failed: {}", e)))?
-    };
+    let user_kek = state.session_keys.get_cipher(user_id).ok_or_else(|| {
+        AppError::Unauthorized(
+            "User KEK session expired — please log in again before using git credentials".into(),
+        )
+    })?;
+    let access_token = user_kek
+        .decrypt(&identity.access_token)
+        .map_err(|_| {
+            AppError::Unauthorized(
+                "Git credential is not available through the active User KEK; re-create the identity after login".into(),
+            )
+        })?;
 
     Ok(GitCredentials {
         username: identity.username.clone(),
@@ -1202,6 +1211,61 @@ fn project_root_path(project: &Project) -> String {
 /// if the kway-svc process account is somehow compromised.
 /// Existing projects keep whatever path was stored at create time, so
 /// old clones remain accessible after upgrading.
+async fn register_project_storage_file(
+    state: &AppState,
+    project: &Project,
+    actor_user_id: Uuid,
+    source_type: &str,
+    logical_path: String,
+    storage_path: String,
+    size_bytes: Option<i64>,
+    operation: &str,
+) {
+    let encryption_state = if storage_path.contains(&format!("/users/{}/", project.user_id)) {
+        "dmg"
+    } else {
+        "plaintext_dev"
+    };
+
+    match register_workspace_file(
+        &state.db,
+        RegisterWorkspaceFile {
+            owner_user_id: project.user_id,
+            organization_id: project.organization_id,
+            workspace_id: project.workspace_id,
+            project_id: Some(project.id),
+            source_type: source_type.to_string(),
+            logical_path,
+            storage_path,
+            classification: "confidential".into(),
+            encryption_state: encryption_state.into(),
+            content_hash: None,
+            size_bytes,
+        },
+    )
+    .await
+    {
+        Ok(file) => {
+            let _ = audit_file_access(
+                &state.db,
+                file.id,
+                Some(actor_user_id),
+                operation,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project.id,
+                "workspace file registry skipped for project storage: {e}"
+            );
+        }
+    }
+}
+
 fn build_clone_dir(root: &str, user_id: Uuid, source_url: &str, clone_id: Uuid) -> String {
     let slug = repo_slug_from_url(source_url);
     let mut short = clone_id.to_string();
