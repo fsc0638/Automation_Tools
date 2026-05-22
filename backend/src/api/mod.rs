@@ -11,9 +11,11 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 pub mod agent_profiles;
+pub mod agent_tasks;
 pub mod auth;
 pub mod conversation_memory;
 pub mod conversations;
+pub mod device_sync;
 pub mod epics;
 pub mod feedback;
 pub mod git_identities;
@@ -28,6 +30,7 @@ pub mod sprints;
 pub mod tasks;
 pub mod user_views;
 pub mod vault;
+pub mod workspace_files;
 pub mod ws;
 
 /// AgentK-aligned in-process pub/sub. Meeting CRUD handlers send a
@@ -69,6 +72,9 @@ pub struct AppState {
     /// Capacity is 256 — bursty? Lagging subscribers get an Err that
     /// the WS endpoint translates into a "drop and resync" hint.
     pub meeting_events: broadcast::Sender<MeetingEvent>,
+    /// Best-effort realtime fan-out for device sync. Durable replay lives
+    /// in device_sync_events; WS subscribers refetch when lagged.
+    pub device_sync_events: broadcast::Sender<device_sync::DeviceSyncEvent>,
 }
 
 /// Liveness probe. Returns 200 if the process is up; no I/O, no DB.
@@ -107,9 +113,11 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::protected_routes())
         .merge(projects::routes())
         .merge(agent_profiles::routes())
+        .merge(agent_tasks::routes())
         .merge(git_identities::routes())
         .merge(conversations::routes())
         .merge(conversation_memory::routes())
+        .merge(device_sync::routes())
         .merge(metrics::routes())
         .merge(organizations::routes())
         .merge(tasks::routes())
@@ -120,6 +128,7 @@ pub fn router(state: AppState) -> Router {
         .merge(portal_directory::routes())
         .merge(user_views::routes())
         .merge(vault::routes())
+        .merge(workspace_files::routes())
         .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),

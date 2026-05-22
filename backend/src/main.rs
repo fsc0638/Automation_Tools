@@ -21,6 +21,7 @@ mod config;
 mod crypto;
 mod db;
 mod error;
+mod file_registry;
 mod git_ops;
 mod grounding;
 mod security;
@@ -86,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
     // + invitation send in quick succession). Lagging subscribers get
     // RecvError::Lagged on the WS side and refetch.
     let (meeting_events_tx, _) = tokio::sync::broadcast::channel(256);
+    let (device_sync_events_tx, _) = tokio::sync::broadcast::channel(512);
 
     // User KEK session store.  Starts empty; populated on login.
     // Phase 1: present but unused (all vault ops use System KEK only).
@@ -115,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         session_keys,
         portal_sync_lock: portal_sync_lock.clone(),
         meeting_events: meeting_events_tx,
+        device_sync_events: device_sync_events_tx,
     };
 
     // Background portal-sync scheduler. Wakes every 30 mins aligned to

@@ -29,15 +29,22 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/kway_dev
       JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
-      OPENCLAW_API_URL: ${OPENCLAW_API_URL:-https://api.openai.com/v1}
+      OPENCLAW_API_URL: ${OPENCLAW_API_URL:-http://host.docker.internal:18789/v1}
       OPENCLAW_API_KEY: ${OPENCLAW_API_KEY}
-      OPENCLAW_MODEL: ${OPENCLAW_MODEL:-gpt-4o}
-      HERMES_API_URL: ${HERMES_API_URL:-https://api.openai.com/v1}
+      OPENCLAW_MODEL: ${OPENCLAW_MODEL:-gpt-5.5}
+      HERMES_API_URL: ${HERMES_API_URL:-http://host.docker.internal:8642/v1}
       HERMES_API_KEY: ${HERMES_API_KEY}
-      HERMES_MODEL: ${HERMES_MODEL:-gpt-4o}
+      HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8080
       RUST_LOG: info
+      # Docker/dev default. For Mac Mini production-like encrypted workspaces,
+      # prefer host-run backend with PROJECT_DATA_ROOT=/Users/kwayrdc/kway-project-data
+      # and DMG_ROOT=/Users/kwayrdc/kway-dmg-store, or replace this named volume
+      # with a carefully reviewed host bind mount.
+      PROJECT_DATA_ROOT: /app/data/projects
+      DMG_ROOT: ${DMG_ROOT:-}
+      DMG_SIZE_MB: ${DMG_SIZE_MB:-4096}
     ports:
       - "8080:8080"
     volumes:

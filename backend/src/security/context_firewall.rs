@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -149,6 +150,9 @@ pub async fn secure_agent_context(
     user_message: &str,
 ) -> Result<SecuredAgentContext> {
     let mut acc = FirewallAccumulator::default();
+    let registry_classifications = load_registry_classifications(db, user_id, project_id)
+        .await
+        .unwrap_or_default();
 
     let mut secured_scope = project_scope.clone();
     let allow_context = policy.external_processing_allowed;
@@ -163,6 +167,7 @@ pub async fn secure_agent_context(
                 text,
                 FileBlockKind::Snapshot,
                 policy,
+                &registry_classifications,
                 &mut acc,
             )
         });
@@ -173,6 +178,7 @@ pub async fn secure_agent_context(
                     text,
                     FileBlockKind::Indexed,
                     policy,
+                    &registry_classifications,
                     &mut acc,
                 )
             });
@@ -267,6 +273,53 @@ async fn write_context_audit(
     Ok(())
 }
 
+async fn load_registry_classifications(
+    db: &PgPool,
+    user_id: Uuid,
+    project_id: Uuid,
+) -> Result<HashMap<String, DataClassification>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT wf.logical_path, wf.classification
+           FROM workspace_files wf
+          WHERE wf.project_id = $1
+            AND (
+                wf.owner_user_id = $2
+                OR user_can_access_project(wf.project_id, $2, 'viewer')
+                OR EXISTS (
+                    SELECT 1 FROM workspace_members wm
+                     WHERE wm.workspace_id = wf.workspace_id
+                       AND wm.user_id = $2
+                       AND access_role_rank(wm.role) >= access_role_rank('viewer')
+                )
+                OR EXISTS (
+                    SELECT 1 FROM organization_members om
+                     WHERE om.organization_id = wf.organization_id
+                       AND om.user_id = $2
+                       AND access_role_rank(om.role) >= access_role_rank('viewer')
+                )
+            )",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(path, class)| {
+            DataClassification::parse(&class)
+                .map(|classification| (normalize_context_path(&path), classification))
+        })
+        .collect())
+}
+
+fn normalize_context_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_lowercase()
+}
+
 fn sanitize_plain(
     label: &str,
     text: &str,
@@ -299,6 +352,7 @@ fn sanitize_file_block_context(
     text: &str,
     kind: FileBlockKind,
     policy: &AgentDataPolicy,
+    registry_classifications: &HashMap<String, DataClassification>,
     acc: &mut FirewallAccumulator,
 ) -> String {
     let mut output = String::new();
@@ -314,6 +368,7 @@ fn sanitize_file_block_context(
                 &mut current_path,
                 &mut current_body,
                 policy,
+                registry_classifications,
                 acc,
             );
             current_header = Some(line.to_string());
@@ -336,6 +391,7 @@ fn sanitize_file_block_context(
         &mut current_path,
         &mut current_body,
         policy,
+        registry_classifications,
         acc,
     );
 
@@ -361,13 +417,17 @@ fn flush_file_block(
     current_path: &mut Option<String>,
     current_body: &mut String,
     policy: &AgentDataPolicy,
+    registry_classifications: &HashMap<String, DataClassification>,
     acc: &mut FirewallAccumulator,
 ) {
     let Some(header) = current_header.take() else {
         return;
     };
     let path = current_path.take().unwrap_or_else(|| "unknown".into());
-    let path_classification = classify_path(&path);
+    let path_classification = registry_classifications
+        .get(&normalize_context_path(&path))
+        .copied()
+        .unwrap_or_else(|| classify_path(&path));
     acc.classification_max = acc.classification_max.max(path_classification);
 
     if path_classification > policy.allowed_classification_max
@@ -450,6 +510,7 @@ mod tests {
             input,
             FileBlockKind::Indexed,
             &policy,
+            &HashMap::new(),
             &mut acc,
         );
         assert!(output.contains("[BLOCKED_BY_CONTEXT_FIREWALL"));
@@ -470,6 +531,7 @@ mod tests {
             input,
             FileBlockKind::Snapshot,
             &policy,
+            &HashMap::new(),
             &mut acc,
         );
         assert!(output.contains("keys/service.pem"));
