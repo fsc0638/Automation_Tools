@@ -79,7 +79,9 @@ ACTION: <tool> <json-參數>\n\
 - read_file {\"path\":\"相對路徑\",\"ref\":\"可選 git ref\"}  — 讀單一檔案（給 ref 則直接讀遠端該版本）\n\
 - vault_reveal {\"id\":\"<secret-uuid>\"}  — 取得 Vault 中某個憑證的明文值（僅在任務明確需要時使用）\n\
 - list_tree {\"path\":\"可選相對目錄\"}  — 列出目錄結構\n\
-- send_email {\"vault_id\":\"<smtp-secret-uuid>\",\"to\":\"addr 或 [addr,...]\",\"subject\":\"主旨\",\"body\":\"內文\"}  — 透過 Vault 中的 SMTP 設定寄信\n\
+- send_email  寄信，兩種形式擇一：\n\
+  形式A（完整設定存在 Vault）：{\"vault_id\":\"<smtp-config-uuid>\",\"to\":\"...\",\"subject\":\"...\",\"body\":\"...\"}\n\
+  形式B（config 從專案讀，密碼單獨存 Vault）：{\"host\":\"mail.x.com\",\"port\":587,\"username\":\"user@x.com\",\"password_vault_id\":\"<uuid>\",\"from\":\"可選\",\"to\":\"...\",\"subject\":\"...\",\"body\":\"...\"}\n\
 \n\
 系統會執行該工具，並以 OBSERVATION: 回傳結果。你可再呼叫工具或回答。\n\
 當你已經能回答時，輸出：\n\
@@ -105,11 +107,13 @@ ACTION: <tool> <json參數>\n\
 - read_file {\"path\":\"相對路徑\"}  讀本地該檔；或加 {\"ref\":\"分支/commit/tag\"} 直接讀遠端那個版本\n\
 - list_tree {\"path\":\"可選相對目錄\"}  看目錄結構\n\
 - vault_reveal {\"id\":\"<secret-uuid>\"}  從使用者 Vault 取得指定憑證的明文值（僅在任務明確需要時使用）\n\
-- send_email {\"vault_id\":\"<smtp-secret-uuid>\",\"to\":\"addr 或 [addr,...]\",\"subject\":\"主旨\",\"body\":\"內文\"}  透過 Vault 中的 SMTP 設定寄出郵件\n\
+- send_email  寄信，兩種形式：\n\
+  形式A {\"vault_id\":\"<smtp-config-uuid>\",\"to\":\"...\",\"subject\":\"...\",\"body\":\"...\"}  Vault 存完整 JSON SMTP 設定\n\
+  形式B {\"host\":\"...\",\"port\":587,\"username\":\"...\",\"password_vault_id\":\"<uuid>\",\"to\":\"...\",\"subject\":\"...\",\"body\":\"...\"}  host/port/username 從專案讀，密碼從 Vault 取\n\
 \n\
 策略：先 search_index 找線索 → read_file 把關鍵檔讀進來核實 → 再回答。\n\
 如需要憑證才能完成任務（例如 git clone 私有 repo），依 Vault 清單挑對應 id 並呼叫 vault_reveal。\n\
-寄信時直接呼叫 send_email，vault_id 填 Vault 中 SMTP 設定的 id，不需要先呼叫 vault_reveal。\n\
+寄信優先用形式B：search_index 找 SMTP host/port/username → Vault 清單找密碼 id → 直接呼叫 send_email。\n\
 能回答時，用一行 FINAL: 開頭給最終答案，並標明依據的實際檔案路徑。"
         .to_string()
 }
@@ -374,25 +378,26 @@ pub async fn run_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
 
 // ── send_email implementation ─────────────────────────────────────────────────
 
-/// Vault secret value format for SMTP (JSON stored as the secret_value):
+/// Two calling forms:
+///
+/// **Form A — full config in Vault** (one entry holds the entire JSON):
 /// ```json
-/// {
-///   "host":     "smtp.gmail.com",
-///   "port":     587,
-///   "username": "user@gmail.com",
-///   "password": "app-password",
-///   "from":     "Display Name <user@gmail.com>"   // optional; falls back to username
-/// }
+/// ACTION: send_email {"vault_id":"<uuid>","to":"a@b.com","subject":"…","body":"…"}
 /// ```
-/// Port 587 → STARTTLS.  Port 465 → implicit TLS.  Any other port → STARTTLS.
+/// The vault secret_value must be JSON:
+/// `{"host":"…","port":587,"username":"…","password":"…","from":"Name <addr>"}`
+///
+/// **Form B — inline config + password from Vault** (agent assembles from project files):
+/// ```json
+/// ACTION: send_email {"host":"mail.kway.com.tw","port":587,"username":"user@kway.com.tw",
+///                     "password_vault_id":"<uuid>","from":"…","to":"…","subject":"…","body":"…"}
+/// ```
+/// The vault entry for `password_vault_id` may hold the raw password string,
+/// or a JSON object with a `"password"` key.
+///
+/// Port 587 → STARTTLS.  Port 465 → implicit TLS.
 async fn send_email_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
-    // ── 1. Parse tool arguments ──────────────────────────────────────────
-    let vault_id_str = call
-        .args
-        .get("vault_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
+    // ── 1. Common fields (to / subject / body) ───────────────────────────
     let subject = call
         .args
         .get("subject")
@@ -406,9 +411,6 @@ async fn send_email_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
         .unwrap_or("")
         .trim();
 
-    if vault_id_str.is_empty() {
-        return "(send_email: missing 'vault_id')".to_string();
-    }
     if subject.is_empty() {
         return "(send_email: missing 'subject')".to_string();
     }
@@ -416,7 +418,7 @@ async fn send_email_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
         return "(send_email: missing 'body')".to_string();
     }
 
-    // 'to' accepts a string ("a@b.com" or "a@b.com,c@d.com") or a JSON array.
+    // 'to' accepts a comma-separated string or a JSON array.
     let to_addresses: Vec<String> = match call.args.get("to") {
         Some(v) if v.is_array() => v
             .as_array()
@@ -438,86 +440,23 @@ async fn send_email_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
         return "(send_email: missing or empty 'to')".to_string();
     }
 
-    // ── 2. Auth / session guards ─────────────────────────────────────────
-    let vault_id = match vault_id_str.parse::<uuid::Uuid>() {
-        Ok(v) => v,
-        Err(_) => return "(send_email: invalid UUID for 'vault_id')".to_string(),
-    };
+    // ── 2. Session guard ─────────────────────────────────────────────────
     let Some(ref cipher) = ctx.vault_cipher else {
         return "(send_email: no active vault session — log in again)".to_string();
     };
 
-    // ── 3. Ownership check ───────────────────────────────────────────────
-    let owner: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT user_id FROM vault_secrets WHERE id = $1")
-            .bind(vault_id)
-            .fetch_optional(ctx.db)
-            .await
-            .unwrap_or(None);
-    match owner {
-        None => return "(send_email: vault secret not found)".to_string(),
-        Some(uid) if uid != ctx.user_id => {
-            return "(send_email: forbidden — not your secret)".to_string();
-        }
-        _ => {}
-    }
+    // ── 3. Resolve SMTP config (Form A or Form B) ────────────────────────
+    let (host, port, username, password, from_str) =
+        match resolve_smtp_config(ctx, call, cipher).await {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
 
-    // ── 4. Decrypt SMTP config from Vault ────────────────────────────────
-    let vsvc = crate::security::vault_service::VaultService::for_user(
-        ctx.db,
-        cipher.clone(),
-        ctx.user_id,
-        cipher.clone(),
-        ctx.user_id,
-        None,
-    );
-    let config_bytes = match vsvc.open("vault_secret", vault_id, "send_email").await {
-        Ok(b) => b,
-        Err(e) => return format!("(send_email: vault decrypt failed: {e})"),
-    };
-    let config_str = match String::from_utf8(config_bytes) {
-        Ok(s) => s,
-        Err(_) => return "(send_email: vault value is not UTF-8)".to_string(),
-    };
-    let cfg: serde_json::Value = match serde_json::from_str(&config_str) {
-        Ok(v) => v,
-        Err(_) => {
-            return "(send_email: vault value is not valid JSON; \
-                    expected {\"host\":\"...\",\"port\":587,\"username\":\"...\",\"password\":\"...\"})"
-                .to_string()
-        }
-    };
-
-    // ── 5. Extract SMTP fields ───────────────────────────────────────────
-    let host = match cfg.get("host").and_then(|v| v.as_str()) {
-        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
-        _ => return "(send_email: SMTP config missing 'host')".to_string(),
-    };
-    let port: u16 = cfg
-        .get("port")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(587)
-        .clamp(1, 65535) as u16;
-    let username = match cfg.get("username").and_then(|v| v.as_str()) {
-        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
-        _ => return "(send_email: SMTP config missing 'username')".to_string(),
-    };
-    let password = match cfg.get("password").and_then(|v| v.as_str()) {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => return "(send_email: SMTP config missing 'password')".to_string(),
-    };
-    let from_str = cfg
-        .get("from")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&username)
-        .to_string();
-
-    // ── 6. Build lettre Message ──────────────────────────────────────────
+    // ── 4. Build lettre Message ──────────────────────────────────────────
     let from_mailbox: Mailbox = match from_str.parse() {
         Ok(m) => m,
         Err(e) => return format!("(send_email: invalid 'from' address '{from_str}': {e})"),
     };
-
     let mut builder = Message::builder().from(from_mailbox).subject(subject);
     for addr in &to_addresses {
         let mb: Mailbox = match addr.parse() {
@@ -531,11 +470,12 @@ async fn send_email_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
         Err(e) => return format!("(send_email: failed to build email message: {e})"),
     };
 
-    // ── 7. Build SMTP transport and send ─────────────────────────────────
+    // ── 5. Build SMTP transport and send ─────────────────────────────────
+    // Port 465 → implicit TLS; everything else → STARTTLS.
     let creds = Credentials::new(username, password);
-    // Port 465 → implicit TLS (relay); everything else → STARTTLS.
     let mailer_result: Result<AsyncSmtpTransport<Tokio1Executor>, _> = if port == 465 {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&host).map(|b| b.port(port).credentials(creds).build())
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+            .map(|b| b.port(port).credentials(creds).build())
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
             .map(|b| b.port(port).credentials(creds).build())
@@ -552,5 +492,162 @@ async fn send_email_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
             subject
         ),
         Err(e) => format!("(send_email: SMTP send failed: {e})"),
+    }
+}
+
+/// Resolve SMTP (host, port, username, password, from) from either:
+/// - Form A: `vault_id` pointing to a full JSON config in Vault
+/// - Form B: inline `host`/`port`/`username`/`from` + `password_vault_id` pointing to
+///           just the password string (or a JSON object with a `"password"` key)
+async fn resolve_smtp_config(
+    ctx: &ToolCtx<'_>,
+    call: &ToolCall,
+    cipher: &std::sync::Arc<crate::crypto::TokenCipher>,
+) -> Result<(String, u16, String, String, String), String> {
+    let arg_str = |k: &str| {
+        call.args
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let vault_id_str = arg_str("vault_id");
+    let host_arg = arg_str("host");
+    let password_vault_id_str = arg_str("password_vault_id");
+
+    // ── Form A ────────────────────────────────────────────────────────────
+    if !vault_id_str.is_empty() {
+        let id: uuid::Uuid = vault_id_str
+            .parse()
+            .map_err(|_| "(send_email: invalid UUID for 'vault_id')".to_string())?;
+
+        vault_ownership_check(ctx, id).await?;
+
+        let vsvc = make_vsvc(ctx, cipher);
+        let bytes = vsvc
+            .open("vault_secret", id, "send_email")
+            .await
+            .map_err(|e| format!("(send_email: vault decrypt failed: {e})"))?;
+        let s = String::from_utf8(bytes)
+            .map_err(|_| "(send_email: vault value is not UTF-8)".to_string())?;
+        let cfg: serde_json::Value = serde_json::from_str(&s).map_err(|_| {
+            "(send_email: vault_id value is not JSON; \
+             expected {\"host\":\"…\",\"port\":587,\"username\":\"…\",\"password\":\"…\"})"
+                .to_string()
+        })?;
+
+        let host = smtp_field(&cfg, "host")?;
+        let port = cfg
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(587)
+            .clamp(1, 65535) as u16;
+        let username = smtp_field(&cfg, "username")?;
+        let password = smtp_field(&cfg, "password")?;
+        let from = cfg
+            .get("from")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&username)
+            .to_string();
+
+        return Ok((host, port, username, password, from));
+    }
+
+    // ── Form B ────────────────────────────────────────────────────────────
+    if host_arg.is_empty() {
+        return Err(
+            "(send_email: provide either 'vault_id' (full SMTP config in Vault) \
+             or 'host'+'username'+'password_vault_id' (inline config + Vault password))"
+                .to_string(),
+        );
+    }
+    if password_vault_id_str.is_empty() {
+        return Err("(send_email: 'password_vault_id' is required in Form B)".to_string());
+    }
+    let username_arg = arg_str("username");
+    if username_arg.is_empty() {
+        return Err("(send_email: 'username' is required in Form B)".to_string());
+    }
+
+    let pw_id: uuid::Uuid = password_vault_id_str
+        .parse()
+        .map_err(|_| "(send_email: invalid UUID for 'password_vault_id')".to_string())?;
+
+    vault_ownership_check(ctx, pw_id).await?;
+
+    let vsvc = make_vsvc(ctx, cipher);
+    let pw_bytes = vsvc
+        .open("vault_secret", pw_id, "send_email_pw")
+        .await
+        .map_err(|e| format!("(send_email: vault decrypt failed for password: {e})"))?;
+    let pw_str = String::from_utf8(pw_bytes)
+        .map_err(|_| "(send_email: password vault value is not UTF-8)".to_string())?;
+
+    // The vault entry may be a raw password string or a JSON object with "password" key.
+    let password = if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&pw_str) {
+        obj.get("password")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or(pw_str)
+    } else {
+        pw_str.trim().to_string()
+    };
+    if password.is_empty() {
+        return Err("(send_email: resolved password is empty)".to_string());
+    }
+
+    let port: u16 = call
+        .args
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(587)
+        .clamp(1, 65535) as u16;
+    let from = {
+        let f = arg_str("from");
+        if f.is_empty() { username_arg.clone() } else { f }
+    };
+
+    Ok((host_arg, port, username_arg, password, from))
+}
+
+/// Shared ownership check — rejects missing or foreign secrets.
+async fn vault_ownership_check(ctx: &ToolCtx<'_>, id: uuid::Uuid) -> Result<(), String> {
+    let owner: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM vault_secrets WHERE id = $1")
+            .bind(id)
+            .fetch_optional(ctx.db)
+            .await
+            .unwrap_or(None);
+    match owner {
+        None => Err("(send_email: vault secret not found)".to_string()),
+        Some(uid) if uid != ctx.user_id => {
+            Err("(send_email: forbidden — not your secret)".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Build a VaultService scoped to the current user KEK.
+fn make_vsvc<'a>(
+    ctx: &'a ToolCtx<'a>,
+    cipher: &'a std::sync::Arc<crate::crypto::TokenCipher>,
+) -> crate::security::vault_service::VaultService<'a> {
+    crate::security::vault_service::VaultService::for_user(
+        ctx.db,
+        cipher.clone(),
+        ctx.user_id,
+        cipher.clone(),
+        ctx.user_id,
+        None,
+    )
+}
+
+/// Extract a required non-empty string field from a SMTP config JSON object.
+fn smtp_field(cfg: &serde_json::Value, key: &str) -> Result<String, String> {
+    match cfg.get(key).and_then(|v| v.as_str()) {
+        Some(v) if !v.trim().is_empty() => Ok(v.trim().to_string()),
+        _ => Err(format!("(send_email: SMTP config missing '{key}')")),
     }
 }
