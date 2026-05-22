@@ -27,13 +27,12 @@ use crate::{
             get_project_summary, load_project_history, refresh_conversation_summary,
             refresh_project_summary,
         },
-        project_index::relevant_file_context,
         shared_memory::{truncate_note_bodies, SharedMemoryNote},
         AppState,
     },
     db::models::{AgentProfile, Project},
     error::AppError,
-    security::context_firewall::{secure_agent_context, AgentDataPolicy},
+    security::context_firewall::AgentDataPolicy,
 };
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +54,72 @@ enum ClientEvent {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/ws/chat", get(ws_handler))
+    Router::new()
+        .route("/ws/chat", get(ws_handler))
+        .route("/ws/meetings", get(meetings_ws_handler))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MeetingsWsQuery {
+    pub token: String,
+}
+
+/// AgentK-aligned meeting lifecycle realtime. Clients open one WS per
+/// session and receive a JSON event whenever any meeting they can see
+/// changes. Filtering by viewer is left to the client — events carry
+/// `meeting_id` and the client decides whether to refetch. We picked
+/// this over per-meeting subscriptions because the average user follows
+/// 5-10 meetings tops and the broadcast traffic is negligible.
+async fn meetings_ws_handler(
+    ws: WebSocketUpgrade,
+    Query(query): Query<MeetingsWsQuery>,
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let claims = verify_token(&query.token, &state.config.jwt_secret)?;
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
+    Ok(ws.on_upgrade(move |socket| handle_meetings_socket(socket, state, user_id)))
+}
+
+async fn handle_meetings_socket(socket: WebSocket, state: AppState, user_id: Uuid) {
+    use tokio::sync::broadcast::error::RecvError;
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.meeting_events.subscribe();
+    tracing::debug!("meetings ws: user {user_id} subscribed");
+
+    // Loop: forward broadcast events as JSON; respond to client pings;
+    // exit when either side closes. broadcast::Lagged (slow consumer)
+    // triggers a single "resync" sentinel so the client refetches.
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Ok(ev) => {
+                    let payload = match serde_json::to_string(&ev) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!("meetings ws: serialize failed: {e:?}");
+                            continue;
+                        }
+                    };
+                    if sender.send(WsMessage::Text(payload)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {
+                    let _ = sender
+                        .send(WsMessage::Text("{\"type\":\"resync\"}".into()))
+                        .await;
+                }
+                Err(RecvError::Closed) => break,
+            },
+            client_msg = receiver.next() => match client_msg {
+                Some(Ok(WsMessage::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                _ => continue,  // ignore pings / text from client
+            }
+        }
+    }
+    tracing::debug!("meetings ws: user {user_id} disconnected");
 }
 
 async fn ws_handler(
@@ -110,7 +174,39 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             return;
         }
     };
+    // Resolve git credentials once per session — reused by the Phase 2a
+    // pre-grounding sync AND the Phase 5 in-chat tool runtime (so the
+    // model can read_file at a remote ref through the same auth).
+    let git_credentials =
+        crate::grounding::resolve_project_git_credentials(&state.db, &state.cipher, &project)
+            .await;
+    // Phase 2a: refresh the local clone from origin before we snapshot
+    // it, so chat grounds on files that track the remote. Best-effort
+    // and timeout-bounded — any failure just grounds on the stale copy.
+    // Done once per session (snapshot is also session-scoped).
+    let freshen = crate::grounding::freshen_all(
+        &state.db,
+        &state.cipher,
+        &project,
+        &crate::grounding::GroundingSource::default(),
+    )
+    .await;
+    tracing::info!(
+        project_id = %project.id,
+        freshen = freshen.as_str(),
+        "pre-grounding local sync"
+    );
     let base_project_scope = build_project_scope(&project);
+    // NOTE (2026-05-18): the in-stream ReAct tool loop is intentionally
+    // NOT wired here. Field tests (TC-1b + TC-6) proved Hermes/OpenClaw
+    // via the gateway ignore our text `ACTION:` protocol entirely (the
+    // Phase 0 U3 risk, now confirmed: they're autonomous agents). So we
+    // pass `None` and rely on backend-driven retrieval — grounding::
+    // assemble does hybrid retrieval AND deterministically pulls any
+    // file path the user names, with zero gateway cooperation. The
+    // tool plumbing stays in the codebase only for the isolated
+    // /agent/react endpoint. (`git_credentials` is still consumed by
+    // the Phase 2a pre-grounding sync above.)
 
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
@@ -211,26 +307,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                 continue;
             }
         };
-        let mut project_scope = base_project_scope.clone();
-        project_scope.relevant_file_context =
-            relevant_file_context(&state.db, query.project_id, &content)
-                .await
-                .ok()
-                .flatten();
-
         let mode_label = mode_label(&agent_mode);
         let data_policy = AgentDataPolicy::for_mode(&agent_mode);
-        let secured_context = match secure_agent_context(
-            &state.db,
-            user_id,
-            query.project_id,
-            query.conversation_id,
-            mode_label,
-            &data_policy,
-            &project_scope,
-            &history,
-            project_summary.map(|summary| summary.summary),
-            &content,
+        // Phase 1: grounding assembly (scope clone → per-turn lexical
+        // retrieval → context firewall) moved verbatim into the unified
+        // provider. Behaviour is identical to the previous inline block.
+        let secured_context = match crate::grounding::assemble(
+            crate::grounding::GroundingInputs {
+                db: &state.db,
+                user_id,
+                project_id: query.project_id,
+                conversation_id: query.conversation_id,
+                mode_label,
+                data_policy: &data_policy,
+                base_scope: &base_project_scope,
+                history: &history,
+                project_summary: project_summary.map(|summary| summary.summary),
+                query: &content,
+                project: Some(&project),
+                credentials: git_credentials.as_ref(),
+            },
         )
         .await
         {
@@ -265,6 +361,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             shared_notes,
             &secured_context.user_message,
             agent_mode,
+            None,
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
         let mut timing: HashMap<String, AgentCallTiming> = HashMap::new();
@@ -338,6 +435,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
                             // we use to label history turns. Strip it before persisting
                             // so chat UI doesn't show the prefix to the user.
                             let content = strip_role_prefix(&content);
+
+                            // ── Vault echo guard (Layer 3) ─────────────────────
+                            // Last-resort scrub: if the user pasted a plaintext
+                            // vault secret into the chat and the model echoed it
+                            // back, redact it before it reaches the messages table.
+                            // Layer 1 (system prompt instruction) and Layer 2
+                            // (context_firewall redaction) should prevent this;
+                            // this guard is the safety net if both are bypassed.
+                            let (content, echo_scrubbed) =
+                                crate::security::redaction::scrub_vault_echo(&content);
+                            if echo_scrubbed {
+                                tracing::warn!(
+                                    conversation_id = %query.conversation_id,
+                                    "vault echo guard: secret pattern scrubbed from AI \
+                                     response before persist — check context_firewall config"
+                                );
+                            }
+
                             let role = agent_role(agent);
                             let display_name = display_agent_name(agent, *round, phase.as_deref());
                             let saved_id: Option<(Uuid,)> = sqlx::query_as(
@@ -422,7 +537,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             .await;
         }
 
-        let _ = refresh_project_summary(&state.db, &state.config, &project_scope).await;
+        // Phase 1: the per-turn lexical overlay now lives inside the
+        // grounding provider. refresh_project_summary only reads
+        // id/name/root (see build_summary_prompt), so the session-level
+        // base_project_scope is byte-identical here to the old clone.
+        let _ = refresh_project_summary(&state.db, &state.config, &base_project_scope).await;
         // Per-conversation summary is a UI nice-to-have; ignore failures so
         // they never bubble back to the user (the chat itself already
         // succeeded by this point).

@@ -26,6 +26,13 @@ pub struct Config {
     pub server_host: String,
     pub server_port: u16,
     pub project_data_root: String,
+    /// Root directory for per-user encrypted sparse images (macOS only).
+    /// Set `DMG_ROOT=/path/to/dmg-store` in `.env` to enable.
+    /// When `None`, disk-image encryption is skipped silently.
+    pub dmg_root: Option<String>,
+    /// Maximum capacity of each user's sparse image in MiB. Default: 4096 (4 GiB).
+    /// The image is sparse — actual disk use is only what the user has written.
+    pub dmg_size_mb: u32,
     pub openclaw_price_per_1k_in: f64,
     pub openclaw_price_per_1k_out: f64,
     pub hermes_price_per_1k_in: f64,
@@ -127,6 +134,15 @@ impl Config {
                 .trim_end_matches('/')
                 .trim_end_matches('\\')
                 .to_string(),
+            dmg_root: std::env::var("DMG_ROOT").ok().map(|s| {
+                s.trim_end_matches('/')
+                    .trim_end_matches('\\')
+                    .to_string()
+            }),
+            dmg_size_mb: std::env::var("DMG_SIZE_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4096),
             // Defaults reflect rough OpenAI gpt-4o-mini pricing tier; tune per
             // your actual gateway / model in .env to get accurate Cost panels.
             openclaw_price_per_1k_in: env_f64("OPENCLAW_PRICE_PER_1K_INPUT", 0.15),

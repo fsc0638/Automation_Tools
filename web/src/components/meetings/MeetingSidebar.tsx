@@ -207,39 +207,60 @@ export function MeetingSidebar({
               {t("meetings.list.empty")}
             </div>
           ) : (
-            upcoming.map((m) => (
-              <Link
-                key={m.id}
-                href={`/meetings/${m.id}`}
-                className={cn(
-                  "block rounded-xl border px-3 py-3 transition",
-                  activeMeetingId === m.id
-                    ? "border-[#0050A0] bg-[#EFF6FF]"
-                    : "border-[#E2E8F0] bg-white hover:border-[#CBD5E1]"
-                )}
-              >
-                <div className="text-[13px] font-semibold text-[#1A1A2E]">{m.title}</div>
-                <div className="mt-1 text-[11px] text-[#94A3B8]">
-                  {formatDateOnly(m.start_at)} · {formatTimeRange(m.start_at, m.end_at)}
-                </div>
-                {(m.location || m.creator_name) && (
-                  <div className="mt-1.5 flex items-center justify-between gap-2">
-                    {m.location ? (
-                      <span className="inline-block truncate rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] text-[#475569]">
-                        {m.location.split(" / ")[0]}
-                      </span>
-                    ) : (
-                      <span />
-                    )}
-                    {m.creator_name && (
-                      <span className="shrink-0 text-[11px] text-[#94A3B8]">
-                        {m.creator_name}
+            upcoming.map((m) => {
+              // visibility='busy' marks "this isn't your meeting" but
+              // per 2026-05-15 brief — "非自己建立的會議應該要可以看到"
+              // — non-creator rows are still rendered with real title
+              // and remain clickable to the read-only detail page.
+              const isOther = m.visibility === "busy";
+              return (
+                <Link
+                  key={m.id}
+                  href={`/meetings/${m.id}`}
+                  className={cn(
+                    "block rounded-xl border px-3 py-3 transition",
+                    activeMeetingId === m.id
+                      ? "border-[#0050A0] bg-[#EFF6FF]"
+                      : isOther
+                        ? "border-[#E2E8F0] bg-[#F8FAFC] hover:border-[#CBD5E1]"
+                        : "border-[#E2E8F0] bg-white hover:border-[#CBD5E1]"
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <div className={cn(
+                      "min-w-0 flex-1 truncate text-[13px] font-semibold",
+                      isOther ? "text-[#475569]" : "text-[#1A1A2E]"
+                    )}>
+                      {m.title}
+                    </div>
+                    {isOther && (
+                      <span className="shrink-0 rounded-md border border-[#E2E8F0] bg-white px-1.5 py-0.5 text-[10px] text-[#64748B]">
+                        檢視
                       </span>
                     )}
                   </div>
-                )}
-              </Link>
-            ))
+                  <div className="mt-1 text-[11px] text-[#94A3B8]">
+                    {formatDateOnly(m.start_at)} · {formatTimeRange(m.start_at, m.end_at)}
+                  </div>
+                  {(m.location || m.creator_name) && (
+                    <div className="mt-1.5 flex items-center justify-between gap-2">
+                      {m.location ? (
+                        <span className="inline-block truncate rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] text-[#475569]">
+                          {m.location.split(" / ")[0]}
+                        </span>
+                      ) : (
+                        <span />
+                      )}
+                      {m.creator_name && (
+                        <span className="shrink-0 text-[11px] text-[#94A3B8]">
+                          {m.creator_name}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </Link>
+              );
+            })
           )}
         </div>
       </div>

@@ -1,0 +1,26 @@
+sequenceDiagram
+    actor U as Admin or Editor
+    participant FE as Frontend
+    participant BE as Backend
+    participant AI as AI Gateway
+    participant TS as Tasks svc
+
+    Note over BE: meeting.is_locked must be false
+
+    U->>FE: Click "Generate minutes"
+    FE->>BE: POST /meetings/{m}/record/generate
+    BE->>BE: Collect transcripts + recent room messages
+    BE->>AI: create ai_job(skill="meeting_minutes")
+    AI-->>BE: structured {summary, decisions[], action_items[]}
+    BE->>BE: UPSERT meeting_records  (preserves old data on AI failure)
+    BE-->>FE: MeetingRecord
+
+    U->>FE: Edit action items, assign owners
+    FE->>BE: PATCH /meetings/{m}/record
+
+    U->>FE: Click "Sync to tasks"
+    FE->>BE: POST /meetings/{m}/record/tasks/sync
+    BE->>BE: Pre-validate every assignee is active ws member
+    BE->>TS: Create room-scoped tasks  (dedup by title)
+    BE->>BE: UPDATE record.task_ids_json
+    BE-->>FE: {record, created_tasks[], skipped_existing_titles[]}

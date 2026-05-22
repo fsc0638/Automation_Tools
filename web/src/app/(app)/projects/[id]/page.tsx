@@ -63,8 +63,9 @@ import { useAuthStore, useWorkspaceChromeStore } from "@/lib/store";
 import { InsightsTab } from "@/components/InsightsTab";
 import { CostTab } from "@/components/CostTab";
 import { RoadmapTab } from "@/components/RoadmapTab";
+import { ProjectMeetingTimeline } from "@/components/meetings/ProjectMeetingTimeline";
 
-type ProjectTab = "workspace" | "insights" | "cost" | "roadmap";
+type ProjectTab = "workspace" | "insights" | "cost" | "roadmap" | "meetings";
 
 type QuickAction = "health" | "explore" | "roadmap" | "patch";
 
@@ -299,7 +300,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     // tab clicks update local state only — we don't rewrite the URL on
     // every tab switch to avoid spurious browser-history entries.
     const requested = searchParams.get("tab");
-    if (requested === "roadmap" || requested === "insights" || requested === "cost") {
+    if (
+      requested === "roadmap" ||
+      requested === "insights" ||
+      requested === "cost" ||
+      requested === "meetings"
+    ) {
       return requested;
     }
     return "workspace";
@@ -1111,6 +1117,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             ["insights", t("project.insights"), PieChart],
             ["cost", t("project.cost"), DollarSign],
             ["roadmap", t("project.roadmap"), MapIcon],
+            ["meetings", "會議", CalendarPlus],
           ] as Array<[ProjectTab, string, typeof MessageSquarePlus]>).map(([key, label, Icon]) => (
             <button
               key={key}
@@ -1131,6 +1138,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       {projectTab === "insights" && <InsightsTab projectId={id} />}
       {projectTab === "cost" && <CostTab projectId={id} />}
       {projectTab === "roadmap" && <RoadmapTab projectId={id} onOpenSource={openSourceMessage} onDispatched={onDispatched} />}
+      {projectTab === "meetings" && (
+        <div className="min-h-0 flex-1 overflow-auto bg-[#F8FAFC] p-6">
+          <div className="mx-auto max-w-3xl">
+            <ProjectMeetingTimeline projectId={id} title="本專案會議時間軸" />
+          </div>
+        </div>
+      )}
 
       {projectTab === "workspace" && (
       <div className="flex min-h-0 flex-1 bg-[#F8FAFC]">
@@ -1275,9 +1289,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     {activeConv && <StatusPill className={modeStyle(activeConv.mode)}>{modeLabel(activeConv.mode, agentProfiles, t)}</StatusPill>}
                     {streaming && <StatusPill className="bg-[#EFF6FF] text-[#1D4ED8]">{t("chat.streaming")}</StatusPill>}
                   </div>
-                  <p className="mt-1 text-xs text-[#64748B]">
-                    {activeConv ? t("chat.chooseStrategy") : t("convList.emptyDesc")}
-                  </p>
+                  {!activeConv && (
+                    <p className="mt-1 text-xs text-[#64748B]">{t("convList.emptyDesc")}</p>
+                  )}
                 </div>
 
                 {activeConv && (
@@ -1348,6 +1362,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   </div>
                 )}
 
+                {/* Model is locked once a conversation exists — it was
+                    chosen at creation. The picker only shows when there
+                    is no active conversation (starting a new one). */}
+                {!activeConv && (
                 <div className="flex flex-wrap items-center gap-2">
                   {(["openclaw", "hermes", "debate"] as AgentMode[]).map((candidate) => (
                     <button
@@ -1413,6 +1431,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     </button>
                   )}
                 </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2 xl:max-w-[360px] xl:justify-end">

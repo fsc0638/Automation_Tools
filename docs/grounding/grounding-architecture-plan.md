@@ -1,0 +1,200 @@
+# AI Grounding 架構改造計畫
+
+**原則（使用者定）**：後端 AI（Hermes / OpenClaw）執行任何處理，都要能
+以**遠端專案**或**本地檔案**為基準、有所根據（evidence-grounded）。
+
+**範圍決策（2026-05-18 拍板）**
+
+| 軸 | 選定 |
+|---|---|
+| 遠端鮮度 | **兩者都要**：接地前 sync 本地 clone + 可切「即時讀遠端 API」 |
+| 檢索 | **字面 + 向量混合** |
+| 會議 AI | **接上專案接地 + 過 context firewall** |
+| Tool calling | **加**（讓 AI 自己拓檔/查索引） |
+
+---
+
+## 0. 核心設計：統一 Grounding Provider
+
+現在問題的根：接地邏輯**散在聊天流**、會議流是另一條、「遠端」其實塌成本地目錄。
+解法是收斂成**一個** module，所有 flow（聊天 / 會議 / 未來其他）+ tool calling
+都走它：
+
+```
+grounding::assemble(
+    project, query, mode, policy,
+    source: LocalSynced | RemoteLive,        // 軸1 的切換點
+) -> GroundedContext {
+    snippets: [{ source, path, git_ref, text }],   // 帶 citation
+    blocked:  [...],                                // firewall 擋掉的
+    audit:    AgentContextAudit,
+}
+```
+
+- **單一進入點** → 鮮度、混合檢索、firewall、citation 只實作一次
+- 聊天流 / 會議流 / tool calling **共用**，行為一致
+- `source` 參數就是使用者要的「以遠端 or 本地為基準」開關
+
+---
+
+## 階段路線（依相依性 + 風險 + 價值排序）
+
+### Phase 0 — 結果（2026-05-18 spike 完成）
+
+| 未知 | 答案 | 對策 |
+|---|---|---|
+| U1 gateway embeddings | ❌ Hermes 404 / OpenClaw 500，皆不可用 | Phase 3 改本地 `fastembed-rs`（內建 ONNX，零網路） |
+| U2 pgvector @ PG18 | ❌ `extension "vector" is not available` | Phase 3 改 `float4[]` 欄 + Rust cosine，不用 pgvector |
+| U3 gateway tool calling | ❌ 不支援 client-side tool_calls；Hermes/OpenClaw 是自主 agent，跑自己沙箱的工具，忽略我們的 `tools` | Phase 5 改 ReAct 文字協定（model 輸出 ACTION:，後端攔截執行餵回） |
+
+**最大啟示**：Hermes/OpenClaw 碰不到我們的資料，只能靠後端把內容當文字
+預先注入 → Phase 1–4 方向正確且更重要；Phase 3/5 做法調整如上，四軸精神不變。
+
+---
+
+### Phase 0 — 解三個 BLOCKING 未知（spike，0.5–1 天）— 原始描述
+
+動工前必須先確認，否則 Phase 3/5 會做一半卡住：
+
+1. **Embedding provider** — 向量檢索要 embedding。Hermes Gateway 有沒有
+   `/v1/embeddings`？或 OpenClaw？或要接 OpenAI-compat 第三方？**未知，要問/試**。
+2. **pgvector** — PostgreSQL 18 能不能裝 `vector` extension？（`CREATE EXTENSION vector`）
+   裝不了就要外部向量庫或退回純字面。
+3. **Gateway tool calling** — 現在 `ChatRequest` 沒有 `tools` 欄、stream 不解析
+   tool_calls。`hermes-agent` 透過 gateway 到底支不支援 OpenAI-style function
+   calling？**未知，要試**。不支援 → Phase 5 整個要換策略（改 ReAct 文字協定）。
+
+**產出**：一頁 spike 報告，三題各一個明確答案 + 對應的 schema/依賴決定。
+
+### Phase 1 — 抽出統一 Provider（純重構，零行為變更，1 天）
+
+- 把 ws.rs 現有組裝（`build_project_scope` + `relevant_file_context` +
+  `secure_agent_context`）抽進新 `backend/src/grounding/mod.rs`
+- ws.rs 改呼叫 `grounding::assemble(...)`，**輸出與現在逐位元組相同**
+- 加 regression：同一 query 重構前後 context 一致
+- **風險最低、是後面所有 phase 的地基**
+
+### Phase 2 — 遠端鮮度（軸 1，2 天）
+
+- **2a 接地前 sync**：git 專案在 `assemble` 前先 fetch + ff（重用
+  `git_ops::sync_current_branch`），加 timeout + 失敗 fallback 用舊副本
+- **2b 即時讀遠端**：新 `git_ops::remote_contents`（GitHub/GitLab Contents
+  API：讀檔案樹 + 單檔內容 by path@ref），rate-limit + 短期快取
+- Provider 的 `source` enum 接上：`LocalSynced`（預設、快）/ `RemoteLive`（指定 ref 查特定檔）
+
+### Phase 3 — 混合檢索（軸 2，2–3 天，依賴 Phase 0）
+
+- Migration（additive）：`project_file_chunks` 加 `embedding vector(N)` 欄
+- Backfill：重用 `rebuild_project_index` 路徑，逐 chunk 算 embedding
+- `relevant_file_context` → 混合：`score = w1·lexical + w2·cosine`，合併去重
+- Embedding provider 不可用時**自動退回純字面**（不阻斷）
+
+### Phase 4 — 會議 AI 接地 + firewall（軸 3，1–1.5 天，依賴 Phase 1）
+
+- `generate_ai_notes` 改呼叫 `grounding::assemble`（用該會議的 `project_id`）
+- 逐字稿 + 專案 context 一起過 `secure_agent_context`（遮密/分類/稽核）
+- 會議紀錄因此會「知道專案程式碼脈絡」，且安全等級與聊天流對齊
+- 既有 ai_jobs 稽核 + 補 agent_context_audit_logs
+
+### Phase 5 — Tool calling（軸 4，3–4 天，最大、最後，依賴 Phase 0+1）
+
+- 確認 gateway 支援後：`ChatRequest` 加 `tools`，stream 解析 `tool_calls`
+- 定義最小安全工具集，**全部走 Provider + firewall + audit**：
+  - `read_file(path, ref)` · `search_index(query)` · `list_tree(path)`
+- Orchestrator 加 tool-loop：model → 有 tool_calls 就執行 → 餵回 → 重跑，
+  設 max iterations 防無限迴圈
+- 工具輸出**一樣過 context_firewall**（不能繞過遮密）
+- 風險最高：streaming + tool loop + firewall 三者交互
+
+---
+
+## 跨階段：Evidence / Citation 契約
+
+`GroundedContext.snippets` 每筆帶 `{source, path, git_ref}`。回應層加一個
+citation 規範，讓 AI 產出能標「依據 <檔案>@<ref>」。會議紀錄 / 聊天 / tool
+輸出統一格式 → 真正「有所根據」可追溯。
+
+---
+
+## 總工時與排序建議
+
+| Phase | 工時 | 風險 | 阻塞 |
+|---|---|---|---|
+| 0 spike | 0.5–1d | – | 解三個未知 |
+| 1 Provider 抽取 | 1d | 低 | 無 |
+| 2 遠端鮮度 | 2d | 中 | 無 |
+| 4 會議接地+firewall | 1–1.5d | 低 | Phase 1 |
+| 3 混合檢索 | 2–3d | 中 | Phase 0 (embedding) |
+| 5 tool calling | 3–4d | 高 | Phase 0 (gateway) + Phase 1 |
+
+**合計約 10–13 工作天。**
+
+建議順序：**0 → 1 → 4 → 2 → 3 → 5**
+理由：
+- 0 先解未知（不然 3/5 會做廢）
+- 1 是地基且零風險
+- 4 緊接 1，立刻讓會議流（剛做完的模組）拿到接地價值，CP 值最高
+- 2 不依賴未知，穩做
+- 3 等 0 的 embedding 答案
+- 5 最後，風險最高，且依賴 0 的 gateway 答案
+
+---
+
+## 與 5/26 AgentK demo 的關係
+
+這條 10–13 天，跟 5/26 demo 衝突。建議：
+- **Demo 前**只做 Phase 0（spike）+ Phase 1（重構，零風險）+ Phase 4
+  （會議接地，demo 看得到價值）
+- Phase 2/3/5 排 demo 後
+- Phase 0 spike 結果可能改變 3/5 的做法，越早做越好
+
+---
+
+## 待你拍板
+
+1. 同意「統一 Grounding Provider」這個收斂方向？（後面全部建在它上面）
+2. 同意排序 `0 → 1 → 4 → 2 → 3 → 5`？
+3. Demo 前範圍是否就鎖 Phase 0 + 1 + 4？
+4. Phase 0 spike 我現在就開跑嗎？（要動到查 Hermes/OpenClaw gateway 能力、試 pgvector）
+
+---
+
+## 實作進度（依拍板順序 0 → 1 → 4 → 2 → 3 → 5 全數完成）
+
+| Phase | 狀態 | 內容 | 關鍵檔案 |
+|---|---|---|---|
+| 0 | ✅ | spike：三未知皆 ❌，3/5 調整 | （本文件上方表） |
+| 1 | ✅ | 抽出 `grounding::assemble`，ws.rs 純重構零行為變更 | `grounding/mod.rs`、`api/ws.rs` |
+| 4 | ✅ | 會議紀錄走 assemble + firewall + 稽核 | `api/meetings.rs`、`migrations/0036` |
+| 2 | ✅ | 2a 接地前 timeout sync（fail→舊副本）；2b GitHub/GitLab Contents API 即時讀檔 + 60s 快取 | `grounding/mod.rs`、`migrations/—`（無）、`api/projects.rs` |
+| 3 | ✅ | 字面+向量混合（`REAL[]` 欄 + Rust cosine）；向量器 v2 = `fastembed` 多語模型（跨中英語意） | `grounding/embedding.rs`、`api/project_index.rs`、`migrations/0037`、`Cargo.toml` |
+| 5 | ✅ | ReAct 文字協定工具迴圈（read-only 三工具，全過 firewall，max-iter） | `grounding/tools.rs`、`api/projects.rs` |
+
+### Phase 3 做法演進（決策透明，含一次回頭）
+
+**v1（已淘汰）**：為閃避 WDAC/離線環境的 ONNX 重依賴，先用本地零依賴
+雜湊 n-gram 向量（FNV-1a、`EMBED_DIM=256`、英數 token + CJK bigram）。
+
+**實測打臉（2026-05-18）**：使用者測 Phase 1 時，對 AgentK 專案（英文/
+Python）用**中文**問「這專案登入流程怎麼寫的」，`relevant_file_context`
+回空 → AI 只拿到檔案樹、無內容 → 回「請你貼檔案給我」。根因：中文查詢
+與英文程式碼**既無共同 token 也無共同字元 n-gram**，雜湊向量（與純字面
+一樣）跨語言完全比不到。
+
+**v2（現行，使用者 2026-05-18 拍板）**：接受重依賴，改用 `fastembed`
+（ONNX，模型 `paraphrase-multilingual-MiniLM-L12-v2`，384 維）做**真正
+跨語言語意檢索**。Cargo 加 `fastembed = "4"`（`ort` 2.0.0-rc.9）；
+`cargo check --release` 通過。
+
+fail-open 原則**不變且更重要**：模型初始化 lazy 且容錯——ONNX runtime
+或模型檔取得失敗（離線首跑 / WDAC 擋 native lib）時 `embed` 回 `None`，
+`relevant_file_context` 透明退回純字面，永不阻斷或 panic。
+`embedding::embed()/cosine()` 介面接縫不變，故僅換 `embedding.rs` 內部，
+呼叫端零改動。換模型導致維度變動（256→384）⇒ 舊向量 cosine 自動視為
+0（不汙染排序），**需重新索引**才有新向量。
+
+### Phase 5 範圍說明
+
+ReAct 迴圈以**獨立 endpoint** `POST /projects/:id/agent/react` 落地，
+不侵入既有 streaming 聊天（零回歸風險）。工具皆唯讀、路徑限制在專案
+根目錄、輸出強制過 `redact_secrets`，初始脈絡走 `assemble` 取得稽核列。

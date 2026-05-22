@@ -48,6 +48,25 @@ pub struct SanitizedText {
 
 const SECRET_REPLACEMENT: &str = "[REDACTED_SECRET]";
 
+/// Scrub vault-echoed secrets from an AI response before persisting to the
+/// `messages` table.
+///
+/// This is the **last line of defence** if a plaintext secret reached the
+/// model via user input (e.g., the user pasted a revealed vault secret into
+/// the chat) and the model echoed it back verbatim.
+///
+/// Applies the full `redact_secrets` ruleset — GitHub PATs, OpenAI keys,
+/// AWS keys, JWTs, database URLs, generic `secret=…` assignments, etc.
+///
+/// Returns `(scrubbed_content, was_modified)`.  When `was_modified` is true
+/// the caller should emit a `WARN` log so the event is visible in the
+/// security audit trail without needing to store the original text.
+pub fn scrub_vault_echo(content: &str) -> (String, bool) {
+    let result = redact_secrets(content);
+    let modified = result.report.redacted_count > 0;
+    (result.text, modified)
+}
+
 pub fn redact_secrets(input: &str) -> SanitizedText {
     let mut output = input.to_string();
     let mut report = RedactionReport::default();

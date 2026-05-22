@@ -1,10 +1,14 @@
 use crate::config::Config;
 use crate::crypto::TokenCipher;
+use crate::security::session_keys::SessionKeyStore;
 use axum::{extract::State, http::StatusCode, middleware, response::Json, routing::get, Router};
 use kway_dev_backend::portal_sync::SyncLock;
+use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
 pub mod agent_profiles;
 pub mod auth;
@@ -23,17 +27,48 @@ pub mod shared_memory;
 pub mod sprints;
 pub mod tasks;
 pub mod user_views;
+pub mod vault;
 pub mod ws;
+
+/// AgentK-aligned in-process pub/sub. Meeting CRUD handlers send a
+/// `MeetingEvent` here; WS connections subscribe and fan-out to UI
+/// clients. We use tokio::sync::broadcast (not pg LISTEN/NOTIFY)
+/// because all writers and listeners live in one process today —
+/// upgrading to pg-side broadcast is a separate, larger task once we
+/// scale to multiple backend nodes (see deferred_backlog #3).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MeetingEvent {
+    Created      { meeting_id: Uuid },
+    Updated      { meeting_id: Uuid },
+    Scheduled    { meeting_id: Uuid },
+    Ended        { meeting_id: Uuid },
+    Cancelled    { meeting_id: Uuid },
+    LockChanged  { meeting_id: Uuid, is_locked: bool },
+    RecordUpdated { meeting_id: Uuid },
+    Deleted      { meeting_id: Uuid },
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub config: Arc<Config>,
+    /// System KEK: used for git-token/agent-key encryption (Phase 1) and
+    /// as the admin recovery wrapping KEK (Phase 2+).
+    /// Source: GIT_TOKEN_ENCRYPTION_KEY env var (or JWT_SECRET fallback).
     pub cipher: Arc<TokenCipher>,
+    /// Per-user User KEK session store (Phase 2+).
+    /// Populated on login via `vault_crypto::derive_user_kek`; cleared on
+    /// logout or TTL expiry.  Keys live only in RAM — never persisted.
+    pub session_keys: Arc<SessionKeyStore>,
     /// Shared mutex so the background scheduler and the /meetings/sync
     /// endpoint never run a portal scrape concurrently — Playwright owns
     /// the output/ directory and concurrent runs would corrupt it.
     pub portal_sync_lock: SyncLock,
+    /// Fan-out of meeting lifecycle events to subscribed WS clients.
+    /// Capacity is 256 — bursty? Lagging subscribers get an Err that
+    /// the WS endpoint translates into a "drop and resync" hint.
+    pub meeting_events: broadcast::Sender<MeetingEvent>,
 }
 
 /// Liveness probe. Returns 200 if the process is up; no I/O, no DB.
@@ -69,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state.clone());
 
     let protected = Router::new()
+        .merge(auth::protected_routes())
         .merge(projects::routes())
         .merge(agent_profiles::routes())
         .merge(git_identities::routes())
@@ -83,6 +119,7 @@ pub fn router(state: AppState) -> Router {
         .merge(meetings::routes())
         .merge(portal_directory::routes())
         .merge(user_views::routes())
+        .merge(vault::routes())
         .merge(feedback::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),

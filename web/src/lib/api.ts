@@ -100,6 +100,11 @@ export const auth = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    request<void>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   logout: () => {
     const refreshToken = getRefreshToken();
     clearSession();
@@ -127,6 +132,22 @@ export const projects = {
   list: () => request<Project[]>("/projects"),
   create: (data: CreateProjectInput) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(data) }),
+  /** Phase 4: soft 封存/取消封存 (sets/clears archived_at). */
+  archive: (id: string, archived: boolean) =>
+    request<Project>(`/projects/${id}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ archived }),
+    }),
+  /** MS-2/3: multi-source — a workspace may aggregate many folders/repos. */
+  listSources: (id: string) =>
+    request<ProjectSource[]>(`/projects/${id}/sources`),
+  addSource: (id: string, data: NewSourceInput) =>
+    request<ProjectSource>(`/projects/${id}/sources`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  removeSource: (id: string, sourceId: string) =>
+    request<void>(`/projects/${id}/sources/${sourceId}`, { method: "DELETE" }),
   upload: async (data: { name: string; description?: string; file: File }) => {
     const token = getToken();
     const form = new FormData();
@@ -354,6 +375,27 @@ export interface Meeting {
   /** Last portal-side failure (cleared on success). Surfaced as a red
    *  banner on the detail page so the operator can retry. */
   portal_book_error?: string;
+
+  // AgentK-aligned optional fields (migration 0032).
+  /** Long-form description; distinct from notification_note. */
+  description?: string;
+  /** Independent lock flag. True ⇒ no further edits; reopen clears. */
+  is_locked?: boolean;
+  /** Online meeting URL (Webex / Teams / Meet). */
+  join_url?: string;
+  /** Symbolic provider (`webex` / `teams` / `meet` / `kway-portal`). */
+  external_provider?: string;
+  external_event_id?: string;
+  external_event_url?: string;
+  sync_status?: string;
+  last_synced_at?: string;
+  updated_by_user_id?: string;
+  /** AgentK-aligned busy masking. `"full"` = caller is a participant
+   *  (creator / attendee) and sees all fields; `"busy"` = caller can
+   *  only see this row as occupancy — title is `"(忙碌)"` and
+   *  notification_note / description / join_url are blanked. Absent on
+   *  detail responses. */
+  visibility?: "full" | "busy";
   created_at: string;
   updated_at: string;
 }
@@ -384,6 +426,77 @@ export interface MeetingFile {
   duration_seconds: number | null;
   transcript_meta: string | null;
   created_at: string;
+  // AgentK-aligned soft-delete retention (migration 0034). Present only
+  // on soft-deleted files. Default file-list endpoint hides those, so
+  // these fields are mostly relevant for a future recovery view.
+  deleted_at?: string;
+  soft_deleted_until?: string;
+  hard_delete_after?: string;
+  metadata?: unknown;
+}
+
+export interface ReconcileProposal {
+  title: string;
+  description: string;
+  /** AI suggestion: new | continue | duplicate */
+  suggested: "new" | "continue" | "duplicate";
+  target_task_id?: string;
+  target_task_title?: string;
+  target_task_status?: string;
+  reason?: string;
+}
+
+export interface SyncPreviewResult {
+  notes_version: number;
+  proposals: ReconcileProposal[];
+}
+
+export interface SyncDecisionInput {
+  title: string;
+  /** new | continue | skip */
+  decision: "new" | "continue" | "skip";
+  target_task_id?: string;
+}
+
+export interface SyncTasksResult {
+  synced_notes_version: number;
+  created_task_ids: string[];
+  linked_task_ids: string[];
+  skipped_existing_titles: string[];
+}
+
+export interface ProjectMeetingActionItem {
+  title: string;
+  description?: string;
+  assignee_name?: string;
+  /** Present when the action item title matched a project_task. */
+  task_id?: string;
+  /** Live status of that task: todo / in_progress / done / ... */
+  task_status?: string;
+}
+
+export interface ProjectMeetingHistoryItem {
+  meeting_id: string;
+  title: string;
+  start_at: string;
+  end_at: string;
+  status: MeetingStatus;
+  is_locked: boolean;
+  creator_name?: string;
+  summary?: string;
+  decisions: Array<{ text: string; resolved?: boolean }>;
+  action_items: ProjectMeetingActionItem[];
+}
+
+export interface MeetingActionItem {
+  title: string;
+  description?: string;
+  /** Resolved user id when AI-generated assignee matched a real user. */
+  assignee_user_id?: string;
+  /** Raw assignee name from the LLM (kept verbatim — UI shows this
+   *  when assignee_user_id couldn't be resolved). */
+  assignee_name?: string;
+  source?: string;
 }
 
 export interface MeetingNotes {
@@ -396,6 +509,10 @@ export interface MeetingNotes {
   transcript_excerpts: Array<{ speaker: string; time: string; content: string }>;
   generated_by: string;
   created_at: string;
+  // AgentK-aligned record aggregate fields (migration 0033).
+  action_items: MeetingActionItem[];
+  ai_job_ids: string[];
+  task_ids: string[];
 }
 
 export interface MeetingTaskImpact {
@@ -458,6 +575,13 @@ export interface CreateMeetingInput {
   attendee_emails?: string[];
   project_id?: string | null;
   save_as_draft?: boolean;
+  // AgentK-aligned optional fields. All omittable — backend tolerates
+  // missing keys.
+  description?: string | null;
+  join_url?: string | null;
+  external_provider?: string | null;
+  external_event_id?: string | null;
+  external_event_url?: string | null;
 }
 
 export interface UpdateMeetingInput {
@@ -473,6 +597,14 @@ export interface UpdateMeetingInput {
   status?: MeetingStatus;
   attendee_emails?: string[];
   project_id?: string | null;
+  // AgentK-aligned. is_locked is settable but reopen flow should
+  // normally go through its dedicated endpoint (role-guarded).
+  description?: string | null;
+  join_url?: string | null;
+  external_provider?: string | null;
+  external_event_id?: string | null;
+  external_event_url?: string | null;
+  is_locked?: boolean;
 }
 
 export interface MeetingSyncReport {
@@ -511,6 +643,8 @@ export const meetings = {
   delete: (id: string) => request<void>(`/meetings/${id}`, { method: "DELETE" }),
   sendInvitations: (id: string) =>
     request<MeetingDetail>(`/meetings/${id}/send-invitations`, { method: "POST" }),
+  reopen: (id: string) =>
+    request<MeetingDetail>(`/meetings/${id}/reopen`, { method: "POST" }),
   calendar: (year: number, month: number) =>
     request<MeetingCalendarDay[]>(`/meetings/calendar?year=${year}&month=${month}`),
   availableSlots: (date: string, durationMins: number, emails: string[] = []) => {
@@ -554,9 +688,27 @@ export const meetings = {
     request<void>(`/meetings/${id}/files/${fileId}`, { method: "DELETE" }),
   generateNotes: (id: string) =>
     request<MeetingNotes>(`/meetings/${id}/notes/generate`, { method: "POST" }),
+  /** Step 1: AI-reconcile the latest notes' action items against the
+   *  project's existing tasks. No DB writes — returns a proposal the
+   *  user confirms. */
+  syncTasksPreview: (id: string) =>
+    request<SyncPreviewResult>(`/meetings/${id}/notes/sync-tasks/preview`, {
+      method: "POST",
+    }),
+  /** Step 2: apply the user-confirmed decisions. Omit `decisions` to
+   *  fall back to legacy casefold auto-create. */
+  syncNotesToTasks: (id: string, decisions?: SyncDecisionInput[]) =>
+    request<SyncTasksResult>(`/meetings/${id}/notes/sync-tasks`, {
+      method: "POST",
+      ...(decisions ? { body: JSON.stringify({ decisions }) } : {}),
+    }),
+  projectMeetingHistory: (projectId: string) =>
+    request<ProjectMeetingHistoryItem[]>(`/projects/${projectId}/meeting-history`),
   updateNotes: (
     id: string,
-    body: Partial<Pick<MeetingNotes, "summary" | "decisions" | "risks" | "transcript_excerpts">> & {
+    body: Partial<Pick<MeetingNotes,
+      "summary" | "decisions" | "risks" | "transcript_excerpts" |
+      "action_items" | "ai_job_ids" | "task_ids">> & {
       edit_summary?: string;
     }
   ) => request<MeetingNotes>(`/meetings/${id}/notes`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -660,6 +812,31 @@ export interface ConversationSummary {
   updated_at: string;
 }
 
+/** AgentK-aligned: subscribe to meeting lifecycle events. Server pushes
+ *  JSON like `{type:"updated",meeting_id:"..."}`. The handler is fired
+ *  per event; lagged subscribers receive `{type:"resync"}` and should
+ *  refetch from scratch. Returns the WebSocket so the caller can close
+ *  it on unmount. */
+export function createMeetingsWsConnection(
+  onEvent: (event: { type: string; meeting_id?: string; is_locked?: boolean }) => void
+): WebSocket {
+  const token = getToken();
+  const apiUrl = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080/api");
+  const wsProtocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+  const params = new URLSearchParams({ ...(token ? { token } : {}) });
+  const ws = new WebSocket(
+    `${wsProtocol}//${apiUrl.host}${apiUrl.pathname.replace(/\/$/, "")}/ws/meetings?${params}`
+  );
+  ws.onmessage = (e) => {
+    try {
+      onEvent(JSON.parse(e.data));
+    } catch {
+      /* ignore malformed payloads */
+    }
+  };
+  return ws;
+}
+
 export function createWsConnection(conversationId: string, projectId: string): WebSocket {
   const token = getToken();
   const apiUrl = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080/api");
@@ -679,6 +856,8 @@ export interface UserInfo {
   display_name: string;
 }
 
+export type WorkspaceKind = "code" | "admin" | "general";
+
 export interface CreateProjectInput {
   name: string;
   description?: string;
@@ -686,6 +865,8 @@ export interface CreateProjectInput {
   source_path: string;
   git_identity_id?: string;
   default_branch?: string;
+  /** Phase 2/3: omit ⇒ "code" (repo-backed). admin/general = 行政庶務. */
+  kind?: WorkspaceKind;
 }
 
 export interface Project {
@@ -700,10 +881,36 @@ export interface Project {
   local_path?: string;
   default_branch?: string;
   git_identity_id?: string;
+  /** Workspace kind (migration 0038). "code" = repo-backed (default);
+   *  "admin"/"general" = 行政庶務 work area with no repo. */
+  kind?: WorkspaceKind;
+  /** Soft archive marker; null/absent = active. */
+  archived_at?: string | null;
   /** Effective ACL role for the current user. Populated by list/get endpoints. */
   effective_role?: ProjectRole | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProjectSource {
+  id: string;
+  project_id: string;
+  kind: string; // "local" | "git" | "upload"
+  source_path: string;
+  local_path?: string | null;
+  git_identity_id?: string | null;
+  default_branch?: string | null;
+  label: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewSourceInput {
+  kind: "local" | "git";
+  source_path: string;
+  git_identity_id?: string;
+  default_branch?: string;
+  label?: string;
 }
 
 export type OrgRole = "owner" | "admin" | "member" | "viewer";
@@ -1336,3 +1543,40 @@ export interface MetricsSummary {
     satisfaction_rate: number;
   }>;
 }
+
+// ── Vault ─────────────────────────────────────────────────────────────────
+
+export interface VaultSecret {
+  id: string;
+  label: string;
+  secret_type: string | null;
+  username: string | null;
+  url: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VaultRevealResponse {
+  secret_value: string;
+}
+
+export const vault = {
+  list: () => request<VaultSecret[]>("/vault/secrets"),
+  create: (data: {
+    label: string;
+    secret_type?: string;
+    username?: string;
+    url?: string;
+    note?: string;
+    secret_value: string;
+  }) =>
+    request<VaultSecret>("/vault/secrets", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  reveal: (id: string) =>
+    request<VaultRevealResponse>(`/vault/secrets/${id}/reveal`, { method: "POST" }),
+  delete: (id: string) =>
+    request<void>(`/vault/secrets/${id}`, { method: "DELETE" }),
+};

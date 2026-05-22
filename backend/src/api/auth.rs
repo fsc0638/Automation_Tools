@@ -4,17 +4,24 @@ use axum::{
     middleware::Next,
     response::Response,
     routing::post,
-    Json, Router,
+    Extension, Json, Router,
 };
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::{
     api::AppState,
+    crypto::TokenCipher,
     db::models::User,
     error::{AppError, AppResult},
+    security::{
+        dmg_manager,
+        vault_service::VaultService,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +77,102 @@ pub struct UserInfo {
     pub display_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+// ── DMG helpers ───────────────────────────────────────────────────────────────
+
+/// After a successful login or registration, ensure the user's encrypted
+/// disk image is mounted at `<project_data_root>/users/<user_id>/`.
+///
+/// First call: generates a random 32-byte passphrase, seals it in the
+/// vault, creates the sparse image, then mounts it.
+/// Subsequent calls: retrieves the passphrase from vault, mounts (idempotent).
+///
+/// Best-effort: errors are logged with `warn!` but never fail the login.
+/// The user can still access the platform; only on-disk data is unencrypted.
+async fn dmg_on_login(state: &AppState, user_id: Uuid, user_kek: [u8; 32]) {
+    let Some(ref dmg_root) = state.config.dmg_root else {
+        return; // DMG encryption not configured — skip silently
+    };
+
+    let vsvc = VaultService::for_user(
+        &state.db,
+        Arc::new(TokenCipher::from_raw_key(&user_kek)),
+        user_id,
+        state.cipher.clone(),
+        user_id,
+        None,
+    );
+
+    // Retrieve or create the DMG passphrase.
+    let raw_key: Vec<u8> = if vsvc.exists("user_dmg_key", user_id).await {
+        match vsvc.open("user_dmg_key", user_id, "dmg_mount").await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(user_id = %user_id, "dmg_on_login: vault open error: {e:#}");
+                return;
+            }
+        }
+    } else {
+        // First login — generate and seal the passphrase.
+        use rand::RngCore;
+        let mut key = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        if let Err(e) = vsvc.seal("user_dmg_key", user_id, &key).await {
+            tracing::warn!(user_id = %user_id, "dmg_on_login: vault seal error: {e:#}");
+            return;
+        }
+        key
+    };
+
+    // Capture values for the blocking thread.
+    let dmg_root2 = dmg_root.clone();
+    let data_root2 = state.config.project_data_root.clone();
+    let size_mb = state.config.dmg_size_mb;
+    let image_exists = dmg_manager::image_exists(&dmg_root2, user_id);
+
+    let result = tokio::task::spawn_blocking(move || {
+        if !image_exists {
+            dmg_manager::create(&dmg_root2, size_mb, user_id, &raw_key)?;
+            tracing::info!(user_id = %user_id, "dmg: created new encrypted image");
+        }
+        dmg_manager::mount(&dmg_root2, &data_root2, user_id, &raw_key)?;
+        tracing::info!(user_id = %user_id, "dmg: mounted at users/{user_id}/");
+        anyhow::Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(user_id = %user_id, "dmg_on_login: hdiutil error: {e:#}"),
+        Err(e) => tracing::warn!(user_id = %user_id, "dmg_on_login: task panic: {e}"),
+    }
+}
+
+/// On logout, detach the user's encrypted disk image.
+/// Best-effort — never fails the logout.
+async fn dmg_on_logout(state: &AppState, user_id: Uuid) {
+    let Some(_) = state.config.dmg_root else {
+        return;
+    };
+
+    let data_root = state.config.project_data_root.clone();
+    let result = tokio::task::spawn_blocking(move || dmg_manager::unmount(&data_root, user_id))
+        .await;
+
+    match result {
+        Ok(Ok(())) => tracing::info!(user_id = %user_id, "dmg: unmounted"),
+        Ok(Err(e)) => tracing::warn!(user_id = %user_id, "dmg_on_logout: {e:#}"),
+        Err(e) => tracing::warn!(user_id = %user_id, "dmg_on_logout: task panic: {e}"),
+    }
+}
+
+// ── Route builders ────────────────────────────────────────────────────────────
+
 pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(register))
@@ -77,6 +180,13 @@ pub fn public_routes() -> Router<AppState> {
         .route("/auth/refresh", post(refresh))
         .route("/auth/logout", post(logout))
 }
+
+/// Routes that require an authenticated session (JWT via `require_auth`).
+pub fn protected_routes() -> Router<AppState> {
+    Router::new().route("/auth/change-password", post(change_password))
+}
+
+// ── Token helpers ─────────────────────────────────────────────────────────────
 
 /// Generate a refresh token: 32 cryptographically random bytes encoded
 /// as URL-safe base64. The server stores only the SHA-256 hash, so even
@@ -97,10 +207,7 @@ fn hash_refresh_token(token: &str) -> String {
 }
 
 /// Insert a refresh token row keyed by hash; returns the raw token.
-async fn issue_refresh_token(
-    state: &AppState,
-    user_id: Uuid,
-) -> AppResult<(String, i64)> {
+async fn issue_refresh_token(state: &AppState, user_id: Uuid) -> AppResult<(String, i64)> {
     let raw = generate_refresh_token();
     let hash = hash_refresh_token(&raw);
     let ttl_days = state.config.refresh_token_expiry_days;
@@ -129,53 +236,7 @@ async fn issue_refresh_token(
     Ok((raw, ttl_days * 86400))
 }
 
-async fn refresh(
-    State(state): State<AppState>,
-    Json(req): Json<RefreshRequest>,
-) -> AppResult<Json<RefreshResponse>> {
-    let hash = hash_refresh_token(&req.refresh_token);
-
-    // Atomically delete the presented refresh token and capture its
-    // user_id only if it's not expired. This implements *rotation*:
-    // each refresh consumes the old token, so a leaked token is one-use.
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "DELETE FROM refresh_tokens
-         WHERE token_hash = $1 AND expires_at > NOW()
-         RETURNING user_id",
-    )
-    .bind(&hash)
-    .fetch_optional(&state.db)
-    .await?;
-    let user_id = row.ok_or_else(|| AppError::Unauthorized("Invalid or expired refresh token".into()))?.0;
-
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("User no longer exists".into()))?;
-
-    let access = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
-    let (refresh_token, refresh_expires_in) = issue_refresh_token(&state, user.id).await?;
-
-    Ok(Json(RefreshResponse {
-        access_token: access,
-        refresh_token,
-        token_type: "Bearer".into(),
-        refresh_expires_in,
-    }))
-}
-
-async fn logout(
-    State(state): State<AppState>,
-    Json(req): Json<RefreshRequest>,
-) -> AppResult<axum::http::StatusCode> {
-    let hash = hash_refresh_token(&req.refresh_token);
-    let _ = sqlx::query("DELETE FROM refresh_tokens WHERE token_hash = $1")
-        .bind(&hash)
-        .execute(&state.db)
-        .await;
-    Ok(axum::http::StatusCode::NO_CONTENT)
-}
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn register(
     State(state): State<AppState>,
@@ -187,18 +248,23 @@ async fn register(
         ));
     }
 
-    let existing: Option<User> = sqlx::query_as(
-        "SELECT * FROM users WHERE email = $1"
-    )
-    .bind(&req.email)
-    .fetch_optional(&state.db)
-    .await?;
+    let existing: Option<User> =
+        sqlx::query_as("SELECT * FROM users WHERE email = $1")
+            .bind(&req.email)
+            .fetch_optional(&state.db)
+            .await?;
 
     if existing.is_some() {
         return Err(AppError::BadRequest("Email already registered".into()));
     }
 
-    let password_hash = hash_password(&req.password)?;
+    // Hash password in a blocking thread (Argon2 is CPU-intensive).
+    let password = req.password.clone();
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
+
+    // INSERT; kek_salt is generated by Postgres (gen_random_bytes in migration 0042).
     let user: User = sqlx::query_as(
         "INSERT INTO users (email, password_hash, display_name)
          VALUES ($1, $2, $3)
@@ -210,8 +276,25 @@ async fn register(
     .fetch_one(&state.db)
     .await?;
 
-    let access = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    // Derive the User KEK from the plaintext password + the DB-generated salt.
+    // Do this in spawn_blocking: Argon2id at 64 MiB takes ~200 ms.
+    let pw2 = req.password.clone();
+    let salt = user.kek_salt.clone();
+    let kek = tokio::task::spawn_blocking(move || {
+        crate::security::vault_crypto::derive_user_kek(&pw2, &salt)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("KEK derive: {}", e)))
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
+
+    state.session_keys.insert(user.id, kek);
+    // Provision and mount the per-user encrypted disk image (macOS, best-effort).
+    dmg_on_login(&state, user.id, kek).await;
+
+    let access =
+        generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
     let (refresh_token, refresh_expires_in) = issue_refresh_token(&state, user.id).await?;
+
     Ok(Json(AuthResponse {
         access_token: access,
         refresh_token,
@@ -236,12 +319,39 @@ async fn login(
 
     let user = user.ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
 
-    if !verify_password(&req.password, &user.password_hash)? {
+    // Batch verify_password + derive_user_kek in a single blocking thread:
+    // both are Argon2 operations (~200 ms each); batching avoids two thread-pool
+    // round-trips and makes the total login latency predictable (~400 ms).
+    let password = req.password.clone();
+    let pw_hash = user.password_hash.clone();
+    let kek_salt = user.kek_salt.clone();
+
+    let (verified, maybe_kek) = tokio::task::spawn_blocking(move || {
+        let ok = verify_password(&password, &pw_hash)?;
+        if !ok {
+            return Ok::<(bool, Option<[u8; 32]>), AppError>((false, None));
+        }
+        let kek = crate::security::vault_crypto::derive_user_kek(&password, &kek_salt)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("KEK derive: {}", e)))?;
+        Ok((true, Some(kek)))
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
+
+    if !verified {
         return Err(AppError::Unauthorized("Invalid credentials".into()));
     }
 
-    let access = generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    if let Some(kek) = maybe_kek {
+        state.session_keys.insert(user.id, kek);
+        // Mount the per-user encrypted disk image (macOS, best-effort).
+        dmg_on_login(&state, user.id, kek).await;
+    }
+
+    let access =
+        generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
     let (refresh_token, refresh_expires_in) = issue_refresh_token(&state, user.id).await?;
+
     Ok(Json(AuthResponse {
         access_token: access,
         refresh_token,
@@ -254,6 +364,201 @@ async fn login(
         },
     }))
 }
+
+async fn refresh(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshRequest>,
+) -> AppResult<Json<RefreshResponse>> {
+    let hash = hash_refresh_token(&req.refresh_token);
+
+    // Atomically delete the presented refresh token and capture its
+    // user_id only if it's not expired. This implements *rotation*:
+    // each refresh consumes the old token, so a leaked token is one-use.
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "DELETE FROM refresh_tokens
+         WHERE token_hash = $1 AND expires_at > NOW()
+         RETURNING user_id",
+    )
+    .bind(&hash)
+    .fetch_optional(&state.db)
+    .await?;
+    let user_id = row
+        .ok_or_else(|| AppError::Unauthorized("Invalid or expired refresh token".into()))?
+        .0;
+
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User no longer exists".into()))?;
+
+    // Extend the in-RAM User KEK TTL so active users don't need to log in
+    // again just because their session key expired mid-session.
+    state.session_keys.refresh(user_id);
+
+    let access =
+        generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
+    let (refresh_token, refresh_expires_in) = issue_refresh_token(&state, user.id).await?;
+
+    Ok(Json(RefreshResponse {
+        access_token: access,
+        refresh_token,
+        token_type: "Bearer".into(),
+        refresh_expires_in,
+    }))
+}
+
+async fn logout(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshRequest>,
+) -> AppResult<axum::http::StatusCode> {
+    let hash = hash_refresh_token(&req.refresh_token);
+
+    // Use RETURNING to get the user_id so we can evict the in-RAM User KEK.
+    // If the token was already expired/missing this is a no-op (None).
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "DELETE FROM refresh_tokens WHERE token_hash = $1 RETURNING user_id",
+    )
+    .bind(&hash)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+
+    if let Some((user_id,)) = row {
+        // Detach the encrypted disk image before evicting the KEK (best-effort).
+        dmg_on_logout(&state, user_id).await;
+        // Zeroizes the 32-byte KEK in RAM via SessionEntry::Drop.
+        state.session_keys.remove(user_id);
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Change password: verify old → derive old KEK → derive new KEK → re-wrap all
+/// user-keyed DEKs in one transaction → update password_hash → refresh session.
+///
+/// The System KEK wrappings are untouched: they always point to the same DEK
+/// bytes regardless of what user password wraps the user's copy.
+async fn change_password(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> AppResult<axum::http::StatusCode> {
+    if req.new_password.len() < 8 {
+        return Err(AppError::BadRequest(
+            "New password must be at least 8 characters".into(),
+        ));
+    }
+
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+        .bind(auth_user.id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
+
+    // All three Argon2 operations (verify + 2× derive) batched into one
+    // blocking thread to minimise async thread-pool overhead.
+    let cur_pw = req.current_password.clone();
+    let new_pw = req.new_password.clone();
+    let pw_hash = user.password_hash.clone();
+    let kek_salt = user.kek_salt.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let ok = verify_password(&cur_pw, &pw_hash)?;
+        if !ok {
+            return Ok::<Option<([u8; 32], [u8; 32], String)>, AppError>(None);
+        }
+
+        let old_kek = crate::security::vault_crypto::derive_user_kek(&cur_pw, &kek_salt)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("old KEK derive: {}", e)))?;
+        let new_kek = crate::security::vault_crypto::derive_user_kek(&new_pw, &kek_salt)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("new KEK derive: {}", e)))?;
+        let new_hash = hash_password(&new_pw)?;
+
+        Ok(Some((old_kek, new_kek, new_hash)))
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
+
+    let (old_kek, new_kek, new_hash) = result
+        .ok_or_else(|| AppError::Unauthorized("Current password is incorrect".into()))?;
+
+    // Re-wrap DEKs and update password_hash in a single transaction.
+    re_wrap_deks_and_update_password(
+        &state.db,
+        auth_user.id,
+        &old_kek,
+        &new_kek,
+        &new_hash,
+    )
+    .await?;
+
+    // Replace the in-RAM User KEK with the new one.
+    state.session_keys.insert(auth_user.id, new_kek);
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Re-wrap every `vault_key_wrappings` row keyed by `user:{id}` from the old
+/// User KEK to the new one, then update `users.password_hash` — all in one
+/// atomic transaction so a crash mid-flight leaves the DB consistent.
+async fn re_wrap_deks_and_update_password(
+    db: &sqlx::PgPool,
+    user_id: Uuid,
+    old_kek: &[u8; 32],
+    new_kek: &[u8; 32],
+    new_hash: &str,
+) -> AppResult<()> {
+    use crate::crypto::TokenCipher;
+    use crate::security::vault_crypto::{unwrap_dek, wrap_dek};
+
+    let old_cipher = TokenCipher::from_raw_key(old_kek);
+    let new_cipher = TokenCipher::from_raw_key(new_kek);
+    let alias = format!("user:{}", user_id);
+
+    let mut tx = db.begin().await?;
+
+    // Lock all matching rows for the duration of the transaction.
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT object_id, wrapped_dek
+         FROM vault_key_wrappings
+         WHERE kek_alias = $1
+         FOR UPDATE",
+    )
+    .bind(&alias)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for (object_id, wrapped_dek) in rows {
+        let dek = unwrap_dek(&old_cipher, &wrapped_dek)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap unwrap object_id={}: {}", object_id, e)))?;
+        let new_wrapped = wrap_dek(&new_cipher, &dek)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap wrap object_id={}: {}", object_id, e)))?;
+
+        sqlx::query(
+            "UPDATE vault_key_wrappings
+             SET wrapped_dek = $1
+             WHERE object_id = $2 AND kek_alias = $3",
+        )
+        .bind(&new_wrapped)
+        .bind(object_id)
+        .bind(&alias)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Update the password hash atomically with the DEK re-wrapping.
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(new_hash)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+// ── Low-level crypto helpers ──────────────────────────────────────────────────
 
 pub fn generate_token(user: &User, secret: &str, expiry_hours: i64) -> AppResult<String> {
     let now = Utc::now();
@@ -282,7 +587,10 @@ pub fn verify_token(token: &str, secret: &str) -> AppResult<Claims> {
 }
 
 fn hash_password(password: &str) -> AppResult<String> {
-    use argon2::{password_hash::{rand_core::OsRng, PasswordHasher, SaltString}, Argon2};
+    use argon2::{
+        password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+        Argon2,
+    };
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
@@ -291,13 +599,19 @@ fn hash_password(password: &str) -> AppResult<String> {
 }
 
 fn verify_password(password: &str, hash: &str) -> AppResult<bool> {
-    use argon2::{password_hash::{PasswordHash, PasswordVerifier}, Argon2};
+    use argon2::{
+        password_hash::{PasswordHash, PasswordVerifier},
+        Argon2,
+    };
     let parsed = PasswordHash::new(hash)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Hash parse error: {}", e)))?;
-    Ok(Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
 }
 
-// Middleware
+// ── Auth middleware ───────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug)]
 pub struct AuthUser {
     pub id: Uuid,

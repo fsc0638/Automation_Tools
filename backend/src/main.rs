@@ -22,7 +22,10 @@ mod crypto;
 mod db;
 mod error;
 mod git_ops;
+mod grounding;
 mod security;
+
+use security::session_keys::SessionKeyStore;
 
 use api::{router, AppState};
 use crypto::TokenCipher;
@@ -78,12 +81,40 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let portal_sync_lock = SyncLock::new();
+    // AgentK-aligned: broadcast::channel for meeting lifecycle events.
+    // Capacity 256 absorbs short bursts (e.g. status flip + portal book
+    // + invitation send in quick succession). Lagging subscribers get
+    // RecvError::Lagged on the WS side and refetch.
+    let (meeting_events_tx, _) = tokio::sync::broadcast::channel(256);
+
+    // User KEK session store.  Starts empty; populated on login.
+    // Phase 1: present but unused (all vault ops use System KEK only).
+    // Phase 2: auth.rs will insert/remove KEKs here on login/logout.
+    let session_keys = Arc::new(SessionKeyStore::new());
+
+    // Background session cleanup: evict expired User KEKs every 30 minutes.
+    // This frees RAM for long-abandoned sessions and triggers key zeroization.
+    {
+        let sk = session_keys.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                sk.cleanup_expired();
+                tracing::debug!("session_keys: cleanup ran, active={}", sk.active_count());
+            }
+        });
+    }
 
     let state = AppState {
         db: db.clone(),
         config: config.clone(),
         cipher,
+        session_keys,
         portal_sync_lock: portal_sync_lock.clone(),
+        meeting_events: meeting_events_tx,
     };
 
     // Background portal-sync scheduler. Wakes every 30 mins aligned to
@@ -118,6 +149,12 @@ async fn main() -> anyhow::Result<()> {
             "portal_directory scheduler disabled via PORTAL_DIRECTORY_SYNC_ENABLED=0"
         );
     }
+
+    // AgentK-aligned: meeting_files retention sweep. Wakes once an hour,
+    // finds soft-deleted files past their hard_delete_after, removes the
+    // on-disk file + DB row. Lazy by design — we don't need second-level
+    // accuracy and an hourly tick keeps it out of the critical path.
+    tokio::spawn(meeting_files_retention_sweep_loop(db.clone()));
 
     let cors = match std::env::var("CORS_ALLOWED_ORIGINS")
         .ok()
@@ -356,5 +393,54 @@ fn next_monday_at_08(now: chrono::DateTime<Local>) -> chrono::DateTime<Local> {
         candidate + chrono::Duration::days(7)
     } else {
         candidate
+    }
+}
+
+/// AgentK-aligned soft-delete sweep. Hourly tick: any meeting_files row
+/// whose `hard_delete_after` has passed gets its on-disk file removed
+/// (best-effort) and the DB row deleted. Errors are logged but never
+/// propagate — a stuck file shouldn't take the server down with it.
+async fn meeting_files_retention_sweep_loop(db: PgPool) {
+    use std::time::Duration as StdDuration;
+    tracing::info!("meeting_files retention sweep: hourly tick");
+    // Initial 60s delay so first sweep doesn't fight with startup work.
+    tokio::time::sleep(StdDuration::from_secs(60)).await;
+    loop {
+        let now = chrono::Utc::now();
+        let rows: Vec<(uuid::Uuid, String)> = match sqlx::query_as(
+            "SELECT id, storage_path FROM meeting_files
+             WHERE hard_delete_after IS NOT NULL
+               AND hard_delete_after <= NOW()",
+        )
+        .fetch_all(&db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("retention sweep: query failed: {e:?}");
+                tokio::time::sleep(StdDuration::from_secs(3600)).await;
+                continue;
+            }
+        };
+        let mut removed = 0usize;
+        for (id, path) in &rows {
+            let _ = std::fs::remove_file(path);
+            if let Err(e) = sqlx::query("DELETE FROM meeting_files WHERE id = $1")
+                .bind(id)
+                .execute(&db)
+                .await
+            {
+                tracing::warn!("retention sweep: delete row {id} failed: {e:?}");
+                continue;
+            }
+            removed += 1;
+        }
+        if removed > 0 {
+            tracing::info!(
+                "retention sweep at {}: purged {removed} files",
+                now.format("%Y-%m-%d %H:%M:%S"),
+            );
+        }
+        tokio::time::sleep(StdDuration::from_secs(3600)).await;
     }
 }

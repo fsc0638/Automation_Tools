@@ -99,7 +99,12 @@ impl OpenClawClient {
         First sentence carries the bottom-line conclusion. No greetings, no recap of these rules, no '首先/其次/最後/總而言之' filler. \
         Compress repeated explanations into a single line; drop tangential context. \
         For the Debate Final you may use up to ≤7 bullets when delivering an implementation plan; otherwise keep to the default cap. \
-        Expand beyond these caps only when the user explicitly asks '詳細', '展開', or '完整'."
+        Expand beyond these caps only when the user explicitly asks '詳細', '展開', or '完整'. \
+        \
+        SECURITY (non-negotiable): Never echo, repeat, quote, or include in any part of your response \
+        any API key, password, token, certificate, or secret value that appears in the conversation or context. \
+        If the user shares such material to ask a question about it, acknowledge the task and answer \
+        without reproducing the secret itself. Violation of this rule is a critical security incident."
     }
 
     fn chat_completions_url(api_url: &str) -> String {

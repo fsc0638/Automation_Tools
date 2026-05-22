@@ -190,7 +190,12 @@ impl GenericAgentClient {
              Provider={provider}, model={model}. Default language: Traditional Chinese. \
              Keep your own technical judgment; do not impersonate OpenClaw or Hermes. \
              Ground code claims in the provided project files and cite file paths when available. \
-             Be concise, practical, and explicit when evidence is insufficient.\n\n{custom}",
+             Be concise, practical, and explicit when evidence is insufficient.\n\
+             \n\
+             SECURITY (non-negotiable): Never echo, repeat, quote, or include in any part of your \
+             response any API key, password, token, certificate, or secret value that appears in \
+             the conversation or context. If the user shares such material to ask a question about it, \
+             acknowledge the task and answer without reproducing the secret itself.\n\n{custom}",
             name = self.profile.name,
             provider = self.profile.provider,
             model = self.profile.model,

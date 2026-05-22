@@ -1,0 +1,36 @@
+sequenceDiagram
+    actor U as Admin (AgentK owner)
+    participant FE as Frontend
+    participant BE as Backend
+    participant RM as Rooms svc
+    participant WS as Realtime
+
+    U->>FE: Fill form (title / time / editors / viewers)
+    FE->>BE: POST /workspaces/{w}/meetings  (status=draft)
+    BE->>RM: Create room.type="meeting"
+    BE->>BE: INSERT meetings + meeting_participants
+    BE->>RM: Sync participants → room_members
+    BE-->>WS: emit meeting.created
+    BE-->>FE: 201 Meeting (with room_id)
+
+    Note over U,FE: ── Pre-meeting: chat / upload prep files inside dedicated room ──
+
+    U->>FE: Click "Schedule"
+    FE->>BE: PATCH /meetings/{m} {status:"scheduled"}
+    BE->>BE: Validate starts_at + ends_at
+    BE->>BE: UPDATE status
+    BE-->>WS: emit meeting.scheduled  (full to participants, busy-mask to others)
+
+    Note over U,FE: ── During: conversations / AI commands / record audio in room ──
+
+    U->>FE: Click "End meeting"
+    FE->>BE: PATCH /meetings/{m} {status:"ended"}
+    BE->>BE: UPDATE status="ended", is_locked=true
+    BE-->>WS: emit meeting.ended
+    Note right of BE: Room writes now blocked\n(get_meeting_room_write_block_reason)
+
+    Note over U,FE: ── If reopen needed ──
+    U->>FE: Click "Reopen"
+    FE->>BE: PATCH /meetings/{m} {is_locked:false}
+    Note right of BE: Only admin / workspace.owner allowed
+    BE-->>WS: emit meeting.lock_changed

@@ -1,7 +1,7 @@
 "use client";
 import { use, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { ArrowLeft, Lock, LockOpen, Trash2 } from "lucide-react";
 import { MeetingSidebar } from "@/components/meetings/MeetingSidebar";
 import { RecordingPanel } from "@/components/meetings/RecordingPanel";
 import { FileWorkspace } from "@/components/meetings/FileWorkspace";
@@ -10,7 +10,13 @@ import { NotesCompilePanel } from "@/components/meetings/NotesCompilePanel";
 import { AttendeeSignoff } from "@/components/meetings/AttendeeSignoff";
 import { TaskImpactList } from "@/components/meetings/TaskImpactList";
 import { NotesHistory } from "@/components/meetings/NotesHistory";
-import { meetings as meetingsApi, type MeetingDetail } from "@/lib/api";
+import { ProjectMeetingTimeline } from "@/components/meetings/ProjectMeetingTimeline";
+import {
+  createMeetingsWsConnection,
+  meetings as meetingsApi,
+  type MeetingDetail,
+} from "@/lib/api";
+import { useAuthStore } from "@/lib/store";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { formatDateOnly, formatTimeRange } from "@/components/meetings/meeting-utils";
@@ -25,6 +31,11 @@ export default function MeetingViewPage({
   const t = useT();
   const router = useRouter();
   const { id } = use(params);
+  // All hooks MUST be called in the same order every render — including
+  // the zustand store read. Putting `useAuthStore` after the early
+  // `if (loading) return …` blocks below caused a hook-count mismatch
+  // on the second render (Rules of Hooks violation). Keep it up here.
+  const currentUser = useAuthStore((s) => s.user);
   const [tab, setTab] = useState<Tab>("info");
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -45,6 +56,25 @@ export default function MeetingViewPage({
     void refresh();
   }, [refresh]);
 
+  // AgentK-aligned: subscribe to meeting lifecycle events and refetch
+  // on anything that touches this meeting (lock change, status flip,
+  // record update). Other events are ignored — the sidebar / list pages
+  // can subscribe separately if they need finer-grained updates.
+  useEffect(() => {
+    const ws = createMeetingsWsConnection((ev) => {
+      if (ev.type === "resync" || ev.meeting_id === id) {
+        void refresh();
+      }
+    });
+    return () => {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [id, refresh]);
+
   if (loading) {
     return (
       <div className="flex h-screen">
@@ -63,6 +93,23 @@ export default function MeetingViewPage({
   }
 
   const isDraft = detail.status === "draft";
+  // Two authority levels exposed to subcomponents:
+  //   - isCreator: edit metadata / delete / reopen / send-invitations
+  //   - isParticipant: also includes attendees — can upload files,
+  //     edit notes, generate AI minutes, sync tasks, etc. Operations
+  //     that "touch" the meeting workspace.
+  // Anyone outside both is strictly read-only per user brief 2026-05-15:
+  // "建立者 + 與會人員，以外都不可以任何操作".
+  const isCreator =
+    !!currentUser && currentUser.id === detail.creator_id;
+  const isParticipant =
+    isCreator ||
+    (!!currentUser &&
+      detail.attendees.some(
+        (a) =>
+          (a.user_id !== null && a.user_id === currentUser.id) ||
+          a.email.toLowerCase() === currentUser.email.toLowerCase()
+      ));
 
   async function handleCompleteReady() {
     try {
@@ -97,6 +144,23 @@ export default function MeetingViewPage({
     setTab("record");
   }
 
+  async function handleReopen() {
+    // Reopen is the only blessed way out of is_locked=TRUE; backend
+    // gates by role (creator / project admin/owner). Surface the 403
+    // as a friendly message instead of the generic API error.
+    try {
+      await meetingsApi.reopen(id);
+      await refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "重新開啟失敗";
+      setError(
+        /forbidden|403/i.test(msg)
+          ? "您沒有重新開啟此會議的權限（僅會議建立者或所屬專案的 Owner / Admin 可開啟）"
+          : msg
+      );
+    }
+  }
+
   const uploaderNames = new Map<string, string>();
   for (const a of detail.attendees) {
     if (a.user_id) uploaderNames.set(a.user_id, a.display_name || a.email);
@@ -111,43 +175,72 @@ export default function MeetingViewPage({
           <div className="flex items-start gap-3">
             <button
               type="button"
-              onClick={() => router.back()}
-              aria-label="返回上一頁"
+              onClick={() => router.push("/meetings")}
+              aria-label="回會議工作台"
               className="mt-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#475569] hover:bg-[#F8FAFC] hover:text-[#1A1A2E]"
             >
               <ArrowLeft size={16} />
             </button>
             <div>
-              <h1 className="text-[20px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
+              <h1 className="flex items-center gap-2 text-[20px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
                 {t("meetings.viewTitle")}
+                {detail.is_locked && (
+                  <span
+                    title="會議已鎖定（completed 自動上鎖）"
+                    className="inline-flex items-center gap-1 rounded-md border border-[#FDE68A] bg-[#FEF3C7] px-2 py-0.5 text-[11px] font-medium text-[#92400E]"
+                  >
+                    <Lock size={12} /> 已鎖定
+                  </span>
+                )}
               </h1>
               <p className="mt-1 text-[12px] text-[#94A3B8]">{t("meetings.viewDesc")}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void handleDelete()}
-              title="刪除會議"
-              aria-label="刪除會議"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#FCA5A5] bg-white text-[#C8102E] transition hover:bg-[#FEE2E2]"
-            >
-              <Trash2 size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push(`/meetings/new?clone=${id}`)}
-              className="rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2 text-[13px] font-medium text-[#1A1A2E] hover:bg-[#F8FAFC]"
-            >
-              {isDraft ? t("meetings.action.editInfo") : t("meetings.action.exportRecord")}
-            </button>
-            <button
-              type="button"
-              onClick={() => void (isDraft ? handleCompleteReady() : handleGenerate())}
-              className="rounded-xl bg-[#1A1A2E] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#243149]"
-            >
-              {isDraft ? t("meetings.action.completeReady") : t("meetings.action.shareRecord")}
-            </button>
+            {!isCreator && (
+              <span className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 text-[11px] text-[#64748B]">
+                檢視模式（非建立者）
+              </span>
+            )}
+            {isCreator && detail.is_locked && (
+              <button
+                type="button"
+                onClick={() => void handleReopen()}
+                title="重新開啟（清除鎖定）"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#FDE68A] bg-[#FEF3C7] px-3 py-2 text-[13px] font-medium text-[#92400E] transition hover:bg-[#FDE68A]"
+              >
+                <LockOpen size={14} /> 重新開啟
+              </button>
+            )}
+            {isCreator && (
+              <button
+                type="button"
+                onClick={() => void handleDelete()}
+                title="刪除會議"
+                aria-label="刪除會議"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#FCA5A5] bg-white text-[#C8102E] transition hover:bg-[#FEE2E2]"
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
+            {isCreator && (
+              <button
+                type="button"
+                onClick={() => router.push(`/meetings/${id}/edit`)}
+                className="rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2 text-[13px] font-medium text-[#1A1A2E] hover:bg-[#F8FAFC]"
+              >
+                編輯會議
+              </button>
+            )}
+            {isCreator && (
+              <button
+                type="button"
+                onClick={() => void (isDraft ? handleCompleteReady() : handleGenerate())}
+                className="rounded-xl bg-[#1A1A2E] px-3.5 py-2 text-[13px] font-medium text-white hover:bg-[#243149]"
+              >
+                {isDraft ? t("meetings.action.completeReady") : t("meetings.action.shareRecord")}
+              </button>
+            )}
           </div>
         </header>
 
@@ -198,9 +291,9 @@ export default function MeetingViewPage({
 
         <div className="flex min-h-0 flex-1 gap-5 overflow-auto p-6">
           {tab === "info" ? (
-            <InfoTab detail={detail} uploaderNames={uploaderNames} onChange={refresh} />
+            <InfoTab detail={detail} uploaderNames={uploaderNames} onChange={refresh} canEdit={isParticipant} />
           ) : (
-            <RecordTab detail={detail} onChange={refresh} />
+            <RecordTab detail={detail} onChange={refresh} canEdit={isParticipant} />
           )}
         </div>
       </div>
@@ -212,10 +305,13 @@ function InfoTab({
   detail,
   uploaderNames,
   onChange,
+  canEdit,
 }: {
   detail: MeetingDetail;
   uploaderNames: Map<string, string>;
   onChange: () => void;
+  /** Creator OR attendee. False ⇒ all action buttons hidden (read-only). */
+  canEdit: boolean;
 }) {
   const t = useT();
 
@@ -228,16 +324,23 @@ function InfoTab({
           files={detail.files}
           latestNotes={detail.latest_notes}
           onChange={onChange}
+          canEdit={canEdit}
         />
       </section>
 
       <aside className="flex w-[400px] flex-shrink-0 flex-col gap-5 overflow-y-auto">
-        <RecordingPanel meetingId={detail.id} files={detail.files} onFilesChange={onChange} />
+        <RecordingPanel
+          meetingId={detail.id}
+          files={detail.files}
+          onFilesChange={onChange}
+          canEdit={canEdit}
+        />
         <FileWorkspace
           meetingId={detail.id}
           files={detail.files}
           uploaderNames={uploaderNames}
           onChange={onChange}
+          canEdit={canEdit}
         />
       </aside>
     </>
@@ -325,14 +428,28 @@ function Field({
 function RecordTab({
   detail,
   onChange,
+  canEdit,
 }: {
   detail: MeetingDetail;
   onChange: () => void;
+  canEdit: boolean;
 }) {
   return (
     <>
       <section className="flex-1 space-y-5">
-        <NotesSummary meetingId={detail.id} notes={detail.latest_notes} onChange={onChange} />
+        <NotesSummary
+          meetingId={detail.id}
+          notes={detail.latest_notes}
+          onChange={onChange}
+          canEdit={canEdit}
+        />
+        {detail.project_id && (
+          <ProjectMeetingTimeline
+            projectId={detail.project_id}
+            currentMeetingId={detail.id}
+            limit={3}
+          />
+        )}
       </section>
       <aside className="flex w-[400px] flex-shrink-0 flex-col gap-5 overflow-y-auto">
         <AttendeeSignoff meetingId={detail.id} attendees={detail.attendees} onChange={onChange} />
@@ -341,6 +458,7 @@ function RecordTab({
           impacts={detail.task_impacts}
           defaultProjectId={detail.project_id}
           onChange={onChange}
+          canEdit={canEdit}
         />
         <NotesHistory meetingId={detail.id} />
       </aside>

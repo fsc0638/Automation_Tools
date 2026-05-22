@@ -16,6 +16,9 @@ pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -36,6 +39,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Database(e) => {
                 tracing::error!("DB error: {:?}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Database error".into())

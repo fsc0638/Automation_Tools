@@ -33,6 +33,16 @@ impl TokenCipher {
 
     /// Derive a 32-byte key from an arbitrary passphrase via SHA-256.
     /// Used as a dev fallback when GIT_TOKEN_ENCRYPTION_KEY is not set.
+    /// Create a cipher directly from a 32-byte raw key (e.g. a derived User KEK).
+    /// The key bytes are copied into the cipher's internal state; the caller
+    /// can safely zeroize their copy afterwards.
+    pub fn from_raw_key(key: &[u8; 32]) -> Self {
+        let k = Key::<Aes256Gcm>::from_slice(key);
+        Self {
+            cipher: Aes256Gcm::new(k),
+        }
+    }
+
     pub fn from_passphrase(passphrase: &str) -> Self {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

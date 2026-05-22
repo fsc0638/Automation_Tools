@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { meetings as meetingsApi, type MeetingAttendee } from "@/lib/api";
 import { useT } from "@/lib/i18n";
+import { useAuthStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { formatDateTime } from "./meeting-utils";
 
@@ -14,6 +15,16 @@ export function AttendeeSignoff({
   attendees: MeetingAttendee[];
   onChange: () => void;
 }) {
+  // Backend's require_attendee_self() enforces that you can only
+  // confirm/dispute YOUR OWN row. Showing confirm/dispute buttons on
+  // every row used to trigger a 403 the moment the operator clicked
+  // anyone else's. Only render the action pair when the row's user_id
+  // OR email matches the logged-in user.
+  const currentUser = useAuthStore((s) => s.user);
+  const isSelfRow = (a: MeetingAttendee) =>
+    !!currentUser &&
+    ((a.user_id !== null && a.user_id === currentUser.id) ||
+      a.email.toLowerCase() === currentUser.email.toLowerCase());
   const t = useT();
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
 
@@ -77,7 +88,7 @@ export function AttendeeSignoff({
                 )}
               </div>
 
-              {isPending ? (
+              {isPending && isSelfRow(a) ? (
                 <div className="flex flex-shrink-0 gap-1">
                   <button
                     type="button"
@@ -96,6 +107,10 @@ export function AttendeeSignoff({
                     {t("meetings.attendees.disputeBtn")}
                   </button>
                 </div>
+              ) : isPending ? (
+                <span className="flex-shrink-0 rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-medium text-[#94A3B8]">
+                  等待回覆
+                </span>
               ) : (
                 <span
                   className={cn(

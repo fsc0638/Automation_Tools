@@ -76,6 +76,12 @@ export default function NewMeetingPage() {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [pickedEmails, setPickedEmails] = useState<Record<string, string>>({});
   const [notificationNote, setNotificationNote] = useState("請先檢閱附件並備妥議題。");
+  // AgentK-aligned: description is the long-form meeting介紹 (vs.
+  // notification_note which is the invitation message). join_url is the
+  // online-meeting link; when locationMode=='online' we'll populate it
+  // from the provider auto-link once that integration lands.
+  const [description, setDescription] = useState("");
+  const [joinUrl, setJoinUrl] = useState("");
   const [projectId, setProjectId] = useState<string | null>(initialProjectId);
   const [projectName, setProjectName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -87,6 +93,26 @@ export default function NewMeetingPage() {
   ]);
   const [slots, setSlots] = useState<MeetingTimeSlot[]>([]);
   const [selectedSlotStart, setSelectedSlotStart] = useState<string | null>(null);
+
+  // Available projects for the linkage dropdown. Empty array until the
+  // first fetch resolves. Without this list the user could only link a
+  // meeting via `?project_id=...` in the URL, which made the "同步成任務"
+  // button on the detail page always say "未連結至專案".
+  const [allProjects, setAllProjects] = useState<Array<{ id: string; name: string }>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await projectsApi.list();
+        if (!cancelled) setAllProjects(list.map((p) => ({ id: p.id, name: p.name })));
+      } catch {
+        if (!cancelled) setAllProjects([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Hydrate linked project name when we arrived from a project page.
   useEffect(() => {
@@ -301,6 +327,18 @@ export default function NewMeetingPage() {
 
       setBusy(true);
       try {
+        // AgentK-aligned: when locationMode=='online' we record the
+        // provider symbolically AND pass the provider's URL into
+        // join_url. The on-page `location` field still gets the human-
+        // readable label so existing list/calendar views keep rendering.
+        const providerSymbol =
+          locationMode === "online"
+            ? onlineProvider === "webex"
+              ? "webex"
+              : onlineProvider === "teams"
+                ? "teams"
+                : "meet"
+            : null;
         const created = await meetingsApi.create({
           title: title.trim(),
           importance,
@@ -314,6 +352,9 @@ export default function NewMeetingPage() {
           attendee_emails,
           project_id: projectId,
           save_as_draft: saveAsDraft,
+          description: description.trim() || null,
+          join_url: joinUrl.trim() || null,
+          external_provider: providerSymbol,
         });
         router.push(`/meetings/${created.id}`);
       } catch (e) {
@@ -321,7 +362,7 @@ export default function NewMeetingPage() {
         setBusy(false);
       }
     },
-    [title, importance, startDate, startTime, endDate, endTime, allDay, recurrence, timezone, location, attendees, pickedEmails, notificationNote, projectId, router]
+    [title, importance, startDate, startTime, endDate, endTime, allDay, recurrence, timezone, location, locationMode, onlineProvider, attendees, pickedEmails, notificationNote, description, joinUrl, projectId, router]
   );
 
   return (
@@ -333,8 +374,8 @@ export default function NewMeetingPage() {
           <div className="flex items-start gap-3">
             <button
               type="button"
-              onClick={() => router.back()}
-              aria-label="返回上一頁"
+              onClick={() => router.push("/meetings")}
+              aria-label="回會議工作台"
               className="mt-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#475569] hover:bg-[#F8FAFC] hover:text-[#1A1A2E]"
             >
               <ArrowLeft size={16} />
@@ -369,11 +410,29 @@ export default function NewMeetingPage() {
         <div className="flex min-h-0 flex-1 gap-5 overflow-auto p-6">
           {/* Main form */}
           <section className="flex-1 space-y-5">
-            {projectId && projectName && (
-              <div className="rounded-lg bg-[#EFF6FF] px-3 py-2 text-[13px] text-[#0050A0]">
-                {t("meetings.linkedProject")} <strong>{projectName}</strong>
-              </div>
-            )}
+            <div className="rounded-2xl border border-[#E2E8F0] bg-white p-3">
+              <label className="block text-[12px] font-medium text-[#475569]">
+                連結專案（選填，連結後 action items 才能同步成任務）
+              </label>
+              <select
+                value={projectId ?? ""}
+                onChange={(e) => setProjectId(e.target.value || null)}
+                className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-[14px] focus:border-[#0050A0] focus:outline-none"
+              >
+                <option value="">— 不連結專案 —</option>
+                {allProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              {projectId && projectName && (
+                <div className="mt-1 text-[11px] text-[#0050A0]">
+                  ● 已連結 <strong>{projectName}</strong>
+                </div>
+              )}
+            </div>
+
 
             <div className="rounded-2xl border border-[#E2E8F0] bg-white p-5">
               <div className="mb-1 text-[16px] font-semibold tracking-[-0.01em] text-[#1A1A2E]">
@@ -591,6 +650,32 @@ export default function NewMeetingPage() {
                   </div>
                 </div>
               </div>
+
+              <div className="mt-4">
+                <label className="block text-[12px] font-medium text-[#475569]">會議介紹</label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={2}
+                  placeholder="會議內容、議題或會議目標..."
+                  className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-[14px] focus:border-[#0050A0] focus:outline-none"
+                />
+              </div>
+
+              {locationMode === "online" && (
+                <div className="mt-4">
+                  <label className="block text-[12px] font-medium text-[#475569]">
+                    線上會議連結（選填）
+                  </label>
+                  <input
+                    type="url"
+                    value={joinUrl}
+                    onChange={(e) => setJoinUrl(e.target.value)}
+                    placeholder="https://..."
+                    className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-[14px] focus:border-[#0050A0] focus:outline-none"
+                  />
+                </div>
+              )}
 
               <div className="mt-4">
                 <label className="block text-[12px] font-medium text-[#475569]">{t("meetings.field.notificationNote")}</label>
