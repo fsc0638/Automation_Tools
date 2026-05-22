@@ -21,6 +21,11 @@
 //! - Output is truncated so a huge file can't blow the context window.
 //! - The caller bounds the loop with a max-iteration guard.
 
+use lettre::{
+    message::Mailbox,
+    transport::smtp::authentication::Credentials,
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+};
 use serde::Serialize;
 
 use crate::api::project_index::relevant_file_context;
@@ -74,6 +79,7 @@ ACTION: <tool> <json-參數>\n\
 - read_file {\"path\":\"相對路徑\",\"ref\":\"可選 git ref\"}  — 讀單一檔案（給 ref 則直接讀遠端該版本）\n\
 - vault_reveal {\"id\":\"<secret-uuid>\"}  — 取得 Vault 中某個憑證的明文值（僅在任務明確需要時使用）\n\
 - list_tree {\"path\":\"可選相對目錄\"}  — 列出目錄結構\n\
+- send_email {\"vault_id\":\"<smtp-secret-uuid>\",\"to\":\"addr 或 [addr,...]\",\"subject\":\"主旨\",\"body\":\"內文\"}  — 透過 Vault 中的 SMTP 設定寄信\n\
 \n\
 系統會執行該工具，並以 OBSERVATION: 回傳結果。你可再呼叫工具或回答。\n\
 當你已經能回答時，輸出：\n\
@@ -99,9 +105,11 @@ ACTION: <tool> <json參數>\n\
 - read_file {\"path\":\"相對路徑\"}  讀本地該檔；或加 {\"ref\":\"分支/commit/tag\"} 直接讀遠端那個版本\n\
 - list_tree {\"path\":\"可選相對目錄\"}  看目錄結構\n\
 - vault_reveal {\"id\":\"<secret-uuid>\"}  從使用者 Vault 取得指定憑證的明文值（僅在任務明確需要時使用）\n\
+- send_email {\"vault_id\":\"<smtp-secret-uuid>\",\"to\":\"addr 或 [addr,...]\",\"subject\":\"主旨\",\"body\":\"內文\"}  透過 Vault 中的 SMTP 設定寄出郵件\n\
 \n\
 策略：先 search_index 找線索 → read_file 把關鍵檔讀進來核實 → 再回答。\n\
 如需要憑證才能完成任務（例如 git clone 私有 repo），依 Vault 清單挑對應 id 並呼叫 vault_reveal。\n\
+寄信時直接呼叫 send_email，vault_id 填 Vault 中 SMTP 設定的 id，不需要先呼叫 vault_reveal。\n\
 能回答時，用一行 FINAL: 開頭給最終答案，並標明依據的實際檔案路徑。"
         .to_string()
 }
@@ -136,6 +144,11 @@ pub fn tool_status_msg(call: &ToolCall) -> String {
             } else {
                 format!("瀏覽目錄 {p} …")
             }
+        }
+        "send_email" => {
+            let to = arg("to");
+            let subj = arg("subject");
+            format!("寄送郵件 → {to}「{subj}」…")
         }
         other => format!("執行工具 {other} …"),
     }
@@ -348,10 +361,196 @@ pub async fn run_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
                 Err(e) => return format!("(vault_reveal: decrypt failed: {e})"),
             }
         }
-        other => format!("(unknown tool '{other}'; valid: search_index, read_file, list_tree, vault_reveal)"),
+        "send_email" => {
+            return send_email_tool(ctx, call).await;
+        }
+        other => format!("(unknown tool '{other}'; valid: search_index, read_file, list_tree, vault_reveal, send_email)"),
     };
 
     // INVARIANT: tool output cannot bypass secret redaction.
     let redacted = redact_secrets(&raw).text;
     redacted.chars().take(MAX_TOOL_OUTPUT_CHARS).collect()
+}
+
+// ── send_email implementation ─────────────────────────────────────────────────
+
+/// Vault secret value format for SMTP (JSON stored as the secret_value):
+/// ```json
+/// {
+///   "host":     "smtp.gmail.com",
+///   "port":     587,
+///   "username": "user@gmail.com",
+///   "password": "app-password",
+///   "from":     "Display Name <user@gmail.com>"   // optional; falls back to username
+/// }
+/// ```
+/// Port 587 → STARTTLS.  Port 465 → implicit TLS.  Any other port → STARTTLS.
+async fn send_email_tool(ctx: &ToolCtx<'_>, call: &ToolCall) -> String {
+    // ── 1. Parse tool arguments ──────────────────────────────────────────
+    let vault_id_str = call
+        .args
+        .get("vault_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let subject = call
+        .args
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let body = call
+        .args
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    if vault_id_str.is_empty() {
+        return "(send_email: missing 'vault_id')".to_string();
+    }
+    if subject.is_empty() {
+        return "(send_email: missing 'subject')".to_string();
+    }
+    if body.is_empty() {
+        return "(send_email: missing 'body')".to_string();
+    }
+
+    // 'to' accepts a string ("a@b.com" or "a@b.com,c@d.com") or a JSON array.
+    let to_addresses: Vec<String> = match call.args.get("to") {
+        Some(v) if v.is_array() => v
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Some(v) if v.is_string() => v
+            .as_str()
+            .unwrap()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => vec![],
+    };
+    if to_addresses.is_empty() {
+        return "(send_email: missing or empty 'to')".to_string();
+    }
+
+    // ── 2. Auth / session guards ─────────────────────────────────────────
+    let vault_id = match vault_id_str.parse::<uuid::Uuid>() {
+        Ok(v) => v,
+        Err(_) => return "(send_email: invalid UUID for 'vault_id')".to_string(),
+    };
+    let Some(ref cipher) = ctx.vault_cipher else {
+        return "(send_email: no active vault session — log in again)".to_string();
+    };
+
+    // ── 3. Ownership check ───────────────────────────────────────────────
+    let owner: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM vault_secrets WHERE id = $1")
+            .bind(vault_id)
+            .fetch_optional(ctx.db)
+            .await
+            .unwrap_or(None);
+    match owner {
+        None => return "(send_email: vault secret not found)".to_string(),
+        Some(uid) if uid != ctx.user_id => {
+            return "(send_email: forbidden — not your secret)".to_string();
+        }
+        _ => {}
+    }
+
+    // ── 4. Decrypt SMTP config from Vault ────────────────────────────────
+    let vsvc = crate::security::vault_service::VaultService::for_user(
+        ctx.db,
+        cipher.clone(),
+        ctx.user_id,
+        cipher.clone(),
+        ctx.user_id,
+        None,
+    );
+    let config_bytes = match vsvc.open("vault_secret", vault_id, "send_email").await {
+        Ok(b) => b,
+        Err(e) => return format!("(send_email: vault decrypt failed: {e})"),
+    };
+    let config_str = match String::from_utf8(config_bytes) {
+        Ok(s) => s,
+        Err(_) => return "(send_email: vault value is not UTF-8)".to_string(),
+    };
+    let cfg: serde_json::Value = match serde_json::from_str(&config_str) {
+        Ok(v) => v,
+        Err(_) => {
+            return "(send_email: vault value is not valid JSON; \
+                    expected {\"host\":\"...\",\"port\":587,\"username\":\"...\",\"password\":\"...\"})"
+                .to_string()
+        }
+    };
+
+    // ── 5. Extract SMTP fields ───────────────────────────────────────────
+    let host = match cfg.get("host").and_then(|v| v.as_str()) {
+        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ => return "(send_email: SMTP config missing 'host')".to_string(),
+    };
+    let port: u16 = cfg
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(587)
+        .clamp(1, 65535) as u16;
+    let username = match cfg.get("username").and_then(|v| v.as_str()) {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => return "(send_email: SMTP config missing 'username')".to_string(),
+    };
+    let password = match cfg.get("password").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => return "(send_email: SMTP config missing 'password')".to_string(),
+    };
+    let from_str = cfg
+        .get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&username)
+        .to_string();
+
+    // ── 6. Build lettre Message ──────────────────────────────────────────
+    let from_mailbox: Mailbox = match from_str.parse() {
+        Ok(m) => m,
+        Err(e) => return format!("(send_email: invalid 'from' address '{from_str}': {e})"),
+    };
+
+    let mut builder = Message::builder().from(from_mailbox).subject(subject);
+    for addr in &to_addresses {
+        let mb: Mailbox = match addr.parse() {
+            Ok(m) => m,
+            Err(e) => return format!("(send_email: invalid 'to' address '{addr}': {e})"),
+        };
+        builder = builder.to(mb);
+    }
+    let email = match builder.body(body.to_string()) {
+        Ok(m) => m,
+        Err(e) => return format!("(send_email: failed to build email message: {e})"),
+    };
+
+    // ── 7. Build SMTP transport and send ─────────────────────────────────
+    let creds = Credentials::new(username, password);
+    // Port 465 → implicit TLS (relay); everything else → STARTTLS.
+    let mailer_result: Result<AsyncSmtpTransport<Tokio1Executor>, _> = if port == 465 {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&host).map(|b| b.port(port).credentials(creds).build())
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
+            .map(|b| b.port(port).credentials(creds).build())
+    };
+    let mailer = match mailer_result {
+        Ok(m) => m,
+        Err(e) => return format!("(send_email: failed to build SMTP transport: {e})"),
+    };
+
+    match mailer.send(email).await {
+        Ok(_) => format!(
+            "郵件已成功寄出。收件人：{}；主旨：「{}」",
+            to_addresses.join(", "),
+            subject
+        ),
+        Err(e) => format!("(send_email: SMTP send failed: {e})"),
+    }
 }

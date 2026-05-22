@@ -44,3 +44,7 @@ regex = "1"
 # (bundled onnxruntime via `ort`); usage is lazy + fail-open so init
 # failure silently falls back to lexical retrieval and never blocks.
 fastembed = "4"
+# SMTP email sending for the send_email agent tool (vault_reveal provides credentials).
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport", "tokio1", "tokio1-native-tls", "builder", "hostname",
+] }
