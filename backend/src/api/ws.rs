@@ -367,6 +367,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             "context firewall applied"
         );
 
+        // Wire tool runtime for all single-agent modes so vault_reveal
+        // (and file-reading tools) are available. Debate modes fall through
+        // to the legacy path inside run_agent_stream regardless of tools.
+        let vault_cipher = state.session_keys.get_cipher(user_id).map(std::sync::Arc::new);
+        let tools = Some(crate::agents::orchestrator::ChatToolRuntime {
+            db: state.db.clone(),
+            project: project.clone(),
+            credentials: git_credentials.clone(),
+            user_id,
+            vault_cipher,
+        });
+
         let mut stream = run_agent_stream(
             &state.config,
             &secured_context.project_scope,
@@ -376,7 +388,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery, user_
             vault_summaries,
             &secured_context.user_message,
             agent_mode,
-            None,
+            tools,
         );
         let mut buffers: HashMap<String, String> = HashMap::new();
         let mut timing: HashMap<String, AgentCallTiming> = HashMap::new();
