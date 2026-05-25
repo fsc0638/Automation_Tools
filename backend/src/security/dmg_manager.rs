@@ -199,17 +199,60 @@ mod platform {
 
     /// Returns `true` if the mount-point directory is an active hdiutil mount.
     ///
-    /// Checks the kernel mount table via `/bin/mount` (fast, no hdiutil fork).
+    /// Checks the kernel mount table via `/sbin/mount` (fast, no hdiutil fork).
     fn is_mounted(data_root: &str, user_id: Uuid) -> bool {
         let mp = mount_point(data_root, user_id);
         let mp_str = mp.to_string_lossy();
-        Command::new("/bin/mount")
+        Command::new("/sbin/mount")
             .output()
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .contains(mp_str.as_ref())
             })
             .unwrap_or(false)
+    }
+
+    /// Detach every DMG currently mounted under `<data_root>/users/`.
+    /// Called once at backend startup so a crashed previous run can't leave
+    /// per-user encrypted volumes accessible to anyone who reaches the host.
+    /// Best-effort: per-image failures are logged but do not abort the sweep.
+    /// Returns the number of mounts detached.
+    pub fn sweep_stale_mounts(data_root: &str) -> Result<usize> {
+        let users_prefix = format!("{}/users/", data_root.trim_end_matches('/'));
+
+        let out = Command::new("/sbin/mount")
+            .output()
+            .context("sweep: /sbin/mount spawn")?;
+        if !out.status.success() {
+            return Err(anyhow!("sweep: /sbin/mount returned non-zero"));
+        }
+        let mount_output = String::from_utf8_lossy(&out.stdout);
+
+        let mut count = 0usize;
+        for line in mount_output.lines() {
+            // Format: `/dev/diskNsM on <mount-point> (apfs, ...)`
+            let Some(after_on) = line.split(" on ").nth(1) else { continue };
+            let Some(mp) = after_on.split(" (").next() else { continue };
+            if !mp.starts_with(&users_prefix) {
+                continue;
+            }
+            tracing::warn!(mount_point = %mp, "sweep: detaching stale DMG mount");
+            let status = Command::new("hdiutil")
+                .args(["detach", mp])
+                .status();
+            match status {
+                Ok(s) if s.success() => count += 1,
+                Ok(_) => {
+                    // Retry with -force; if that also fails, log and continue.
+                    let _ = Command::new("hdiutil")
+                        .args(["detach", "-force", mp])
+                        .status();
+                    count += 1;
+                }
+                Err(e) => tracing::warn!(mount_point = %mp, "sweep: detach spawn failed: {e}"),
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -233,6 +276,9 @@ mod platform {
     pub fn unmount(_data_root: &str, _user_id: Uuid) -> Result<()> {
         Ok(())
     }
+    pub fn sweep_stale_mounts(_data_root: &str) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 // ── Public surface (delegates to platform mod) ────────────────────────────────
@@ -252,6 +298,13 @@ pub fn mount(dmg_root: &str, data_root: &str, user_id: Uuid, raw_key: &[u8]) -> 
 /// Detach the image.  Best-effort.  Blocking.
 pub fn unmount(data_root: &str, user_id: Uuid) -> Result<()> {
     platform::unmount(data_root, user_id)
+}
+
+/// Detach every DMG currently mounted under `<data_root>/users/`.
+/// Intended to be called once at backend startup so a previous crashed
+/// run can't leave per-user encrypted volumes exposed.  Blocking.
+pub fn sweep_stale_mounts(data_root: &str) -> Result<usize> {
+    platform::sweep_stale_mounts(data_root)
 }
 
 /// Returns `true` if the sparse image file exists on disk.

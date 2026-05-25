@@ -64,6 +64,25 @@ async fn main() -> anyhow::Result<()> {
     let db = db::create_pool(&config.database_url).await?;
     db::run_migrations(&db).await?;
 
+    // Detach any per-user DMG left mounted by a previous crashed run. Logout
+    // is the only legitimate detach trigger, so a mount surviving across
+    // backend restarts means we never reached the logout handler — leaving
+    // the encrypted volume readable to anyone who can reach the host until
+    // the next time that user logs out. Sweeping at startup closes that gap.
+    {
+        let data_root = config.project_data_root.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::security::dmg_manager::sweep_stale_mounts(&data_root)
+        })
+        .await
+        {
+            Ok(Ok(n)) if n > 0 => tracing::warn!(detached = n, "startup sweep: detached stale DMG mounts"),
+            Ok(Ok(_)) => tracing::info!("startup sweep: no stale DMG mounts"),
+            Ok(Err(e)) => tracing::warn!("startup sweep: {e:#}"),
+            Err(e) => tracing::warn!("startup sweep task panic: {e}"),
+        }
+    }
+
     // Prometheus exporter — installs the global metrics recorder and
     // hands back a handle we use to render the /metrics endpoint.
     let prom_handle: PrometheusHandle = PrometheusBuilder::new()
