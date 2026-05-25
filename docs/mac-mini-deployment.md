@@ -6,6 +6,51 @@ The Mac Mini is the private AI Agent runtime host for Kway Dev. It runs the back
 
 The Mac Mini is a compute node, not the owner of user data. User data must remain scoped by user / workspace / project ACL, encrypted workspace boundaries, and active User KEK sessions.
 
+## Happy path — one-shot install
+
+For a fresh Mac Mini the recommended setup is:
+
+```bash
+git clone <repo>
+cd Automation_Tools
+./install.sh                 # interactive — pick host mode for DMG encryption
+```
+
+`install.sh` is idempotent and covers:
+
+- Pre-flight checks (macOS, Docker, Tailscale, Hermes, OpenClaw)
+- Generates `backend/.env` with fresh `JWT_SECRET` + `GIT_TOKEN_ENCRYPTION_KEY`
+- Creates `~/kway-project-data/users/` and `~/kway-dmg-store/`
+- Starts Postgres (Docker), builds and starts backend + web (host mode)
+- Installs launchd agents so backend + web auto-start at login
+
+Other invocations:
+
+```bash
+./install.sh --mode=host       # explicit host mode (Mac Mini production baseline)
+./install.sh --mode=docker     # container mode (DMG disabled — non-mac or simple dev)
+./install.sh --check           # pre-flight only, no changes
+./install.sh --no-launchd      # skip auto-start; use scripts/start-all.sh manually
+```
+
+Day-to-day helpers:
+
+```bash
+./scripts/start-all.sh         # start backend + web (when launchd not used)
+./scripts/start-all.sh --stop  # stop backend + web
+./scripts/install-launchd.sh status    # check auto-start agents
+./scripts/install-launchd.sh uninstall # remove auto-start
+```
+
+What `install.sh` does NOT do (you still install these yourself):
+
+- **Docker Desktop** — install from docker.com
+- **Tailscale** — `brew install --cask tailscale` and sign in to the tailnet
+- **Hermes Gateway** and **OpenClaw Gateway** — install per their own docs;
+  the installer only checks they're reachable
+
+The sections below remain authoritative for manual setup, troubleshooting, and the underlying topology.
+
 ## Recommended topology
 
 ```text

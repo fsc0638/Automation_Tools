@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kway Dev backend — launchd LaunchAgent.
+
+  Installed by scripts/install-launchd.sh, which expands @REPO_ROOT@ and
+  @USER_HOME@ before writing to ~/Library/LaunchAgents/.
+
+  Lifecycle:
+    - Starts at user login (RunAtLoad = true)
+    - Auto-restarts on crash (KeepAlive.SuccessfulExit = false)
+    - Logs to <repo>/logs/backend.{out,err}.log
+
+  This is a *LaunchAgent* (per-user), not a LaunchDaemon, because the
+  Mac Mini DMG mounting requires the user's filesystem context.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kway.dev.backend</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@REPO_ROOT@/scripts/launchd/run-backend.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@REPO_ROOT@/backend</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>@REPO_ROOT@/logs/backend.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@REPO_ROOT@/logs/backend.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:@USER_HOME@/.cargo/bin</string>
+        <key>HOME</key>
+        <string>@USER_HOME@</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

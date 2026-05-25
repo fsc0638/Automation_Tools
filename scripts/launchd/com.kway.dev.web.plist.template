@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kway Dev web frontend — launchd LaunchAgent.
+
+  Installed by scripts/install-launchd.sh, which expands @REPO_ROOT@ and
+  @USER_HOME@ before writing to ~/Library/LaunchAgents/.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kway.dev.web</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@REPO_ROOT@/scripts/launchd/run-web.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@REPO_ROOT@/web</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>@REPO_ROOT@/logs/web.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@REPO_ROOT@/logs/web.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>@USER_HOME@</string>
+        <key>NODE_ENV</key>
+        <string>production</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
