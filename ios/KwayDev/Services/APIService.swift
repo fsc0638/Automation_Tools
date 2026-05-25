@@ -99,28 +99,82 @@ class APIService {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    // MARK: - Auth
+    // MARK: - Auth (client-held KEK protocol, see backend mig 0049)
+    //
+    // The server never sees the plaintext password.  We derive
+    // auth_hash + user_kek locally via ClientCrypto.swift and send
+    // only the 32-byte outputs.
+
+    /// Public — used by both register and login flows to learn the
+    /// salt + Argon2 contract for an email. Unknown emails get a
+    /// deterministic fake salt so this endpoint cannot be used for
+    /// account enumeration.
+    func fetchKekParams(email: String) async throws -> KekParams {
+        try await request("/auth/kek-params?email=\(email.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? email)")
+    }
+
     func login(email: String, password: String) async throws -> AuthResponse {
+        let params = try await fetchKekParams(email: email)
+        let secrets = try deriveAuthAndKek(password: password, params: params)
         let res: AuthResponse = try await request("/auth/login", method: "POST",
-            body: LoginRequest(email: email, password: password))
+            body: LoginRequest(email: email, auth_hash: secrets.authHashB64, user_kek: secrets.userKekB64))
         setSession(access: res.accessToken, refresh: res.refreshToken)
+        await UserKekHolder.shared.remember(secrets.userKekBytes)
         return res
     }
 
     func register(email: String, password: String, displayName: String) async throws -> AuthResponse {
+        // Generate the salt locally — the server only stores it.
+        let saltB64 = randomKekSalt()
+        // Pull domains + Argon2 params; ignore the fake-salt the server
+        // returns for the (still-unknown) email.
+        let stockParams = try await fetchKekParams(email: email)
+        let params = KekParams(
+            kek_salt: saltB64,
+            argon2_m_cost: stockParams.argon2_m_cost,
+            argon2_t_cost: stockParams.argon2_t_cost,
+            argon2_p_cost: stockParams.argon2_p_cost,
+            argon2_output_len: stockParams.argon2_output_len,
+            kek_domain: stockParams.kek_domain,
+            auth_domain: stockParams.auth_domain
+        )
+        let secrets = try deriveAuthAndKek(password: password, params: params)
         let res: AuthResponse = try await request("/auth/register", method: "POST",
-            body: RegisterRequest(email: email, password: password, display_name: displayName))
+            body: RegisterRequest(
+                email: email,
+                display_name: displayName,
+                kek_salt: saltB64,
+                auth_hash: secrets.authHashB64,
+                user_kek: secrets.userKekB64
+            ))
         setSession(access: res.accessToken, refresh: res.refreshToken)
+        await UserKekHolder.shared.remember(secrets.userKekBytes)
         return res
     }
 
+    func changePassword(email: String, currentPassword: String, newPassword: String) async throws {
+        let params = try await fetchKekParams(email: email)
+        let cur = try deriveAuthAndKek(password: currentPassword, params: params)
+        let next = try deriveAuthAndKek(password: newPassword, params: params)
+        let body = ChangePasswordRequest(
+            current_auth_hash: cur.authHashB64,
+            new_auth_hash: next.authHashB64,
+            current_user_kek: cur.userKekB64,
+            new_user_kek: next.userKekB64,
+            new_kek_salt: nil
+        )
+        _ = try await request("/auth/change-password", method: "POST",
+                              body: body) as EmptyResponse
+        await UserKekHolder.shared.remember(next.userKekBytes)
+    }
+
     func logout() async {
-        // Best-effort server-side invalidation before nuking local state.
         if let rt = refreshToken {
             _ = try? await request("/auth/logout", method: "POST",
                 body: ["refresh_token": rt], retry: false) as EmptyResponse
         }
         clearSession()
+        await UserKekHolder.shared.forget()
     }
 
     // MARK: - Projects
@@ -166,8 +220,25 @@ struct ConversationWithMessages: Decodable {
     let messages: [Message]
 }
 
-struct LoginRequest: Encodable { let email: String; let password: String }
-struct RegisterRequest: Encodable { let email: String; let password: String; let display_name: String }
+struct LoginRequest: Encodable {
+    let email: String
+    let auth_hash: String
+    let user_kek: String
+}
+struct RegisterRequest: Encodable {
+    let email: String
+    let display_name: String
+    let kek_salt: String
+    let auth_hash: String
+    let user_kek: String
+}
+struct ChangePasswordRequest: Encodable {
+    let current_auth_hash: String
+    let new_auth_hash: String
+    let current_user_kek: String
+    let new_user_kek: String
+    let new_kek_salt: String?
+}
 struct ErrorResponse: Decodable { let error: String }
 /// Marker for endpoints that return 204 / no JSON body.
 struct EmptyResponse: Decodable {}

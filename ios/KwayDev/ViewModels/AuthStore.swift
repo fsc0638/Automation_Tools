@@ -27,6 +27,15 @@ class AuthStore: ObservableObject {
         isAuthenticated = true
     }
 
+    func changePassword(currentPassword: String, newPassword: String) async throws {
+        guard let email = user?.email else { throw APIError.unauthorized }
+        try await APIService.shared.changePassword(
+            email: email,
+            currentPassword: currentPassword,
+            newPassword: newPassword
+        )
+    }
+
     func logout() {
         Task { await APIService.shared.logout() }
         APIService.shared.clearSession()

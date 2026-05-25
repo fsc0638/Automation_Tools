@@ -37,16 +37,29 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand::RngCore;
 
-// ── Argon2id parameters for User KEK derivation ──────────────────────
-// 64 MiB memory, 3 iterations, 4 lanes → ~200 ms on modern hardware.
-// This runs exactly once per login — intentional slowness is the point.
-const ARGON2_M_COST: u32 = 65_536; // KiB (= 64 MiB)
-const ARGON2_T_COST: u32 = 3;
-const ARGON2_P_COST: u32 = 4;
+// ── Argon2id parameters for User KEK + auth_hash derivation ─────────
+// 64 MiB memory, 3 iterations, 4 lanes → ~200 ms on modern hardware
+// (≈ 500-1500 ms in browser WASM, acceptable for once-per-login).
+//
+// These constants are the contract between server and client. The
+// browser / iOS app reads them from `GET /auth/kek-params` and MUST
+// use exactly these values when deriving auth_hash and user_kek —
+// otherwise the resulting bytes won't match what the server stored.
+pub const ARGON2_M_COST: u32 = 65_536; // KiB (= 64 MiB)
+pub const ARGON2_T_COST: u32 = 3;
+pub const ARGON2_P_COST: u32 = 4;
+pub const ARGON2_OUTPUT_LEN: u32 = 32;
 
-// Domain separator keeps KEK derivation distinct from the password-hash
-// path in auth.rs so the two Argon2 outputs can never be confused.
-const KEK_DOMAIN: &[u8] = b"kway-kek-v1::";
+// Domain separators. Both derivations start from the same password but
+// prepend different ASCII labels, so auth_hash and user_kek are
+// cryptographically unrelated even though they share inputs.
+//
+// In the client-held KEK model (Option B, mig 0049) the server no longer
+// derives either value — these constants only serve as the published
+// contract returned by /auth/kek-params, plus the legacy server-side
+// derive_user_kek() path retained for offline tooling.
+pub const KEK_DOMAIN: &[u8] = b"kway-kek-v1::";
+pub const AUTH_DOMAIN: &[u8] = b"kway-auth-v1::";
 
 // ── Core primitives ───────────────────────────────────────────────────
 

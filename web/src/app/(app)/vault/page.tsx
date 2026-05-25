@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, KeyRound, Lock, Plus, Trash2 } from "lucide-react";
 import { auth as authApi, vault as vaultApi, type VaultSecret } from "@/lib/api";
+import { useAuthStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -43,6 +44,7 @@ const EMPTY_PW_FORM = {
 export default function VaultPage() {
   const pushToast = useToastStore((s) => s.pushToast);
   const t = useT();
+  const userEmail = useAuthStore((s) => s.user?.email ?? "");
 
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [loading, setLoading] = useState(true);
@@ -188,9 +190,14 @@ export default function VaultPage() {
       setPwError(t("vault.passwordMismatch"));
       return;
     }
+    if (!userEmail) {
+      setPwError(t("vault.sessionExpiredTitle"));
+      return;
+    }
     setChangingPw(true);
     try {
       await authApi.changePassword({
+        email: userEmail,
         current_password: pwForm.current_password,
         new_password: pwForm.new_password,
       });

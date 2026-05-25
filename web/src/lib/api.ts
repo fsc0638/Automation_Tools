@@ -88,29 +88,104 @@ async function request<T>(path: string, options: RequestInit = {}, retry = true)
   return res.json();
 }
 
-// Auth
+// Auth (client-held KEK protocol, see backend mig 0049).
+//
+// The browser MUST derive auth_hash + user_kek via clientCrypto.ts before
+// calling register/login/change-password — the server-facing API only
+// accepts the derived 32-byte values, never the plaintext password.
+
+import {
+  deriveAuthAndKek,
+  fetchKekParams,
+  forgetUserKek,
+  randomKekSalt,
+  rememberUserKek,
+  base64Decode,
+} from "./clientCrypto";
+
 export const auth = {
-  register: (data: { email: string; password: string; display_name: string }) =>
-    request<AuthResponse>("/auth/register", {
+  /** Register a new account. Generates a fresh kek_salt locally and
+   *  derives auth_hash + user_kek so the plaintext password never
+   *  leaves the device. */
+  async register(input: { email: string; password: string; display_name: string }): Promise<AuthResponse> {
+    const kek_salt = randomKekSalt();
+    // The /auth/kek-params endpoint is the source of truth for Argon2
+    // params + domain strings. Even for a new account we fetch it (gets
+    // the fake-salt for an unknown email, which we discard — we only
+    // need the params/domains).
+    const params = await fetchKekParams(input.email);
+    // Override the server-supplied (fake) salt with the one we just
+    // generated; everything else (Argon2 params, domains) stays as-is.
+    const paramsWithFreshSalt = { ...params, kek_salt };
+    const { authHash, userKek, userKekBytes } = await deriveAuthAndKek(
+      input.password,
+      paramsWithFreshSalt,
+    );
+    const res = await request<AuthResponse>("/auth/register", {
       method: "POST",
-      body: JSON.stringify(data),
-    }),
-  login: (data: { email: string; password: string }) =>
-    request<AuthResponse>("/auth/login", {
+      body: JSON.stringify({
+        email: input.email,
+        display_name: input.display_name,
+        kek_salt,
+        auth_hash: authHash,
+        user_kek: userKek,
+      }),
+    });
+    rememberUserKek(userKekBytes);
+    return res;
+  },
+
+  async login(input: { email: string; password: string }): Promise<AuthResponse> {
+    const params = await fetchKekParams(input.email);
+    const { authHash, userKek, userKekBytes } = await deriveAuthAndKek(
+      input.password,
+      params,
+    );
+    const res = await request<AuthResponse>("/auth/login", {
       method: "POST",
-      body: JSON.stringify(data),
-    }),
-  changePassword: (data: { current_password: string; new_password: string }) =>
-    request<void>("/auth/change-password", {
+      body: JSON.stringify({
+        email: input.email,
+        auth_hash: authHash,
+        user_kek: userKek,
+      }),
+    });
+    rememberUserKek(userKekBytes);
+    return res;
+  },
+
+  /** Change password. Caller supplies email so we can re-fetch
+   *  kek_params (in case salt rotates server-side). */
+  async changePassword(input: {
+    email: string;
+    current_password: string;
+    new_password: string;
+  }): Promise<void> {
+    const params = await fetchKekParams(input.email);
+    const cur = await deriveAuthAndKek(input.current_password, params);
+    const next = await deriveAuthAndKek(input.new_password, params);
+    await request<void>("/auth/change-password", {
       method: "POST",
-      body: JSON.stringify(data),
-    }),
+      body: JSON.stringify({
+        current_auth_hash: cur.authHash,
+        new_auth_hash: next.authHash,
+        current_user_kek: cur.userKek,
+        new_user_kek: next.userKek,
+      }),
+    });
+    rememberUserKek(next.userKekBytes);
+    // Zero our copy of the old KEK by overwriting with the new one;
+    // cur.userKekBytes goes out of scope and will be GC'd.
+    cur.userKekBytes.fill(0);
+    // Also clear the derived auth hashes (best-effort — strings can't
+    // be reliably zeroed in JS, but no further code holds them).
+    void base64Decode(cur.authHash).fill(0);
+  },
+
   logout: () => {
     const refreshToken = getRefreshToken();
     clearSession();
+    forgetUserKek();
     if (!refreshToken) return Promise.resolve();
-    // Best-effort server-side invalidation. Even if this fails (network
-    // error, etc.) the local session is already gone.
     return fetch(`${API_BASE}/auth/logout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

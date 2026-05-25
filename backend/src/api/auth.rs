@@ -1,11 +1,12 @@
 use axum::{
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::header::AUTHORIZATION,
     middleware::Next,
     response::Response,
-    routing::post,
+    routing::{get, post},
     Extension, Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,8 @@ use crate::{
     error::{AppError, AppResult},
     security::{
         dmg_manager,
+        vault_crypto::{ARGON2_M_COST, ARGON2_OUTPUT_LEN, ARGON2_P_COST, ARGON2_T_COST,
+                       AUTH_DOMAIN, KEK_DOMAIN},
         vault_service::VaultService,
     },
 };
@@ -32,17 +35,32 @@ pub struct Claims {
     pub iat: i64,
 }
 
+/// Register payload (client-held KEK protocol, mig 0049).
+///
+/// All three of `kek_salt`, `auth_hash`, `user_kek` are derived in the
+/// browser / iOS app from the plaintext password — the password itself
+/// never leaves the device. Each field is base64 of exactly 32 random
+/// or Argon2id-derived bytes.
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub email: String,
-    pub password: String,
     pub display_name: String,
+    pub kek_salt: String,
+    pub auth_hash: String,
+    pub user_kek: String,
 }
 
+/// Login payload (client-held KEK protocol).
+///
+/// `auth_hash` proves identity (server compares its server-side
+/// Argon2 hash against `users.password_hash`).  `user_kek` is held in
+/// the in-RAM session store and used to wrap/unwrap vault DEKs for
+/// the session duration.
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub email: String,
-    pub password: String,
+    pub auth_hash: String,
+    pub user_kek: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,10 +95,35 @@ pub struct UserInfo {
     pub display_name: String,
 }
 
+/// Public response of `GET /auth/kek-params` — tells the client
+/// exactly how to derive `auth_hash` and `user_kek` so they match
+/// what the server expects.
+#[derive(Debug, Serialize)]
+pub struct KekParamsResponse {
+    pub kek_salt: String,
+    pub argon2_m_cost: u32,
+    pub argon2_t_cost: u32,
+    pub argon2_p_cost: u32,
+    pub argon2_output_len: u32,
+    pub kek_domain: String,
+    pub auth_domain: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KekParamsQuery {
+    pub email: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ChangePasswordRequest {
-    current_password: String,
-    new_password: String,
+    current_auth_hash: String,
+    new_auth_hash: String,
+    current_user_kek: String,
+    new_user_kek: String,
+    /// Optional: rotate the per-user kek_salt at the same time. Normally
+    /// omitted — keep the existing salt so derived bytes stay stable
+    /// across devices.
+    new_kek_salt: Option<String>,
 }
 
 // ── DMG helpers ───────────────────────────────────────────────────────────────
@@ -175,6 +218,7 @@ async fn dmg_on_logout(state: &AppState, user_id: Uuid) {
 
 pub fn public_routes() -> Router<AppState> {
     Router::new()
+        .route("/auth/kek-params", get(kek_params))
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/refresh", post(refresh))
@@ -238,58 +282,118 @@ async fn issue_refresh_token(state: &AppState, user_id: Uuid) -> AppResult<(Stri
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+/// Normalise an email for stable indexing into anti-enumeration HMAC.
+fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+/// Deterministic fake kek_salt for unknown emails.
+///
+/// Returns `HMAC-SHA256(JWT_SECRET, "kek-salt::" || normalize(email))[..32]`.
+/// A request for a non-existent account is indistinguishable from a real one:
+/// same shape, same Argon2 params, same-looking salt. Without `JWT_SECRET`
+/// an attacker can't precompute these, so probing the endpoint reveals no
+/// information about which emails are registered.
+fn fake_kek_salt(jwt_secret: &str, email: &str) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(jwt_secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(b"kek-salt::");
+    mac.update(normalize_email(email).as_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Decode a base64-encoded 32-byte value (kek_salt / auth_hash / user_kek).
+fn decode_32(label: &str, b64: &str) -> AppResult<[u8; 32]> {
+    let bytes = B64
+        .decode(b64.trim())
+        .map_err(|e| AppError::BadRequest(format!("{label}: invalid base64: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| AppError::BadRequest(format!("{label}: expected 32 bytes, got {}", v.len())))
+}
+
+/// Public endpoint: returns the kek_salt + Argon2 contract a client
+/// needs to derive `auth_hash` and `user_kek` before calling /auth/login.
+///
+/// To defeat email enumeration, unknown emails get a deterministic fake
+/// salt derived from JWT_SECRET — same shape, indistinguishable from a
+/// real reply. The client always proceeds to derive + attempt login;
+/// only `/auth/login` reveals whether the account actually exists.
+async fn kek_params(
+    State(state): State<AppState>,
+    Query(q): Query<KekParamsQuery>,
+) -> AppResult<Json<KekParamsResponse>> {
+    if q.email.trim().is_empty() {
+        return Err(AppError::BadRequest("email is required".into()));
+    }
+
+    let normalized = normalize_email(&q.email);
+    let row: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT kek_salt FROM users WHERE LOWER(email) = $1")
+            .bind(&normalized)
+            .fetch_optional(&state.db)
+            .await?;
+
+    let kek_salt = row
+        .map(|(b,)| b)
+        .unwrap_or_else(|| fake_kek_salt(&state.config.jwt_secret, &q.email));
+
+    Ok(Json(KekParamsResponse {
+        kek_salt: B64.encode(&kek_salt),
+        argon2_m_cost: ARGON2_M_COST,
+        argon2_t_cost: ARGON2_T_COST,
+        argon2_p_cost: ARGON2_P_COST,
+        argon2_output_len: ARGON2_OUTPUT_LEN,
+        kek_domain: std::str::from_utf8(KEK_DOMAIN).unwrap().to_string(),
+        auth_domain: std::str::from_utf8(AUTH_DOMAIN).unwrap().to_string(),
+    }))
+}
+
 async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> AppResult<Json<AuthResponse>> {
-    if req.email.is_empty() || req.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "Email required and password must be at least 8 characters".into(),
-        ));
+    if req.email.trim().is_empty() {
+        return Err(AppError::BadRequest("email is required".into()));
     }
 
-    let existing: Option<User> =
-        sqlx::query_as("SELECT * FROM users WHERE email = $1")
-            .bind(&req.email)
-            .fetch_optional(&state.db)
-            .await?;
+    let kek_salt = decode_32("kek_salt", &req.kek_salt)?;
+    let auth_hash = decode_32("auth_hash", &req.auth_hash)?;
+    let user_kek = decode_32("user_kek", &req.user_kek)?;
 
+    let existing: Option<User> = sqlx::query_as("SELECT * FROM users WHERE email = $1")
+        .bind(&req.email)
+        .fetch_optional(&state.db)
+        .await?;
     if existing.is_some() {
         return Err(AppError::BadRequest("Email already registered".into()));
     }
 
-    // Hash password in a blocking thread (Argon2 is CPU-intensive).
-    let password = req.password.clone();
-    let password_hash = tokio::task::spawn_blocking(move || hash_password(&password))
+    // Server-side Argon2 over the client-derived auth_hash. A DB leak still
+    // costs the attacker an offline brute-force over the *32-byte auth_hash*
+    // space (effectively un-breakable), not over passwords.
+    let auth_hash_b64 = B64.encode(auth_hash);
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&auth_hash_b64))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
 
-    // INSERT; kek_salt is generated by Postgres (gen_random_bytes in migration 0042).
     let user: User = sqlx::query_as(
-        "INSERT INTO users (email, password_hash, display_name)
-         VALUES ($1, $2, $3)
+        "INSERT INTO users (email, password_hash, display_name, kek_salt)
+         VALUES ($1, $2, $3, $4)
          RETURNING *",
     )
     .bind(&req.email)
     .bind(&password_hash)
     .bind(&req.display_name)
+    .bind(&kek_salt[..])
     .fetch_one(&state.db)
     .await?;
 
-    // Derive the User KEK from the plaintext password + the DB-generated salt.
-    // Do this in spawn_blocking: Argon2id at 64 MiB takes ~200 ms.
-    let pw2 = req.password.clone();
-    let salt = user.kek_salt.clone();
-    let kek = tokio::task::spawn_blocking(move || {
-        crate::security::vault_crypto::derive_user_kek(&pw2, &salt)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("KEK derive: {}", e)))
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
-
-    state.session_keys.insert(user.id, kek);
+    state.session_keys.insert(user.id, user_kek);
     // Provision and mount the per-user encrypted disk image (macOS, best-effort).
-    dmg_on_login(&state, user.id, kek).await;
+    dmg_on_login(&state, user.id, user_kek).await;
 
     let access =
         generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
@@ -312,41 +416,44 @@ async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> AppResult<Json<AuthResponse>> {
+    let auth_hash = decode_32("auth_hash", &req.auth_hash)?;
+    let user_kek = decode_32("user_kek", &req.user_kek)?;
+
     let user: Option<User> = sqlx::query_as("SELECT * FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_optional(&state.db)
         .await?;
 
-    let user = user.ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
-
-    // Batch verify_password + derive_user_kek in a single blocking thread:
-    // both are Argon2 operations (~200 ms each); batching avoids two thread-pool
-    // round-trips and makes the total login latency predictable (~400 ms).
-    let password = req.password.clone();
-    let pw_hash = user.password_hash.clone();
-    let kek_salt = user.kek_salt.clone();
-
-    let (verified, maybe_kek) = tokio::task::spawn_blocking(move || {
-        let ok = verify_password(&password, &pw_hash)?;
-        if !ok {
-            return Ok::<(bool, Option<[u8; 32]>), AppError>((false, None));
+    // Always run a verify_password call (even on missing user) to keep the
+    // timing profile constant — otherwise the response time leaks whether
+    // the email exists.
+    let (verified, user) = match user {
+        Some(u) => {
+            let auth_hash_b64 = B64.encode(auth_hash);
+            let pw_hash = u.password_hash.clone();
+            let ok = tokio::task::spawn_blocking(move || verify_password(&auth_hash_b64, &pw_hash))
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
+            (ok, Some(u))
         }
-        let kek = crate::security::vault_crypto::derive_user_kek(&password, &kek_salt)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("KEK derive: {}", e)))?;
-        Ok((true, Some(kek)))
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
+        None => {
+            // Dummy verify against a throw-away hash so timing matches the
+            // success path. The result is ignored.
+            let dummy_hash = hash_password("dummy-input-for-timing")?;
+            let _ = tokio::task::spawn_blocking(move || verify_password("dummy-input", &dummy_hash))
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
+            (false, None)
+        }
+    };
 
     if !verified {
         return Err(AppError::Unauthorized("Invalid credentials".into()));
     }
+    let user = user.expect("verified=true implies user exists");
 
-    if let Some(kek) = maybe_kek {
-        state.session_keys.insert(user.id, kek);
-        // Mount the per-user encrypted disk image (macOS, best-effort).
-        dmg_on_login(&state, user.id, kek).await;
-    }
+    state.session_keys.insert(user.id, user_kek);
+    dmg_on_login(&state, user.id, user_kek).await;
 
     let access =
         generate_token(&user, &state.config.jwt_secret, state.config.jwt_expiry_hours)?;
@@ -434,21 +541,35 @@ async fn logout(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// Change password: verify old → derive old KEK → derive new KEK → re-wrap all
-/// user-keyed DEKs in one transaction → update password_hash → refresh session.
+/// Change password (client-held KEK protocol).
 ///
-/// The System KEK wrappings are untouched: they always point to the same DEK
-/// bytes regardless of what user password wraps the user's copy.
+/// The client derives both old and new auth_hash + user_kek from the
+/// respective plaintext passwords, then sends all four to the server.
+/// The server:
+///   1. verifies current_auth_hash against `users.password_hash`,
+///   2. unwraps every `user:<id>` DEK with current_user_kek, re-wraps
+///      with new_user_kek,
+///   3. stores Argon2(new_auth_hash) as the new password_hash,
+///   4. (optionally) rotates kek_salt,
+///   5. swaps the in-RAM session KEK.
+///
+/// All DB writes happen in one transaction. The System KEK wrappings
+/// are untouched — same DEK bytes regardless of which user KEK wraps
+/// the user's copy.
 async fn change_password(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> AppResult<axum::http::StatusCode> {
-    if req.new_password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "New password must be at least 8 characters".into(),
-        ));
-    }
+    let current_auth_hash = decode_32("current_auth_hash", &req.current_auth_hash)?;
+    let new_auth_hash = decode_32("new_auth_hash", &req.new_auth_hash)?;
+    let current_user_kek = decode_32("current_user_kek", &req.current_user_kek)?;
+    let new_user_kek = decode_32("new_user_kek", &req.new_user_kek)?;
+    let new_kek_salt = req
+        .new_kek_salt
+        .as_deref()
+        .map(|s| decode_32("new_kek_salt", s))
+        .transpose()?;
 
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(auth_user.id)
@@ -456,58 +577,50 @@ async fn change_password(
         .await?
         .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
 
-    // All three Argon2 operations (verify + 2× derive) batched into one
-    // blocking thread to minimise async thread-pool overhead.
-    let cur_pw = req.current_password.clone();
-    let new_pw = req.new_password.clone();
+    // Verify current credentials + hash the new auth_hash in one blocking call.
+    let cur_b64 = B64.encode(current_auth_hash);
+    let new_b64 = B64.encode(new_auth_hash);
     let pw_hash = user.password_hash.clone();
-    let kek_salt = user.kek_salt.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        let ok = verify_password(&cur_pw, &pw_hash)?;
+        let ok = verify_password(&cur_b64, &pw_hash)?;
         if !ok {
-            return Ok::<Option<([u8; 32], [u8; 32], String)>, AppError>(None);
+            return Ok::<Option<String>, AppError>(None);
         }
-
-        let old_kek = crate::security::vault_crypto::derive_user_kek(&cur_pw, &kek_salt)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("old KEK derive: {}", e)))?;
-        let new_kek = crate::security::vault_crypto::derive_user_kek(&new_pw, &kek_salt)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("new KEK derive: {}", e)))?;
-        let new_hash = hash_password(&new_pw)?;
-
-        Ok(Some((old_kek, new_kek, new_hash)))
+        Ok(Some(hash_password(&new_b64)?))
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {}", e)))??;
 
-    let (old_kek, new_kek, new_hash) = result
+    let new_hash = result
         .ok_or_else(|| AppError::Unauthorized("Current password is incorrect".into()))?;
 
-    // Re-wrap DEKs and update password_hash in a single transaction.
     re_wrap_deks_and_update_password(
         &state.db,
         auth_user.id,
-        &old_kek,
-        &new_kek,
+        &current_user_kek,
+        &new_user_kek,
         &new_hash,
+        new_kek_salt.as_ref(),
     )
     .await?;
 
-    // Replace the in-RAM User KEK with the new one.
-    state.session_keys.insert(auth_user.id, new_kek);
+    state.session_keys.insert(auth_user.id, new_user_kek);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Re-wrap every `vault_key_wrappings` row keyed by `user:{id}` from the old
-/// User KEK to the new one, then update `users.password_hash` — all in one
-/// atomic transaction so a crash mid-flight leaves the DB consistent.
+/// User KEK to the new one, update `users.password_hash` (and optionally
+/// `kek_salt`) — all in one atomic transaction so a crash mid-flight leaves
+/// the DB consistent.
 async fn re_wrap_deks_and_update_password(
     db: &sqlx::PgPool,
     user_id: Uuid,
     old_kek: &[u8; 32],
     new_kek: &[u8; 32],
     new_hash: &str,
+    new_kek_salt: Option<&[u8; 32]>,
 ) -> AppResult<()> {
     use crate::crypto::TokenCipher;
     use crate::security::vault_crypto::{unwrap_dek, wrap_dek};
@@ -518,7 +631,6 @@ async fn re_wrap_deks_and_update_password(
 
     let mut tx = db.begin().await?;
 
-    // Lock all matching rows for the duration of the transaction.
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT object_id, wrapped_dek
          FROM vault_key_wrappings
@@ -531,7 +643,9 @@ async fn re_wrap_deks_and_update_password(
 
     for (object_id, wrapped_dek) in rows {
         let dek = unwrap_dek(&old_cipher, &wrapped_dek)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap unwrap object_id={}: {}", object_id, e)))?;
+            .map_err(|e| AppError::Unauthorized(format!(
+                "re-wrap unwrap object_id={object_id}: current_user_kek does not match stored wrapping ({e})"
+            )))?;
         let new_wrapped = wrap_dek(&new_cipher, &dek)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("re-wrap wrap object_id={}: {}", object_id, e)))?;
 
@@ -547,12 +661,19 @@ async fn re_wrap_deks_and_update_password(
         .await?;
     }
 
-    // Update the password hash atomically with the DEK re-wrapping.
     sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
         .bind(new_hash)
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+
+    if let Some(salt) = new_kek_salt {
+        sqlx::query("UPDATE users SET kek_salt = $1 WHERE id = $2")
+            .bind(&salt[..])
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
 
     tx.commit().await?;
     Ok(())

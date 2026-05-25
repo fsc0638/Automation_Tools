@@ -2,6 +2,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { UserInfo } from "./api";
+import { forgetUserKek } from "./clientCrypto";
 
 interface AuthStore {
   token: string | null;
@@ -35,6 +36,10 @@ export const useAuthStore = create<AuthStore>()(
       logout: () => {
         localStorage.removeItem("kway_token");
         localStorage.removeItem("kway_refresh_token");
+        // Drop the in-memory User KEK as well — relevant for the idle-
+        // timeout path in (app)/layout.tsx which calls store.logout()
+        // directly without going through auth.logout().
+        forgetUserKek();
         set({ token: null, user: null, refreshToken: null });
       },
     }),
