@@ -31,3 +31,4 @@ backend/.fastembed_cache/
 
 # Logs
 backend/backend.log
+logs/
