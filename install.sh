@@ -138,7 +138,7 @@ else
         sed -i '' "s|^PROJECT_DATA_ROOT=.*|PROJECT_DATA_ROOT=${DEFAULT_PROJECT_DATA_ROOT}|" "$BACKEND_ENV"
         sed -i '' "s|^DMG_ROOT=.*|DMG_ROOT=${DEFAULT_DMG_ROOT}|" "$BACKEND_ENV"
         sed -i '' "s|^DMG_SIZE_MB=.*|DMG_SIZE_MB=${DEFAULT_DMG_SIZE_MB}|" "$BACKEND_ENV"
-        sed -i '' "s|^SERVER_HOST=.*|SERVER_HOST=127.0.0.1|" "$BACKEND_ENV"
+        sed -i '' "s|^SERVER_HOST=.*|SERVER_HOST=auto-tailscale|" "$BACKEND_ENV"
     fi
     ok "generated $BACKEND_ENV with fresh JWT_SECRET + GIT_TOKEN_ENCRYPTION_KEY"
     warn "BACK THIS FILE UP — losing these secrets bricks all existing vault data."
