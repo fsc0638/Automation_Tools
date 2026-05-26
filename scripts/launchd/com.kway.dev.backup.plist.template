@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kway Dev nightly backup — launchd LaunchAgent.
+
+  Installed by scripts/install-launchd.sh, which expands @REPO_ROOT@ and
+  @USER_HOME@ before writing to ~/Library/LaunchAgents/.
+
+  Lifecycle:
+    - Fires every day at 03:00 local time (StartCalendarInterval).
+    - One-shot per fire; not kept alive.
+    - If the Mac was asleep/off at 03:00, fires on next wake (default
+      launchd behaviour for StartCalendarInterval).
+    - Logs to <repo>/logs/backup.{out,err}.log AND inside each daily
+      backup dir as backup.log (audit trail).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kway.dev.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@REPO_ROOT@/scripts/backup.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@REPO_ROOT@</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>@REPO_ROOT@/logs/backup.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@REPO_ROOT@/logs/backup.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>@USER_HOME@</string>
+    </dict>
+
+    <!-- Lower priority so the backup doesn't elbow user-facing work. -->
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

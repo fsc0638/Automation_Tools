@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LA_DIR="$HOME/Library/LaunchAgents"
-LABELS=(com.kway.dev.backend com.kway.dev.web)
+LABELS=(com.kway.dev.backend com.kway.dev.web com.kway.dev.backup)
 
 mode="${1:-install}"
 
@@ -29,18 +29,39 @@ case "$mode" in
     install)
         mkdir -p "$LA_DIR" "$REPO_ROOT/logs"
         chmod +x "$REPO_ROOT/scripts/launchd/"*.sh
+        # Two-phase install so one label's transient bootstrap error
+        # (commonly "Input/output error: 5" when launchd hasn't yet
+        # reaped the previous instance) doesn't abort the rest.
         for label in "${LABELS[@]}"; do
             render_plist "$label"
-            # `launchctl bootstrap` is the modern (macOS 10.10+) replacement
-            # for `launchctl load`.  Unload first so re-runs pick up edits.
+        done
+        # Unload everything first, then sleep to let launchd settle.
+        for label in "${LABELS[@]}"; do
             launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-            launchctl bootstrap "gui/$(id -u)" "$LA_DIR/${label}.plist"
-            launchctl enable "gui/$(id -u)/$label"
-            echo "  loaded $label"
+        done
+        sleep 2
+        for label in "${LABELS[@]}"; do
+            # `launchctl bootstrap` is the modern (macOS 10.10+) replacement
+            # for `launchctl load`.  Allow each one to fail independently
+            # (we report the overall result via launchctl print below).
+            if launchctl bootstrap "gui/$(id -u)" "$LA_DIR/${label}.plist" 2>/dev/null; then
+                launchctl enable "gui/$(id -u)/$label" 2>/dev/null || true
+                echo "  loaded $label"
+            else
+                echo "  WARNING: $label bootstrap failed — retrying once after sleep"
+                sleep 3
+                if launchctl bootstrap "gui/$(id -u)" "$LA_DIR/${label}.plist"; then
+                    launchctl enable "gui/$(id -u)/$label" 2>/dev/null || true
+                    echo "  loaded $label (after retry)"
+                else
+                    echo "  ERROR: $label still failed; check with: $0 status"
+                fi
+            fi
         done
         echo
         echo "  Agents installed.  They will run now and at each login."
-        echo "  Logs:   $REPO_ROOT/logs/{backend,web}.{out,err}.log"
+        echo "  Logs:   $REPO_ROOT/logs/{backend,web,backup}.{out,err}.log"
+        echo "  Backup: nightly at 03:00 → ~/kway-backups/YYYY-MM-DD/"
         echo "  Status: $0 status"
         ;;
     uninstall)
