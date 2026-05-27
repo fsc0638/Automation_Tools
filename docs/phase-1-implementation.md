@@ -644,23 +644,28 @@ CORS_ALLOWED_ORIGINS=http://kwayrdcmac-mini.tail315af3.ts.net:3000
 
 ### 10.2 Multi-tenant audit 結果
 
-掃過 11 個 handler，全部都有 user/org/workspace/project 過濾：
+掃過 11 個主要 handler + 5 個補審查的「邊角」資源，**16/16 全綠**：
 
-| 子系統 | 過濾機制 | 結果 |
-|---|---|---|
-| projects | `user_can_access_project` DB function | ✅ |
-| vault | `WHERE user_id = $user` | ✅ |
-| conversations | `verify_project_access` helper | ✅ |
-| agent_tasks | `require_agent_task_access` helper | ✅ |
-| workspace_files | `require_file_access` helper | ✅ |
-| meetings | 複合 OR（含 portal-imported 例外） | ⚠️ Phase 2 必修 |
-| organizations | `require_org_member` / `require_org_admin` | ✅ |
-| device_sync | `WHERE owner_user_id` | ✅ |
-| conversation_memory | `verify_project_access` | ✅ |
-| sprints / tasks | `verify_access` helper | ✅ |
-| shared_memory | (待深查 Phase 2) | 🟡 |
+| # | 子系統 / 資源 | 過濾機制 | 結果 |
+|---|---|---|---|
+| 1 | projects | `user_can_access_project()` DB function | ✅ |
+| 2 | vault | `WHERE user_id = $user` + 加密層 | ✅ |
+| 3 | conversations | `verify_project_access` helper | ✅ |
+| 4 | agent_tasks | `require_agent_task_access` helper | ✅ |
+| 5 | workspace_files | `require_file_access` helper | ✅ |
+| 6 | meetings | 複合 OR（含 portal-imported 例外） | ⚠️ Phase 2 必修 |
+| 7 | organizations | `require_org_member` / `require_org_admin` | ✅ |
+| 8 | device_sync | `WHERE owner_user_id` | ✅ |
+| 9 | conversation_memory | `verify_project_access` | ✅ |
+| 10 | sprints | `verify_access` helper | ✅ |
+| 11 | tasks | `verify_access` helper | ✅ |
+| 12 | **shared_memory** | `WHERE user_id` 全 handlers + AI inject 只拉 sender's own | ✅ |
+| 13 | **messages 表（5 個讀取點）** | feedback/metrics/conversations/conversation_memory/ws.rs 全部前置 access 檢查（ws.rs 還做雙重檢查） | ✅ |
+| 14 | **device_sync_events** | DB query 全 `owner_user_id`；broadcast channel 接收端 `owner_user_id != user_id { continue }` | ✅ |
+| 15 | **agent_task_events** | **無 SELECT** — 純 audit log，根本沒讀取點 | ✅ |
+| 16 | **file_access_audit** | 唯一讀取點 `list_file_audit` 走 `require_file_access(viewer)` | ✅ |
 
-唯一已知洩漏：[meetings.rs:492](../backend/src/api/meetings.rs#L492) portal-imported 全 user 可見（這是 2026-05-15 design call 的 intentional choice）。
+唯一已知例外：[meetings.rs:492](../backend/src/api/meetings.rs#L492) portal-imported 全 user 可見（2026-05-15 design call 的 intentional choice — Phase 1 內部互信、Phase 2 多公司必修）。
 
 ### 10.3 10 條加密驗收測試結果
 

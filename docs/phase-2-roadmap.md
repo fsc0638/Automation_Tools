@@ -323,14 +323,19 @@ OR m.external_id IS NOT NULL  -- portal-imported visible to ALL users
 
 Phase 1 OK（一個 Kway portal），Phase 2 NOT OK（多客戶各自 portal）。
 
-### 5.2 Audit 還沒查的（要補）
+### 5.2 Audit 補查結果（2026-05-26 完成）
 
-從 Phase 1 audit 留下的 TODO：
-- [ ] `shared_memory` — cross-org decision 是否會混
-- [ ] `messages.user_id` — AI 對話內容是否會洩漏給同 org 別人
-- [ ] `file_access_audit` — 自己沒 tenant 欄位
-- [ ] `device_sync_events` — iOS 同步是否會撈到別 org event
-- [ ] `agent_task_events` — agent 拿到的 context 是否限定 org
+原本 Phase 1 留下的 5 個未深查項目，全部已 audit 通過：
+
+- [x] `shared_memory` — 全 4 handlers `WHERE user_id`、AI injection 也只拉 sender's own ✅
+- [x] `messages` — 5 個讀取點全部有 access 檢查（含 ws.rs 雙重檢查）✅
+- [x] `file_access_audit` — 唯一讀取點走 `require_file_access(viewer)` ✅
+- [x] `device_sync_events` — DB query + broadcast 接收端雙重過濾 ✅
+- [x] `agent_task_events` — 純 INSERT 表，無 SELECT path，無洩漏可能 ✅
+
+詳見 [phase-1-implementation.md §10.2](./phase-1-implementation.md#102-multi-tenant-audit-結果)。
+
+**剩下唯一待修**：meetings.rs:492 portal-imported 全 user 可見（見 5.1）。
 
 ### 5.3 修法
 
